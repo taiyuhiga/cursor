@@ -58,6 +58,12 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const [currentWorkspaces, setCurrentWorkspaces] = useState(workspaces);
   const [activeWorkspace, setActiveWorkspace] = useState(currentWorkspace);
 
+  // Resizable panel widths
+  const [leftPanelWidth, setLeftPanelWidth] = useState(256);
+  const [rightPanelWidth, setRightPanelWidth] = useState(320);
+  const [isResizingLeft, setIsResizingLeft] = useState(false);
+  const [isResizingRight, setIsResizingRight] = useState(false);
+
   const aiPanelRef = useRef<AiPanelHandle>(null);
   const supabase = createClient();
 
@@ -314,6 +320,39 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     return data?.text || "";
   }, [supabase]);
 
+  // Panel resize handlers
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (isResizingLeft) {
+        const newWidth = e.clientX - 48; // 48px is ActivityBar width
+        setLeftPanelWidth(Math.max(180, Math.min(500, newWidth)));
+      }
+      if (isResizingRight) {
+        const newWidth = window.innerWidth - e.clientX;
+        setRightPanelWidth(Math.max(250, Math.min(600, newWidth)));
+      }
+    };
+
+    const handleMouseUp = () => {
+      setIsResizingLeft(false);
+      setIsResizingRight(false);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+
+    if (isResizingLeft || isResizingRight) {
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+      document.addEventListener("mousemove", handleMouseMove);
+      document.addEventListener("mouseup", handleMouseUp);
+    }
+
+    return () => {
+      document.removeEventListener("mousemove", handleMouseMove);
+      document.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, [isResizingLeft, isResizingRight]);
+
   const tabs = openTabs
     .map((id) => {
       const node = nodes.find((n) => n.id === id);
@@ -405,7 +444,10 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
 
       <ActivityBar activeActivity={activeActivity} onSelect={setActiveActivity} />
 
-      <aside className="w-64 bg-zinc-50 border-r border-zinc-200 flex flex-col flex-shrink-0">
+      <aside 
+        className="bg-zinc-50 border-r border-zinc-200 flex flex-col flex-shrink-0"
+        style={{ width: leftPanelWidth }}
+      >
         {/* ワークスペース切り替え */}
         <div className="p-2 border-b border-zinc-200">
           <WorkspaceSwitcher
@@ -418,6 +460,14 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         </div>
         {renderSidebarContent()}
       </aside>
+
+      {/* Left resize handle */}
+      <div
+        className="w-1 bg-transparent hover:bg-blue-500 cursor-col-resize transition-colors flex-shrink-0 group"
+        onMouseDown={() => setIsResizingLeft(true)}
+      >
+        <div className="w-full h-full group-hover:bg-blue-500" />
+      </div>
 
       {/* 新規ワークスペース作成ダイアログ */}
       {showCreateWorkspace && (
@@ -462,7 +512,18 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         </div>
       </main>
 
-      <aside className="w-80 border-l border-zinc-200 flex-shrink-0 bg-zinc-50">
+      {/* Right resize handle */}
+      <div
+        className="w-1 bg-transparent hover:bg-blue-500 cursor-col-resize transition-colors flex-shrink-0 group"
+        onMouseDown={() => setIsResizingRight(true)}
+      >
+        <div className="w-full h-full group-hover:bg-blue-500" />
+      </div>
+
+      <aside 
+        className="border-l border-zinc-200 flex-shrink-0 bg-zinc-50"
+        style={{ width: rightPanelWidth }}
+      >
         <AiPanel
           ref={aiPanelRef}
           currentFileText={fileContent}
