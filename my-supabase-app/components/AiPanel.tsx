@@ -14,7 +14,7 @@ type Props = {
   onAppend: (text: string) => void;
   onRequestDiff: (newCode: string) => void;
   onReplace?: (text: string) => void;
-  onFileCreated?: () => void; // 追加
+  onFileCreated?: () => void;
 };
 
 export type AiPanelHandle = {
@@ -89,9 +89,16 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ currentFileText, onAp
           },
         ]);
         
-        // AIが「作成しました」系の発言をした場合、念のため更新をトリガーする
-        // （本来はAPIレスポンスにメタデータを含めるのがベストだが、今は簡易的に）
-        if (data.content.includes("作成しました") || data.content.includes("created")) {
+        // ファイル操作が行われた可能性があるキーワードが含まれていればリフレッシュ
+        const lowerContent = data.content.toLowerCase();
+        if (
+          lowerContent.includes("created") || 
+          lowerContent.includes("updated") || 
+          lowerContent.includes("deleted") ||
+          lowerContent.includes("作成") ||
+          lowerContent.includes("更新") ||
+          lowerContent.includes("削除")
+        ) {
           onFileCreated?.();
         }
       }
@@ -131,15 +138,15 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ currentFileText, onAp
   }));
 
   return (
-    <div className="flex flex-col h-full bg-zinc-900 text-zinc-300">
+    <div className="flex flex-col h-full bg-zinc-50 text-zinc-700">
       {/* ヘッダー */}
-      <div className="flex items-center justify-between p-3 border-b border-zinc-800">
+      <div className="flex items-center justify-between p-3 border-b border-zinc-200">
         <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
           AI Chat
         </h2>
         <button
           onClick={() => setMessages([])}
-          className="text-xs text-zinc-500 hover:text-zinc-300"
+          className="text-xs text-zinc-500 hover:text-zinc-700"
           title="Clear Chat"
         >
           Clear
@@ -149,7 +156,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ currentFileText, onAp
       {/* チャット履歴 */}
       <div className="flex-1 overflow-y-auto p-4 space-y-6">
         {messages.length === 0 && (
-          <div className="text-center text-zinc-500 mt-10 text-sm">
+          <div className="text-center text-zinc-400 mt-10 text-sm">
             <p>AI Assistant</p>
             <p className="text-xs mt-2 opacity-60">
               Ask questions about your code or request changes.
@@ -170,10 +177,10 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ currentFileText, onAp
                 className={`
                   max-w-[95%] rounded-lg p-3 text-sm whitespace-pre-wrap border overflow-x-auto
                   ${msg.role === "user" 
-                    ? "bg-zinc-800 border-zinc-700 text-zinc-100" 
-                    : "bg-zinc-900 border-zinc-800 text-zinc-300"
+                    ? "bg-blue-50 border-blue-200 text-zinc-800" 
+                    : "bg-white border-zinc-200 text-zinc-700"
                   }
-                  ${msg.isError ? "border-red-500/50 bg-red-900/10" : ""}
+                  ${msg.isError ? "border-red-300 bg-red-50" : ""}
                 `}
               >
                 {msg.content}
@@ -184,7 +191,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ currentFileText, onAp
                 <div className="flex gap-2 mt-1 ml-1">
                   <button
                     onClick={() => onRequestDiff(codeBlock)}
-                    className="flex items-center gap-1.5 text-xs bg-blue-600/10 hover:bg-blue-600/20 text-blue-400 border border-blue-600/30 rounded px-3 py-1.5 transition-colors"
+                    className="flex items-center gap-1.5 text-xs bg-blue-50 hover:bg-blue-100 text-blue-600 border border-blue-200 rounded px-3 py-1.5 transition-colors"
                   >
                     <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                       <path d="M16 3h5v5"></path>
@@ -196,7 +203,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ currentFileText, onAp
                   </button>
                   <button
                     onClick={() => onAppend(codeBlock)}
-                    className="text-xs bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded px-3 py-1.5 transition-colors"
+                    className="text-xs bg-zinc-100 hover:bg-zinc-200 border border-zinc-300 rounded px-3 py-1.5 transition-colors"
                   >
                     Append
                   </button>
@@ -207,27 +214,27 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ currentFileText, onAp
         })}
         
         {loading && (
-          <div className="flex items-center gap-2 text-zinc-500 text-sm ml-1">
-            <div className="w-2 h-2 bg-zinc-500 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
-            <div className="w-2 h-2 bg-zinc-500 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
-            <div className="w-2 h-2 bg-zinc-500 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
+          <div className="flex items-center gap-2 text-zinc-400 text-sm ml-1">
+            <div className="w-2 h-2 bg-zinc-400 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
+            <div className="w-2 h-2 bg-zinc-400 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
+            <div className="w-2 h-2 bg-zinc-400 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
           </div>
         )}
         <div ref={messagesEndRef} />
       </div>
 
       {/* 入力エリア */}
-      <div className="p-3 border-t border-zinc-800 bg-zinc-900 flex flex-col gap-2">
+      <div className="p-3 border-t border-zinc-200 bg-zinc-50 flex flex-col gap-2">
         <div className="flex gap-2 overflow-x-auto no-scrollbar pb-1">
-          <button onClick={() => triggerAction("explain")} disabled={loading} className="flex-shrink-0 text-xs px-2.5 py-1.5 rounded-full bg-zinc-800 border border-zinc-700 hover:bg-zinc-700 hover:border-zinc-600 transition-colors whitespace-nowrap">💡 Explain</button>
-          <button onClick={() => triggerAction("fix")} disabled={loading} className="flex-shrink-0 text-xs px-2.5 py-1.5 rounded-full bg-zinc-800 border border-zinc-700 hover:bg-zinc-700 hover:border-zinc-600 transition-colors whitespace-nowrap">🛠 Fix</button>
-          <button onClick={() => triggerAction("test")} disabled={loading} className="flex-shrink-0 text-xs px-2.5 py-1.5 rounded-full bg-zinc-800 border border-zinc-700 hover:bg-zinc-700 hover:border-zinc-600 transition-colors whitespace-nowrap">🧪 Test</button>
-          <button onClick={() => triggerAction("refactor")} disabled={loading} className="flex-shrink-0 text-xs px-2.5 py-1.5 rounded-full bg-zinc-800 border border-zinc-700 hover:bg-zinc-700 hover:border-zinc-600 transition-colors whitespace-nowrap">✨ Refactor</button>
+          <button onClick={() => triggerAction("explain")} disabled={loading} className="flex-shrink-0 text-xs px-2.5 py-1.5 rounded-full bg-white border border-zinc-300 hover:bg-zinc-100 hover:border-zinc-400 transition-colors whitespace-nowrap">💡 Explain</button>
+          <button onClick={() => triggerAction("fix")} disabled={loading} className="flex-shrink-0 text-xs px-2.5 py-1.5 rounded-full bg-white border border-zinc-300 hover:bg-zinc-100 hover:border-zinc-400 transition-colors whitespace-nowrap">🛠 Fix</button>
+          <button onClick={() => triggerAction("test")} disabled={loading} className="flex-shrink-0 text-xs px-2.5 py-1.5 rounded-full bg-white border border-zinc-300 hover:bg-zinc-100 hover:border-zinc-400 transition-colors whitespace-nowrap">🧪 Test</button>
+          <button onClick={() => triggerAction("refactor")} disabled={loading} className="flex-shrink-0 text-xs px-2.5 py-1.5 rounded-full bg-white border border-zinc-300 hover:bg-zinc-100 hover:border-zinc-400 transition-colors whitespace-nowrap">✨ Refactor</button>
         </div>
 
         <div className="relative">
           <textarea
-            className="w-full bg-zinc-800 border border-zinc-700 rounded-lg p-3 pr-10 text-sm text-zinc-100 resize-none focus:outline-none focus:border-blue-500/50 focus:ring-1 focus:ring-blue-500/50 transition-all placeholder:text-zinc-600"
+            className="w-full bg-white border border-zinc-300 rounded-lg p-3 pr-10 text-sm text-zinc-800 resize-none focus:outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 transition-all placeholder:text-zinc-400"
             rows={3}
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
@@ -238,7 +245,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ currentFileText, onAp
           <button
             onClick={() => onSubmit()}
             disabled={loading || !prompt.trim()}
-            className="absolute bottom-3 right-3 p-1.5 text-zinc-400 hover:text-blue-400 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            className="absolute bottom-3 right-3 p-1.5 text-zinc-400 hover:text-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           >
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <line x1="22" y1="2" x2="11" y2="13"></line>
@@ -246,7 +253,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ currentFileText, onAp
             </svg>
           </button>
         </div>
-        <div className="text-[10px] text-zinc-600 flex justify-between px-1">
+        <div className="text-[10px] text-zinc-400 flex justify-between px-1">
           <span>Gemini 2.0 Flash</span>
           <span>Cmd+Enter to send</span>
         </div>

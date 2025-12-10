@@ -12,18 +12,18 @@ type TabBarProps = {
 
 export function TabBar({ tabs, activeId, onSelect, onClose }: TabBarProps) {
   return (
-    <div className="flex h-9 border-b border-zinc-800 bg-zinc-950 text-sm overflow-x-auto no-scrollbar">
+    <div className="flex h-9 border-b border-zinc-200 bg-zinc-50 text-sm overflow-x-auto no-scrollbar">
       {tabs.map((tab) => {
         const isActive = tab.id === activeId;
         return (
           <div
             key={tab.id}
             className={`
-              group flex items-center gap-2 px-3 border-r border-zinc-800 min-w-[120px] max-w-[200px] cursor-pointer select-none relative
+              group flex items-center gap-2 px-3 border-r border-zinc-200 min-w-[120px] max-w-[200px] cursor-pointer select-none relative
               ${
                 isActive
-                  ? "bg-zinc-950 text-zinc-100"
-                  : "bg-zinc-900 text-zinc-500 hover:bg-zinc-900/80"
+                  ? "bg-white text-zinc-900"
+                  : "bg-zinc-100 text-zinc-500 hover:bg-zinc-100/80"
               }
             `}
             onClick={() => onSelect(tab.id)}
@@ -34,7 +34,7 @@ export function TabBar({ tabs, activeId, onSelect, onClose }: TabBarProps) {
             )}
 
             {/* ファイルアイコン（簡易） */}
-            <span className={`text-xs ${isActive ? "text-blue-400" : "text-zinc-600"}`}>
+            <span className={`text-xs ${isActive ? "text-blue-500" : "text-zinc-400"}`}>
               📄
             </span>
 
@@ -42,8 +42,8 @@ export function TabBar({ tabs, activeId, onSelect, onClose }: TabBarProps) {
             
             <span
               className={`
-                rounded p-0.5 hover:bg-zinc-700 transition-all
-                ${isActive ? "opacity-100 text-zinc-400 hover:text-zinc-100" : "opacity-0 group-hover:opacity-100 text-zinc-500 hover:text-zinc-300"}
+                rounded p-0.5 hover:bg-zinc-200 transition-all
+                ${isActive ? "opacity-100 text-zinc-500 hover:text-zinc-700" : "opacity-0 group-hover:opacity-100 text-zinc-400 hover:text-zinc-600"}
               `}
               onClick={(e) => {
                 e.stopPropagation();

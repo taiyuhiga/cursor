@@ -51,7 +51,7 @@ export function MainEditor({ value, onChange, fileName, onSave }: Props) {
   return (
     <Editor
       height="100%"
-      theme="vs-dark"
+      theme="light"
       path={fileName} // これでモデルが再作成され、言語切り替えがスムーズになる
       defaultLanguage={getLanguage(fileName)}
       value={value}
@@ -72,4 +72,3 @@ export function MainEditor({ value, onChange, fileName, onSave }: Props) {
     />
   );
 }
-

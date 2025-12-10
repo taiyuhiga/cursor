@@ -2,6 +2,7 @@
 
 import { createClient } from "@/lib/supabase/client";
 import { useEffect, useState, useCallback, useRef } from "react";
+import { useRouter } from "next/navigation";
 import { AiPanel, AiPanelHandle } from "@/components/AiPanel";
 import { TabBar } from "@/components/TabBar";
 import { PageHeader } from "@/components/PageHeader";
@@ -9,6 +10,9 @@ import { ActivityBar } from "@/components/ActivityBar";
 import { MainEditor } from "@/components/MainEditor";
 import { DiffView } from "@/components/DiffView";
 import { CommandPalette } from "@/components/CommandPalette";
+import { FileTree } from "@/components/FileTree";
+import { WorkspaceSwitcher } from "@/components/WorkspaceSwitcher";
+import { CreateWorkspaceDialog } from "@/components/CreateWorkspaceDialog";
 
 type Node = {
   id: string;
@@ -19,30 +23,39 @@ type Node = {
   created_at: string;
 };
 
+type Workspace = {
+  id: string;
+  name: string;
+  owner_id: string;
+  created_at: string;
+  role: string;
+};
+
 type Props = {
   projectId: string;
+  workspaces: Workspace[];
+  currentWorkspace: Workspace;
+  userEmail: string;
 };
 
 type Activity = "explorer" | "search" | "git" | "ai" | "settings";
 
-export default function AppLayout({ projectId }: Props) {
+export default function AppLayout({ projectId, workspaces, currentWorkspace, userEmail }: Props) {
+  const router = useRouter();
   const [nodes, setNodes] = useState<Node[]>([]);
-  // タブ管理
   const [openTabs, setOpenTabs] = useState<string[]>([]);
   const [activeNodeId, setActiveNodeId] = useState<string | null>(null);
-  
-  // アクティビティバー管理
   const [activeActivity, setActiveActivity] = useState<Activity>("explorer");
-
   const [fileContent, setFileContent] = useState<string>("");
   const [isSaving, setIsSaving] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
-
-  // DiffView管理
   const [diffState, setDiffState] = useState<{
     show: boolean;
     newCode: string;
   }>({ show: false, newCode: "" });
+  const [showCreateWorkspace, setShowCreateWorkspace] = useState(false);
+  const [currentWorkspaces, setCurrentWorkspaces] = useState(workspaces);
+  const [activeWorkspace, setActiveWorkspace] = useState(currentWorkspace);
 
   const aiPanelRef = useRef<AiPanelHandle>(null);
   const supabase = createClient();
@@ -69,23 +82,154 @@ export default function AppLayout({ projectId }: Props) {
     fetchNodes();
   }, [fetchNodes]);
 
-  // ファイルを開く処理
+  // ファイル操作アクション（Optimistic UI）
+  const handleCreateFile = async (path: string) => {
+    // パスから名前とparent_idを計算
+    const parts = path.split("/");
+    const name = parts[parts.length - 1];
+    const tempId = `temp-${Date.now()}`;
+    
+    // 親フォルダを探す（簡易実装：ルート直下のみ即座に反映）
+    let parentId: string | null = null;
+    if (parts.length > 1) {
+      const parentName = parts[parts.length - 2];
+      const parentNode = nodes.find(n => n.name === parentName && n.type === "folder");
+      parentId = parentNode?.id || null;
+    }
+
+    // Optimistic: 即座にUIに追加
+    const tempNode: Node = {
+      id: tempId,
+      project_id: projectId,
+      parent_id: parentId,
+      type: "file",
+      name,
+      created_at: new Date().toISOString(),
+    };
+    setNodes(prev => [...prev, tempNode]);
+
+    try {
+      const res = await fetch("/api/files", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "create_file", path, projectId }),
+      });
+      if (!res.ok) throw new Error("Failed to create file");
+      // 成功したら正式なデータで更新
+      fetchNodes();
+    } catch (error: any) {
+      // 失敗したらロールバック
+      setNodes(prev => prev.filter(n => n.id !== tempId));
+      alert(`Error: ${error.message}`);
+    }
+  };
+
+  const handleCreateFolder = async (path: string) => {
+    const parts = path.split("/");
+    const name = parts[parts.length - 1];
+    const tempId = `temp-${Date.now()}`;
+    
+    let parentId: string | null = null;
+    if (parts.length > 1) {
+      const parentName = parts[parts.length - 2];
+      const parentNode = nodes.find(n => n.name === parentName && n.type === "folder");
+      parentId = parentNode?.id || null;
+    }
+
+    const tempNode: Node = {
+      id: tempId,
+      project_id: projectId,
+      parent_id: parentId,
+      type: "folder",
+      name,
+      created_at: new Date().toISOString(),
+    };
+    setNodes(prev => [...prev, tempNode]);
+
+    try {
+      const res = await fetch("/api/files", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "create_folder", path, projectId }),
+      });
+      if (!res.ok) throw new Error("Failed to create folder");
+      fetchNodes();
+    } catch (error: any) {
+      setNodes(prev => prev.filter(n => n.id !== tempId));
+      alert(`Error: ${error.message}`);
+    }
+  };
+
+  const handleRenameNode = async (id: string, newName: string) => {
+    // Optimistic: 即座にUIを更新
+    const oldNode = nodes.find(n => n.id === id);
+    if (!oldNode) return;
+
+    setNodes(prev => prev.map(n => n.id === id ? { ...n, name: newName } : n));
+
+    try {
+      const res = await fetch("/api/files", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "rename_node", id, newName }),
+      });
+      if (!res.ok) throw new Error("Failed to rename");
+      // 成功 - 再取得は不要（既にローカル更新済み）
+    } catch (error: any) {
+      // 失敗したらロールバック
+      setNodes(prev => prev.map(n => n.id === id ? oldNode : n));
+      alert(`Error: ${error.message}`);
+    }
+  };
+
+  const handleDeleteNode = async (id: string) => {
+    // Optimistic: 即座にUIから削除
+    const oldNodes = [...nodes];
+    
+    // 子ノードも含めて削除
+    const idsToDelete = new Set<string>();
+    const collectChildren = (parentId: string) => {
+      idsToDelete.add(parentId);
+      nodes.filter(n => n.parent_id === parentId).forEach(child => collectChildren(child.id));
+    };
+    collectChildren(id);
+    
+    setNodes(prev => prev.filter(n => !idsToDelete.has(n.id)));
+    
+    // タブからも削除
+    setOpenTabs(prev => prev.filter(tabId => !idsToDelete.has(tabId)));
+    if (activeNodeId && idsToDelete.has(activeNodeId)) {
+      setActiveNodeId(null);
+    }
+
+    try {
+      const res = await fetch("/api/files", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "delete_node", id }),
+      });
+      if (!res.ok) throw new Error("Failed to delete");
+    } catch (error: any) {
+      // 失敗したらロールバック
+      setNodes(oldNodes);
+      alert(`Error: ${error.message}`);
+    }
+  };
+
   const handleOpenNode = (nodeId: string) => {
+    // フォルダかどうかはFileTree側で判断して展開/ファイルオープンを呼び分けてもらう形にするが、
+    // ここではファイルを開く処理のみ
     setOpenTabs((prev) =>
       prev.includes(nodeId) ? prev : [...prev, nodeId]
     );
     setActiveNodeId(nodeId);
-    
-    // エクスプローラーがアクティブでない場合はアクティブにする（任意）
     if (activeActivity !== "explorer") {
       setActiveActivity("explorer");
     }
   };
 
-  // タブを閉じる処理
   const handleCloseTab = (id: string) => {
     setOpenTabs((prev) => prev.filter((x) => x !== id));
-    
     if (activeNodeId === id) {
       setOpenTabs((prev) => {
         const newTabs = prev.filter((x) => x !== id);
@@ -101,20 +245,18 @@ export default function AppLayout({ projectId }: Props) {
     }
   };
 
-  // 選択したファイルの内容を取得
+  // ファイル内容取得
   useEffect(() => {
     if (!activeNodeId) {
       setFileContent("");
       return;
     }
-
     const fetchContent = async () => {
       const { data, error } = await supabase
         .from("file_contents")
         .select("*")
         .eq("node_id", activeNodeId)
         .single();
-
       if (error) {
         console.error("Error fetching file content:", error);
         setFileContent("");
@@ -122,96 +264,39 @@ export default function AppLayout({ projectId }: Props) {
         setFileContent(data?.text || "");
       }
     };
-
     fetchContent();
   }, [activeNodeId, supabase]);
 
-  // ファイル内容を保存
+  // 保存
   const saveContent = useCallback(async () => {
     if (!activeNodeId) return;
-
     setIsSaving(true);
     const { error } = await supabase
       .from("file_contents")
       .update({ text: fileContent })
       .eq("node_id", activeNodeId);
-
-    if (error) {
-      console.error("Error saving content:", error);
-    }
+    if (error) console.error("Error saving content:", error);
     setIsSaving(false);
   }, [activeNodeId, fileContent, supabase]);
 
-  // AIアクションの実行
+  // AIアクション
   const handleAiAction = (action: string) => {
     if (action === "save") {
       saveContent();
       return;
     }
-    
-    // AIパネルのアクションを呼び出す
     if (aiPanelRef.current) {
       aiPanelRef.current.triggerAction(action as any);
     }
   };
 
-  // ツリー構造に変換
-  const buildTree = (nodes: Node[], parentId: string | null = null): Node[] => {
-    return nodes
-      .filter((n) => n.parent_id === parentId)
-      .sort((a, b) => {
-        if (a.type !== b.type) return a.type === "folder" ? -1 : 1;
-        return a.name.localeCompare(b.name);
-      });
-  };
-
-  // ツリーアイテムをレンダリング
-  const renderTreeItem = (node: Node, depth: number = 0) => {
-    const isSelected = node.id === activeNodeId;
-    const isFile = node.type === "file";
-    const children = buildTree(nodes, node.id);
-
-    return (
-      <div key={node.id}>
-        <button
-          onClick={() => isFile && handleOpenNode(node.id)}
-          className={`w-full text-left px-2 py-1.5 text-sm flex items-center gap-2 hover:bg-zinc-800 rounded transition-colors ${
-            isSelected ? "bg-zinc-700 text-white" : "text-zinc-300"
-          }`}
-          style={{ paddingLeft: `${depth * 16 + 8}px` }}
-        >
-          <span className="text-zinc-500">{isFile ? "📄" : "📁"}</span>
-          <span className="truncate">{node.name}</span>
-        </button>
-        {children.map((child) => renderTreeItem(child, depth + 1))}
-      </div>
-    );
-  };
-
-  // AIの結果をエディタに追記
-  const handleAppend = (text: string) => {
-    setFileContent((prev) => prev + "\n\n" + text);
-  };
-
-  // AIの結果でエディタを置き換え（Diff機能のApplyからも呼ばれる）
+  const handleAppend = (text: string) => setFileContent((prev) => prev + "\n\n" + text);
   const handleReplace = (text: string) => {
     setFileContent(text);
-    // DiffViewを閉じる
     setDiffState({ show: false, newCode: "" });
   };
-
-  // DiffViewのリクエスト処理
-  const handleRequestDiff = (newCode: string) => {
-    setDiffState({ show: true, newCode });
-  };
-
-  // ファイル作成完了時の処理
-  const handleFileCreated = useCallback(() => {
-    fetchNodes();
-  }, [fetchNodes]);
-
-  const rootNodes = buildTree(nodes, null);
-  const activeNode = nodes.find((n) => n.id === activeNodeId) ?? null;
+  const handleRequestDiff = (newCode: string) => setDiffState({ show: true, newCode });
+  const handleFileCreated = useCallback(() => fetchNodes(), [fetchNodes]);
 
   const tabs = openTabs
     .map((id) => {
@@ -221,65 +306,70 @@ export default function AppLayout({ projectId }: Props) {
     })
     .filter((t): t is { id: string; title: string } => t !== null);
 
-  if (isLoading && nodes.length === 0) {
-    return (
-      <div className="h-screen bg-zinc-950 text-zinc-300 flex items-center justify-center">
-        <div className="animate-pulse">Loading...</div>
-      </div>
-    );
-  }
+  const activeNode = nodes.find((n) => n.id === activeNodeId) ?? null;
 
-  // サイドバーのコンテンツレンダリング
+  // ワークスペース切り替え
+  const handleSwitchWorkspace = async (workspaceId: string) => {
+    if (workspaceId === activeWorkspace.id) return;
+    
+    // ページをリロードして新しいワークスペースに切り替え
+    // 実際のプロダクトではクエリパラメータやcookieで管理
+    window.location.href = `/app?workspace=${workspaceId}`;
+  };
+
+  // 新規ワークスペース作成
+  const handleCreateWorkspace = async (name: string) => {
+    try {
+      const res = await fetch("/api/workspaces", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+
+      if (!res.ok) {
+        const error = await res.json();
+        throw new Error(error.error);
+      }
+
+      const { workspace } = await res.json();
+      
+      // ワークスペース一覧を更新
+      setCurrentWorkspaces(prev => [...prev, { ...workspace, role: "owner" }]);
+      
+      // 新しいワークスペースに切り替え
+      window.location.href = `/app?workspace=${workspace.id}`;
+    } catch (error: any) {
+      alert(`Error: ${error.message}`);
+    }
+  };
+
   const renderSidebarContent = () => {
     switch (activeActivity) {
       case "explorer":
         return (
-          <>
-            <div className="p-3 border-b border-zinc-800">
-              <h2 className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">
-                Explorer
-              </h2>
-            </div>
-            <div className="flex-1 overflow-y-auto p-2">
-              {rootNodes.length === 0 ? (
-                <div className="text-zinc-500 text-sm p-2">No files yet</div>
-              ) : (
-                rootNodes.map((node) => renderTreeItem(node))
-              )}
-            </div>
-          </>
-        );
-      case "search":
-        return (
-          <div className="p-4 text-zinc-500 text-sm">Search (Not implemented)</div>
-        );
-      case "git":
-        return (
-          <div className="p-4 text-zinc-500 text-sm">Git (Not implemented)</div>
-        );
-      case "ai":
-        return (
-          <div className="p-4 text-zinc-500 text-sm">AI Settings (Not implemented)</div>
-        );
-      case "settings":
-        return (
-          <div className="p-4 text-zinc-500 text-sm">Settings (Not implemented)</div>
+          <FileTree
+            nodes={nodes}
+            activeNodeId={activeNodeId}
+            onSelectNode={handleOpenNode}
+            onCreateFile={handleCreateFile}
+            onCreateFolder={handleCreateFolder}
+            onRenameNode={handleRenameNode}
+            onDeleteNode={handleDeleteNode}
+          />
         );
       default:
-        return null;
+        return (
+          <div className="p-4 text-zinc-500 text-sm">
+            {activeActivity.charAt(0).toUpperCase() + activeActivity.slice(1)} (Not implemented)
+          </div>
+        );
     }
   };
 
   return (
-    <div className="h-screen bg-zinc-950 text-zinc-300 flex">
-      {/* Command Palette */}
-      <CommandPalette
-        nodes={nodes}
-        onSelectNode={handleOpenNode}
-        onAction={handleAiAction}
-      />
-
-      {/* Diff View Modal */}
+    <div className="h-screen bg-white text-zinc-700 flex">
+      <CommandPalette nodes={nodes} onSelectNode={handleOpenNode} onAction={handleAiAction} />
+      
       {diffState.show && (
         <DiffView
           oldCode={fileContent}
@@ -289,28 +379,38 @@ export default function AppLayout({ projectId }: Props) {
         />
       )}
 
-      {/* 最左ツールバー (Activity Bar) */}
       <ActivityBar activeActivity={activeActivity} onSelect={setActiveActivity} />
 
-      {/* 左サイドバー */}
-      <aside className="w-64 bg-zinc-900 border-r border-zinc-800 flex flex-col flex-shrink-0">
+      <aside className="w-64 bg-zinc-50 border-r border-zinc-200 flex flex-col flex-shrink-0">
+        {/* ワークスペース切り替え */}
+        <div className="p-2 border-b border-zinc-200">
+          <WorkspaceSwitcher
+            workspaces={currentWorkspaces}
+            currentWorkspace={activeWorkspace}
+            userEmail={userEmail}
+            onSwitch={handleSwitchWorkspace}
+            onCreateNew={() => setShowCreateWorkspace(true)}
+          />
+        </div>
         {renderSidebarContent()}
       </aside>
 
-      {/* 中央：メインエリア */}
-      <main className="flex-1 flex flex-col min-w-0 bg-zinc-950">
-        {/* タブバー */}
+      {/* 新規ワークスペース作成ダイアログ */}
+      {showCreateWorkspace && (
+        <CreateWorkspaceDialog
+          onClose={() => setShowCreateWorkspace(false)}
+          onCreate={handleCreateWorkspace}
+        />
+      )}
+
+      <main className="flex-1 flex flex-col min-w-0 bg-white">
         <TabBar
           tabs={tabs}
           activeId={activeNodeId}
           onSelect={setActiveNodeId}
           onClose={handleCloseTab}
         />
-
-        {/* ページヘッダー */}
         <PageHeader node={activeNode} isSaving={isSaving} />
-
-        {/* エディタ本体 (Monaco Editor) */}
         <div className="flex-1 p-0 relative overflow-hidden">
           {activeNodeId && activeNode ? (
             <MainEditor
@@ -320,17 +420,15 @@ export default function AppLayout({ projectId }: Props) {
               onSave={saveContent}
             />
           ) : (
-            <div className="absolute inset-0 flex items-center justify-center text-zinc-500">
+            <div className="absolute inset-0 flex items-center justify-center text-zinc-400">
               <div className="text-center">
-                <p className="mb-2">ファイルを選択して編集を開始</p>
-                <p className="text-xs opacity-60">Cmd+S で保存</p>
+                <p className="mb-2">Select a file to edit</p>
+                <p className="text-xs opacity-60">Cmd+S to save</p>
               </div>
             </div>
           )}
         </div>
-
-        {/* ステータスバー */}
-        <div className="h-6 bg-zinc-900 border-t border-zinc-800 flex items-center px-4 text-xs text-zinc-500 justify-between">
+        <div className="h-6 bg-zinc-50 border-t border-zinc-200 flex items-center px-4 text-xs text-zinc-500 justify-between">
           <span>{activeNode ? `${activeNode.name}` : "No file selected"}</span>
           <div className="flex gap-4">
             <span>Ln 1, Col 1</span>
@@ -340,8 +438,7 @@ export default function AppLayout({ projectId }: Props) {
         </div>
       </main>
 
-      {/* 右サイドバー：AIパネル */}
-      <aside className="w-80 border-l border-zinc-800 flex-shrink-0 bg-zinc-900">
+      <aside className="w-80 border-l border-zinc-200 flex-shrink-0 bg-zinc-50">
         <AiPanel
           ref={aiPanelRef}
           currentFileText={fileContent}

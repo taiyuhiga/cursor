@@ -1,17 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createFile, listFiles } from "@/lib/tools/file-operations";
+import { createFile, updateFile, deleteFile, createFolder, listFiles } from "@/lib/tools/file-operations";
 
 // ツール定義
 const tools = [
   {
     name: "create_file",
-    description: "Create a new file with the given name and content.",
+    description: "Create a new file. You can specify a full path (e.g., 'components/ui/button.tsx'). Parent folders will be created automatically.",
     parameters: {
       type: "OBJECT",
       properties: {
         name: {
           type: "STRING",
-          description: "The name of the file to create (e.g., 'example.ts').",
+          description: "The path of the file to create (e.g., 'lib/utils.ts').",
         },
         content: {
           type: "STRING",
@@ -22,8 +22,54 @@ const tools = [
     },
   },
   {
+    name: "update_file",
+    description: "Update the content of an existing file. Specify the full path.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        name: {
+          type: "STRING",
+          description: "The path of the file to update.",
+        },
+        content: {
+          type: "STRING",
+          description: "The new content of the file.",
+        },
+      },
+      required: ["name", "content"],
+    },
+  },
+  {
+    name: "delete_file",
+    description: "Delete a file or folder by path.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        name: {
+          type: "STRING",
+          description: "The path of the node to delete.",
+        },
+      },
+      required: ["name"],
+    },
+  },
+  {
+    name: "create_folder",
+    description: "Create a new folder recursively.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        name: {
+          type: "STRING",
+          description: "The path of the folder to create (e.g., 'components/hooks').",
+        },
+      },
+      required: ["name"],
+    },
+  },
+  {
     name: "list_files",
-    description: "List all files in the current project.",
+    description: "List all files and folders in the project with their paths.",
     parameters: {
       type: "OBJECT",
       properties: {},
@@ -51,7 +97,7 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    // 1. 初回のリクエスト（ツール定義付き）
+    // 1. 初回のリクエスト
     const initialPayload = {
       contents: [
         {
@@ -59,9 +105,10 @@ export async function POST(req: NextRequest) {
           parts: [
             {
               text: `あなたは優秀なソフトウェアエンジニアです。以下の指示に従って作業してください。
-必要に応じてファイルを作成したり、ファイル一覧を確認したりするツールを使用してください。
+ファイルシステムを操作するツールを持っています。パス指定（例: 'src/components/Button.tsx'）でファイルを操作できます。
+フォルダは自動的に作成されます。
 
-現在のファイルの内容:
+現在のファイルの内容（参考）:
 \`\`\`
 ${fileText}
 \`\`\`
@@ -101,23 +148,37 @@ ${prompt}`,
       const { name, args } = functionCall.functionCall;
       let toolResult;
 
-      // ツール実行
-      if (name === "create_file") {
-        console.log(`Executing tool: create_file`, args);
-        try {
-          const result = await createFile(args.name, args.content || "");
-          toolResult = { result: `Successfully created file: ${result.fileName}` };
-        } catch (e: any) {
-          toolResult = { error: e.message };
+      console.log(`Executing tool: ${name}`, args);
+
+      try {
+        switch (name) {
+          case "create_file":
+            const createRes = await createFile(args.name, args.content || "");
+            toolResult = { result: `Successfully created file: ${createRes.fileName}` };
+            break;
+          case "update_file":
+            const updateRes = await updateFile(args.name, args.content);
+            toolResult = { result: `Successfully updated file: ${updateRes.fileName}` };
+            break;
+          case "delete_file":
+            const deleteRes = await deleteFile(args.name);
+            toolResult = { result: `Successfully deleted: ${deleteRes.fileName}` };
+            break;
+          case "create_folder":
+            const folderRes = await createFolder(args.name);
+            toolResult = { result: `Successfully created folder: ${folderRes.folderName}` };
+            break;
+          case "list_files":
+            const files = await listFiles();
+            // パス一覧だけを返す（トークン節約）
+            toolResult = { files: files.map((f: any) => f.path) };
+            break;
+          default:
+            toolResult = { error: "Unknown tool" };
         }
-      } else if (name === "list_files") {
-        console.log(`Executing tool: list_files`);
-        try {
-          const files = await listFiles();
-          toolResult = { files: files.map((f: any) => f.name) };
-        } catch (e: any) {
-          toolResult = { error: e.message };
-        }
+      } catch (e: any) {
+        console.error("Tool execution error:", e);
+        toolResult = { error: e.message };
       }
 
       // 2. ツール実行結果をGeminiに返す
@@ -129,7 +190,7 @@ ${prompt}`,
           },
           {
             role: "model",
-            parts: content.parts, // functionCallを含む前の応答
+            parts: content.parts, 
           },
           {
             role: "function",

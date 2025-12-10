@@ -13,17 +13,17 @@ type Props = {
 export function PageHeader({ node, isSaving = false }: Props) {
   if (!node) {
     return (
-      <div className="h-[73px] px-6 flex items-center border-b border-zinc-800 bg-zinc-900/50 text-sm text-zinc-500">
+      <div className="h-[73px] px-6 flex items-center border-b border-zinc-200 bg-zinc-50 text-sm text-zinc-400">
         ファイルを選択するとここに詳細が表示されます
       </div>
     );
   }
 
   return (
-    <div className="px-6 py-3 border-b border-zinc-800 bg-zinc-900/50 flex items-center justify-between">
+    <div className="px-6 py-3 border-b border-zinc-200 bg-zinc-50 flex items-center justify-between">
       <div>
         <div className="text-xs text-zinc-500 mb-0.5">Page</div>
-        <div className="text-lg font-semibold text-zinc-100 flex items-center gap-2">
+        <div className="text-lg font-semibold text-zinc-900 flex items-center gap-2">
           {node.name}
           {isSaving && (
             <span className="text-xs font-normal text-zinc-500 animate-pulse">
@@ -41,4 +41,3 @@ export function PageHeader({ node, isSaving = false }: Props) {
     </div>
   );
 }
-

@@ -141,6 +141,34 @@ create policy "nodes_insert_members"
     )
   );
 
+-- nodes: UPDATE ポリシー
+create policy "nodes_update_members"
+  on public.nodes
+  for update
+  using (
+    project_id in (
+      select id from public.projects
+      where workspace_id in (
+        select workspace_id from public.workspace_members
+        where user_id = auth.uid()
+      )
+    )
+  );
+
+-- nodes: DELETE ポリシー
+create policy "nodes_delete_members"
+  on public.nodes
+  for delete
+  using (
+    project_id in (
+      select id from public.projects
+      where workspace_id in (
+        select workspace_id from public.workspace_members
+        where user_id = auth.uid()
+      )
+    )
+  );
+
 -- file_contents
 create policy "file_contents_select_members"
   on public.file_contents

@@ -2,7 +2,19 @@ import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import AppLayout from "./AppLayout";
 
-export default async function AppContent() {
+type Workspace = {
+  id: string;
+  name: string;
+  owner_id: string;
+  created_at: string;
+  role: string;
+};
+
+type Props = {
+  workspaceId?: string;
+};
+
+export default async function AppContent({ workspaceId }: Props) {
   const supabase = await createClient();
 
   const {
@@ -13,21 +25,46 @@ export default async function AppContent() {
     redirect("/auth/login");
   }
 
-  // ユーザーのデフォルトworkspaceを取得 or 作成
-  const { data: workspace } = await supabase
-    .from("workspaces")
-    .select("*")
-    .eq("owner_id", user.id)
-    .maybeSingle();
+  // ユーザーが所属する全てのワークスペースを取得
+  const { data: membershipData } = await supabase
+    .from("workspace_members")
+    .select(`
+      role,
+      workspace:workspaces (
+        id,
+        name,
+        owner_id,
+        created_at
+      )
+    `)
+    .eq("user_id", user.id);
 
-  let workspaceId = workspace?.id;
+  // ワークスペース一覧を整形
+  const workspaces: Workspace[] = (membershipData || [])
+    .filter((m: any) => m.workspace)
+    .map((m: any) => ({
+      ...m.workspace,
+      role: m.role,
+    }));
 
-  if (!workspaceId) {
-    // なければ作る
+  // URLで指定されたワークスペースを選択、なければ最初のワークスペース
+  let currentWorkspace: Workspace | null = null;
+  
+  if (workspaceId) {
+    currentWorkspace = workspaces.find(w => w.id === workspaceId) || null;
+  }
+  
+  // 指定されたワークスペースがない場合は最初のものを使用
+  if (!currentWorkspace) {
+    currentWorkspace = workspaces[0] || null;
+  }
+
+  if (!currentWorkspace) {
+    // デフォルトワークスペースを作成
     const { data: newWorkspace, error: wsError } = await supabase
       .from("workspaces")
       .insert({
-        name: "My Workspace",
+        name: `${user.email?.split("@")[0] || "My"}'s Workspace`,
         owner_id: user.id,
       })
       .select("*")
@@ -38,21 +75,25 @@ export default async function AppContent() {
       return <div>Error creating workspace: {wsError.message}</div>;
     }
 
-    workspaceId = newWorkspace!.id;
-
     // ownerをメンバーに追加
     await supabase.from("workspace_members").insert({
-      workspace_id: workspaceId,
+      workspace_id: newWorkspace!.id,
       user_id: user.id,
       role: "owner",
     });
+
+    currentWorkspace = {
+      ...newWorkspace!,
+      role: "owner",
+    };
+    workspaces.push(currentWorkspace);
   }
 
-  // プロジェクトも同様に1つデフォルト作る
+  // 現在のワークスペースのプロジェクトを取得 or 作成
   const { data: project } = await supabase
     .from("projects")
     .select("*")
-    .eq("workspace_id", workspaceId)
+    .eq("workspace_id", currentWorkspace.id)
     .maybeSingle();
 
   let projectId = project?.id;
@@ -61,8 +102,8 @@ export default async function AppContent() {
     const { data: newProject, error: projError } = await supabase
       .from("projects")
       .insert({
-        name: "First Project",
-        workspace_id: workspaceId,
+        name: "Default Project",
+        workspace_id: currentWorkspace.id,
       })
       .select("*")
       .single();
@@ -81,7 +122,7 @@ export default async function AppContent() {
         project_id: projectId,
         parent_id: null,
         type: "file",
-        name: "main.md",
+        name: "Welcome.md",
       })
       .select("*")
       .single();
@@ -93,11 +134,16 @@ export default async function AppContent() {
 
     await supabase.from("file_contents").insert({
       node_id: node!.id,
-      text: "# はじめまして\n\nこれはサンプルファイルです。\n\n好きに編集してください！",
+      text: `# Welcome to ${currentWorkspace.name}! 👋\n\nこれはサンプルファイルです。\n\n好きに編集してください！`,
     });
   }
 
-  // この projectId を渡して、クライアント側でツリー＆エディタを表示させる
-  return <AppLayout projectId={projectId!} />;
+  return (
+    <AppLayout
+      projectId={projectId!}
+      workspaces={workspaces}
+      currentWorkspace={currentWorkspace}
+      userEmail={user.email || ""}
+    />
+  );
 }
-

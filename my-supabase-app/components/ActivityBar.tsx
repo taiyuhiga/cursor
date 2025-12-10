@@ -30,11 +30,11 @@ export function ActivityBar({ activeActivity, onSelect }: Props) {
         key={item.id}
         onClick={() => onSelect(item.id)}
         className={`w-12 h-12 flex items-center justify-center relative transition-colors ${
-          isActive ? "text-zinc-100" : "text-zinc-500 hover:text-zinc-300"
+          isActive ? "text-zinc-900" : "text-zinc-400 hover:text-zinc-600"
         }`}
       >
         {isActive && (
-          <div className="absolute left-0 top-0 bottom-0 w-0.5 bg-zinc-100" />
+          <div className="absolute left-0 top-0 bottom-0 w-0.5 bg-zinc-900" />
         )}
         <Icon className="w-6 h-6" />
       </button>
@@ -42,17 +42,16 @@ export function ActivityBar({ activeActivity, onSelect }: Props) {
   };
 
   return (
-    <div className="w-12 bg-zinc-900 border-r border-zinc-800 flex flex-col justify-between flex-shrink-0 z-10">
+    <div className="w-12 bg-zinc-100 border-r border-zinc-200 flex flex-col justify-between flex-shrink-0 z-10">
       <div className="flex flex-col">
         {topItems.map(renderItem)}
       </div>
       <div className="flex flex-col pb-2">
         {bottomItems.map(renderItem)}
-        <button className="w-12 h-12 flex items-center justify-center text-zinc-500 hover:text-zinc-300">
+        <button className="w-12 h-12 flex items-center justify-center text-zinc-400 hover:text-zinc-600">
           <Icons.User className="w-6 h-6" />
         </button>
       </div>
     </div>
   );
 }
-
