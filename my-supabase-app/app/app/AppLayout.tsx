@@ -13,6 +13,7 @@ import { CommandPalette } from "@/components/CommandPalette";
 import { FileTree } from "@/components/FileTree";
 import { WorkspaceSwitcher } from "@/components/WorkspaceSwitcher";
 import { CreateWorkspaceDialog } from "@/components/CreateWorkspaceDialog";
+import { SettingsView } from "@/components/SettingsView";
 
 type Node = {
   id: string;
@@ -298,6 +299,21 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const handleRequestDiff = (newCode: string) => setDiffState({ show: true, newCode });
   const handleFileCreated = useCallback(() => fetchNodes(), [fetchNodes]);
 
+  // Get file content by node ID for @Files feature
+  const handleGetFileContent = useCallback(async (nodeId: string): Promise<string> => {
+    const { data, error } = await supabase
+      .from("file_contents")
+      .select("text")
+      .eq("node_id", nodeId)
+      .single();
+    
+    if (error) {
+      console.error("Error fetching file content:", error);
+      return "";
+    }
+    return data?.text || "";
+  }, [supabase]);
+
   const tabs = openTabs
     .map((id) => {
       const node = nodes.find((n) => n.id === id);
@@ -358,13 +374,21 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
           />
         );
       default:
-        return (
-          <div className="p-4 text-zinc-500 text-sm">
-            {activeActivity.charAt(0).toUpperCase() + activeActivity.slice(1)} (Not implemented)
-          </div>
-        );
+        return null;
     }
   };
+
+  // Settingsモードの場合は全面表示
+  if (activeActivity === "settings") {
+    return (
+      <div className="h-screen bg-white text-zinc-700 flex">
+        <ActivityBar activeActivity={activeActivity} onSelect={setActiveActivity} />
+        <div className="flex-1 min-w-0">
+          <SettingsView />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="h-screen bg-white text-zinc-700 flex">
@@ -445,6 +469,8 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
           onAppend={handleAppend}
           onRequestDiff={handleRequestDiff}
           onFileCreated={handleFileCreated}
+          nodes={nodes}
+          onGetFileContent={handleGetFileContent}
         />
       </aside>
     </div>

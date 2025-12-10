@@ -1,3 +1,8 @@
+"use client";
+
+import { useState, useEffect } from "react";
+import { SharePopover } from "./SharePopover";
+
 type Node = {
   id: string;
   name: string;
@@ -11,6 +16,54 @@ type Props = {
 };
 
 export function PageHeader({ node, isSaving = false }: Props) {
+  const [isShareOpen, setIsShareOpen] = useState(false);
+  const [isPublic, setIsPublic] = useState(false);
+  const [sharedUsers, setSharedUsers] = useState<any[]>([]);
+
+  // 初期設定のロード
+  useEffect(() => {
+    if (node) {
+      fetch(`/api/share?nodeId=${node.id}`)
+        .then(res => res.json())
+        .then(data => {
+          setIsPublic(data.isPublic);
+          setSharedUsers(data.sharedUsers || []);
+        })
+        .catch(console.error);
+    }
+  }, [node]);
+
+  const handleTogglePublic = async (newIsPublic: boolean) => {
+    setIsPublic(newIsPublic);
+    // API呼び出し
+    if (node) {
+      await fetch("/api/share", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "toggle_public", nodeId: node.id, isPublic: newIsPublic }),
+      });
+    }
+  };
+
+  const handleInvite = async (email: string, role: string) => {
+    // API呼び出し（モック）
+    setSharedUsers([...sharedUsers, { email, role }]);
+  };
+
+  const handleUpdatePermission = async (email: string, newRole: string) => {
+    // UI更新
+    setSharedUsers(sharedUsers.map(u => 
+      u.email === email ? { ...u, role: newRole } : u
+    ));
+    // TODO: API呼び出し
+  };
+
+  const handleRemoveUser = async (email: string) => {
+    // UI更新
+    setSharedUsers(sharedUsers.filter(u => u.email !== email));
+    // TODO: API呼び出し
+  };
+
   if (!node) {
     return (
       <div className="h-[73px] px-6 flex items-center border-b border-zinc-200 bg-zinc-50 text-sm text-zinc-400">
@@ -36,6 +89,29 @@ export function PageHeader({ node, isSaving = false }: Props) {
         <div className="flex flex-col items-end gap-0.5">
           <span>Created: {new Date(node.created_at).toLocaleDateString()}</span>
           <span>Model: Gemini 2.0 Flash</span>
+        </div>
+        
+        <div className="relative">
+          <button
+            onClick={() => setIsShareOpen(!isShareOpen)}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-zinc-600 bg-white border border-zinc-200 rounded hover:bg-zinc-50 transition-colors"
+          >
+            Share
+            {isPublic && <span className="w-2 h-2 rounded-full bg-blue-500" />}
+          </button>
+
+          <SharePopover
+            isOpen={isShareOpen}
+            onClose={() => setIsShareOpen(false)}
+            nodeName={node.name}
+            nodeId={node.id}
+            isPublic={isPublic}
+            onTogglePublic={handleTogglePublic}
+            onInvite={handleInvite}
+            onUpdatePermission={handleUpdatePermission}
+            onRemoveUser={handleRemoveUser}
+            sharedUsers={sharedUsers}
+          />
         </div>
       </div>
     </div>

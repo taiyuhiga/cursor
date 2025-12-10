@@ -371,6 +371,11 @@ export function FileTree({
           return (
             <div key={node.id}>
               <div
+                draggable
+                onDragStart={(e) => {
+                  e.dataTransfer.setData("application/cursor-node", node.name);
+                  e.dataTransfer.effectAllowed = "copy";
+                }}
                 className={`
                   group/item flex items-center gap-1.5 px-2 py-1 text-sm cursor-pointer select-none transition-colors
                   ${isSelected ? "bg-blue-100 text-zinc-900" : "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900"}
