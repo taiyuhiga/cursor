@@ -502,14 +502,6 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
             </div>
           )}
         </div>
-        <div className="h-6 bg-zinc-50 border-t border-zinc-200 flex items-center px-4 text-xs text-zinc-500 justify-between">
-          <span>{activeNode ? `${activeNode.name}` : "No file selected"}</span>
-          <div className="flex gap-4">
-            <span>Ln 1, Col 1</span>
-            <span>UTF-8</span>
-            <span>TypeScript React</span>
-          </div>
-        </div>
       </main>
 
       {/* Right resize handle */}

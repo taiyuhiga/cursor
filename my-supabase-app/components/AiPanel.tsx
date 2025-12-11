@@ -75,6 +75,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
   const [isAgentDropdownOpen, setIsAgentDropdownOpen] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [showHistoryDropdown, setShowHistoryDropdown] = useState(false);
+  const [isPastChatsExpanded, setIsPastChatsExpanded] = useState(true);
   
   // "Thought" section state (mock)
   const [expandedThoughts, setExpandedThoughts] = useState<Record<string, boolean>>({});
@@ -91,6 +92,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const filesPopupRef = useRef<HTMLDivElement>(null);
   const historyRef = useRef<HTMLDivElement>(null);
+  const tabsContainerRef = useRef<HTMLDivElement>(null);
 
   const abortControllerRef = useRef<AbortController | null>(null);
 
@@ -134,10 +136,25 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
     fetchSessions();
   }, [fetchSessions]);
 
+  // 初回マウント時に New Chat を自動で開く
+  useEffect(() => {
+    if (openTabs.length === 0 && !currentSessionId) {
+      const newTabId = `new-${Date.now()}`;
+      const newTab: ChatSession = {
+        id: newTabId,
+        title: "New Chat",
+        created_at: new Date().toISOString(),
+      };
+      setOpenTabs([newTab]);
+      setCurrentSessionId(newTabId);
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Load messages for current session
   useEffect(() => {
     async function loadMessages() {
-      if (!currentSessionId) {
+      // 一時的なタブID（new-で始まる）またはnullの場合はメッセージをクリア
+      if (!currentSessionId || currentSessionId.startsWith("new-")) {
         setMessages([]);
         return;
       }
@@ -160,7 +177,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
     loadMessages();
   }, [currentSessionId, supabase]);
 
-  const createNewSession = async (firstMessage: string) => {
+  const createNewSession = async (firstMessage: string, tempTabId?: string) => {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return null;
 
@@ -181,8 +198,13 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
     }
 
     setSessions(prev => [data, ...prev]);
-    // タブに追加してタイトルを表示
-    setOpenTabs(prev => [...prev, data]);
+    
+    // 一時的なタブを実際のセッションに置き換え
+    if (tempTabId) {
+      setOpenTabs(prev => prev.map(t => t.id === tempTabId ? data : t));
+    } else {
+      setOpenTabs(prev => [...prev, data]);
+    }
     setCurrentSessionId(data.id);
     return data.id;
   };
@@ -269,8 +291,11 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
     if (!promptToSend.trim() || loading) return;
 
     let activeSessionId = currentSessionId;
-    if (!activeSessionId) {
-      activeSessionId = await createNewSession(promptToSend);
+    
+    // 一時的なタブID（new-で始まる）の場合は新しいセッションを作成
+    if (!activeSessionId || activeSessionId.startsWith("new-")) {
+      const tempTabId = activeSessionId; // 一時的なタブIDを保存
+      activeSessionId = await createNewSession(promptToSend, tempTabId || undefined);
       if (!activeSessionId) return; // Error handling
     }
 
@@ -398,16 +423,12 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
         return;
       }
     }
-    if (!e.shiftKey && !e.nativeEvent.isComposing) {
-        if (e.key === "Enter") {
-            e.preventDefault();
-            onSubmit();
-            return;
-        }
-    }
-    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
-      e.preventDefault();
-      onSubmit();
+    
+    // Enter単独で送信（Shift+Enterで改行、IME変換中は除外）
+    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+        e.preventDefault();
+        onSubmit();
+        return;
     }
   };
 
@@ -446,13 +467,28 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
   };
 
   const handleNewChat = () => {
-    setCurrentSessionId(null);
+    // 新しいNew Chatタブを作成
+    const newTabId = `new-${Date.now()}`;
+    const newTab: ChatSession = {
+      id: newTabId,
+      title: "New Chat",
+      created_at: new Date().toISOString(),
+    };
+    setOpenTabs(prev => [...prev, newTab]);
+    setCurrentSessionId(newTabId);
     setMessages([]);
     setPrompt("");
-    if (textareaRef.current) {
+    
+    // タブバーを右端までスクロール
+    setTimeout(() => {
+      if (tabsContainerRef.current) {
+        tabsContainerRef.current.scrollLeft = tabsContainerRef.current.scrollWidth;
+      }
+      if (textareaRef.current) {
         textareaRef.current.focus();
         textareaRef.current.style.height = "auto";
-    }
+      }
+    }, 0);
   };
 
   const toggleThought = (msgId: string) => {
@@ -469,12 +505,15 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
 
   const closeTab = (e: React.MouseEvent, sessionId: string) => {
       e.stopPropagation();
-      setOpenTabs(prev => prev.filter(t => t.id !== sessionId));
+      const newTabs = openTabs.filter(t => t.id !== sessionId);
+      setOpenTabs(newTabs);
+      
       if (currentSessionId === sessionId) {
-          const remaining = openTabs.filter(t => t.id !== sessionId);
-          if (remaining.length > 0) {
-              setCurrentSessionId(remaining[remaining.length - 1].id);
+          if (newTabs.length > 0) {
+              // 残りのタブの最後を選択
+              setCurrentSessionId(newTabs[newTabs.length - 1].id);
           } else {
+              // タブがなくなったら新しいNew Chatを開く
               handleNewChat();
           }
       }
@@ -483,7 +522,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
   const getModeStyles = (m: "agent" | "plan" | "ask") => {
     switch (m) {
       case "plan": return "bg-[#FFF8E6] text-[#B95D00] hover:bg-[#FFF4D6] border-transparent";
-      case "ask": return "bg-zinc-100 text-zinc-900 hover:bg-zinc-200 border-transparent";
+      case "ask": return "bg-[#E8F5E9] text-[#2F8132] hover:bg-[#DFF0E0] border-transparent";
       default: return "bg-zinc-100 text-zinc-600 hover:bg-zinc-200 border-transparent";
     }
   };
@@ -493,6 +532,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
       
       switch (m) {
           case "ask": return "bg-[#2F8132] text-white hover:bg-[#266A29] shadow-sm"; // Green
+          case "plan": return "bg-[#B95D00] text-white hover:bg-[#A05300] shadow-sm"; // Brown/Orange
           default: return "bg-black text-white hover:bg-zinc-800 shadow-sm"; // Black
       }
   };
@@ -509,14 +549,14 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
     <div className="flex flex-col h-full bg-[#f9fafb] text-zinc-900 relative">
       {/* Header Tabs */}
       <div className="flex items-center gap-1 px-2 pt-2 pb-0 border-b border-zinc-200 bg-white select-none">
-        <div className="flex items-center overflow-x-auto no-scrollbar gap-1 flex-1">
+        <div ref={tabsContainerRef} className="flex items-center overflow-x-auto no-scrollbar gap-1 flex-1">
             {openTabs.map(tab => (
                 <div 
                     key={tab.id}
                     onClick={() => setCurrentSessionId(tab.id)}
                     className={`group flex items-center gap-2 px-3 py-1.5 rounded-t-lg border-t border-x text-xs font-medium cursor-pointer min-w-[120px] max-w-[200px] ${
                         currentSessionId === tab.id 
-                            ? "bg-[#f9fafb] border-zinc-200 border-b-transparent -mb-[1px] text-zinc-800" 
+                            ? "bg-[#E8F5E9] border-[#C8E6C9] border-b-transparent -mb-[1px] text-[#2F8132]" 
                             : "bg-zinc-50 border-transparent text-zinc-500 hover:bg-zinc-100"
                     }`}
                 >
@@ -529,16 +569,6 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
                     </button>
                 </div>
             ))}
-            <button 
-                onClick={handleNewChat}
-                className={`flex items-center gap-2 px-3 py-1.5 rounded-t-lg border-t border-x text-xs font-medium cursor-pointer ${
-                    !currentSessionId 
-                        ? "bg-[#f9fafb] border-zinc-200 border-b-transparent -mb-[1px] text-zinc-800" 
-                        : "bg-zinc-50 border-transparent text-zinc-500 hover:bg-zinc-100"
-                }`}
-            >
-                New Chat
-            </button>
         </div>
         
         <div className="flex items-center gap-1 pl-2">
@@ -581,8 +611,193 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
         </div>
       </div>
 
-      {/* Messages Area */}
-      <div className="flex-1 overflow-y-auto px-4 py-4 space-y-6 pb-40">
+      {/* New Chat Initial UI - 入力欄が上、Past Chatsが下 */}
+      {(!currentSessionId || currentSessionId?.startsWith("new-")) && messages.length === 0 ? (
+        <div className="flex-1 flex flex-col justify-between">
+          {/* Top Input Area */}
+          <div className="px-4 pt-4">
+            <div 
+              className={`relative flex flex-col bg-white border shadow-lg rounded-xl transition-all ${
+                isDragging ? "border-blue-500 ring-4 ring-blue-500/10" : "border-zinc-200 focus-within:border-zinc-300 focus-within:shadow-xl"
+              }`}
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
+            >
+              {/* @Files Popup */}
+              {showFilesPopup && filteredFiles.length > 0 && (
+                <div ref={filesPopupRef} className="absolute top-full left-0 mt-2 w-64 bg-white border border-zinc-200 rounded-lg shadow-xl z-50 overflow-hidden max-h-48 overflow-y-auto py-1 animate-in fade-in slide-in-from-top-2 duration-100">
+                  <div className="px-3 py-1.5 text-[10px] font-semibold text-zinc-400 uppercase tracking-wider bg-zinc-50 border-b border-zinc-100">Files</div>
+                  {filteredFiles.map((file, index) => (
+                    <button
+                      key={file.id}
+                      onClick={() => insertFileReference(file.name)}
+                      className={`w-full text-left px-3 py-2 text-xs flex items-center gap-2 ${index === selectedFileIndex ? "bg-blue-50 text-blue-700" : "text-zinc-700 hover:bg-zinc-50"}`}
+                    >
+                      <Icons.File className="w-3.5 h-3.5 text-zinc-400" />
+                      <span className="truncate">{file.name}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              <textarea
+                ref={textareaRef}
+                className="w-full max-h-60 bg-transparent px-4 py-3 text-sm text-zinc-800 resize-none focus:outline-none placeholder:text-zinc-400 min-h-[44px] rounded-t-xl"
+                value={prompt}
+                onChange={handlePromptChange}
+                onKeyDown={handleKeyDown}
+                placeholder="Plan, @ for context, / for commands"
+                rows={1}
+                disabled={loading}
+              />
+              
+              <div className="flex items-center justify-between px-2 py-1.5 border-t border-zinc-100 bg-zinc-50/30 rounded-b-xl">
+                <div className="flex items-center gap-1">
+                  {/* Agent Dropdown */}
+                  <div className="relative" ref={agentDropdownRef}>
+                    <button
+                      onClick={() => setIsAgentDropdownOpen(!isAgentDropdownOpen)}
+                      className={`flex items-center gap-1.5 text-[11px] font-medium rounded px-2 py-1 transition-colors ${getModeStyles(mode)}`}
+                    >
+                      {getModeIcon(mode, "w-3.5 h-3.5")}
+                      <span className="capitalize">{mode}</span>
+                      <Icons.ChevronDown className="w-3 h-3 opacity-50" />
+                    </button>
+                    {isAgentDropdownOpen && (
+                      <div className="absolute top-full left-0 mt-2 w-32 bg-white border border-zinc-200 rounded-lg shadow-xl z-50 py-1 overflow-hidden">
+                        <button 
+                          onClick={() => { setMode("agent"); setIsAgentDropdownOpen(false); }}
+                          className={`w-full text-left px-3 py-1.5 text-xs hover:bg-zinc-50 flex items-center justify-between ${mode === "agent" ? "bg-zinc-100 text-zinc-900 font-medium" : "text-zinc-600"}`}
+                        >
+                          <div className="flex items-center gap-2">
+                            <Icons.Agent className="w-3.5 h-3.5" />
+                            <span>Agent</span>
+                          </div>
+                          {mode === "agent" && <Icons.Check className="w-3 h-3" />}
+                        </button>
+                        <button 
+                          onClick={() => { setMode("plan"); setIsAgentDropdownOpen(false); }}
+                          className={`w-full text-left px-3 py-1.5 text-xs hover:bg-zinc-50 flex items-center justify-between ${mode === "plan" ? "bg-[#FFF8E6] text-[#B95D00] font-medium" : "text-zinc-600"}`}
+                        >
+                          <div className="flex items-center gap-2">
+                            <Icons.Plan className="w-3.5 h-3.5" />
+                            <span>Plan</span>
+                          </div>
+                          {mode === "plan" && <Icons.Check className="w-3 h-3" />}
+                        </button>
+                        <button 
+                          onClick={() => { setMode("ask"); setIsAgentDropdownOpen(false); }}
+                          className={`w-full text-left px-3 py-1.5 text-xs hover:bg-zinc-50 flex items-center justify-between ${mode === "ask" ? "bg-green-50 text-green-700 font-medium" : "text-zinc-600"}`}
+                        >
+                          <div className="flex items-center gap-2">
+                            <Icons.Ask className="w-3.5 h-3.5" />
+                            <span>Ask</span>
+                          </div>
+                          {mode === "ask" && <Icons.Check className="w-3 h-3" />}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Model Dropdown */}
+                  <div className="relative" ref={dropdownRef}>
+                    <button
+                      onClick={() => setIsModelDropdownOpen(!isModelDropdownOpen)}
+                      className="flex items-center gap-1.5 text-[11px] font-medium text-zinc-500 hover:text-zinc-800 hover:bg-zinc-100 rounded px-2 py-1 transition-colors"
+                    >
+                      <span>{currentModelName}</span>
+                      <Icons.ChevronDown className="w-3 h-3 opacity-50" />
+                    </button>
+                    
+                    {isModelDropdownOpen && (
+                      <div className="absolute top-full left-0 mt-2 w-56 bg-white border border-zinc-200 rounded-lg shadow-xl z-50 overflow-hidden max-h-60 overflow-y-auto py-1">
+                        <div className="px-3 py-1.5 text-[10px] font-semibold text-zinc-400 uppercase tracking-wider bg-zinc-50 border-b border-zinc-100">Select Model</div>
+                        {availableModels.map((model) => (
+                          <button
+                            key={model.id}
+                            onClick={() => { setSelectedModel(model.id); setIsModelDropdownOpen(false); }}
+                            className={`w-full text-left px-3 py-2 text-xs hover:bg-zinc-50 flex items-center justify-between ${selectedModel === model.id ? "bg-blue-50 text-blue-700" : "text-zinc-700"}`}
+                          >
+                            <span>{model.name}</span>
+                            {selectedModel === model.id && <Icons.Check className="w-3 h-3" />}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-1">
+                  <button className="p-1.5 hover:bg-zinc-200 rounded text-zinc-400 hover:text-zinc-600 transition-colors">
+                    <span className="text-xs">@</span>
+                  </button>
+                  <button className="p-1.5 hover:bg-zinc-200 rounded text-zinc-400 hover:text-zinc-600 transition-colors">
+                    <Icons.Globe className="w-3.5 h-3.5" />
+                  </button>
+                  <button className="p-1.5 hover:bg-zinc-200 rounded text-zinc-400 hover:text-zinc-600 transition-colors">
+                    <Icons.Image className="w-3.5 h-3.5" />
+                  </button>
+                  {prompt.trim().length === 0 ? (
+                    <button className="p-1.5 hover:bg-zinc-200 rounded text-zinc-400 hover:text-zinc-600 transition-colors">
+                      <Icons.Mic className="w-3.5 h-3.5" />
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => onSubmit()}
+                      disabled={loading || !prompt.trim()}
+                      className={`ml-1 p-1.5 rounded-full transition-all flex items-center justify-center ${getSubmitButtonStyles(mode, prompt.trim().length > 0)}`}
+                    >
+                      <Icons.ArrowUp className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Past Chats List - 下部に固定 */}
+          <div className="px-4 pb-4">
+            <div className="flex items-center justify-between mb-3">
+              <button 
+                onClick={() => setIsPastChatsExpanded(!isPastChatsExpanded)}
+                className="flex items-center gap-2 hover:opacity-70 transition-opacity"
+              >
+                <span className="text-xs font-medium text-zinc-400">Past Chats</span>
+                <Icons.ChevronDown className={`w-3 h-3 text-zinc-400 transition-transform ${isPastChatsExpanded ? "" : "-rotate-90"}`} />
+              </button>
+              {sessions.length > 3 && (
+                <button 
+                  onClick={() => setShowHistoryDropdown(true)}
+                  className="text-xs text-zinc-400 hover:text-zinc-600 transition-colors"
+                >
+                  View All
+                </button>
+              )}
+            </div>
+            {isPastChatsExpanded && (
+              <div className="space-y-1">
+                {sessions.slice(0, 3).map(session => (
+                  <button
+                    key={session.id}
+                    onClick={() => openSession(session)}
+                    className="w-full text-left px-2 py-2 text-sm text-zinc-700 hover:bg-zinc-100 rounded-lg flex items-center justify-between group"
+                  >
+                    <span className="truncate">{session.title}</span>
+                    <span className="text-xs text-zinc-400">{formatDistanceToNow(new Date(session.created_at), { addSuffix: false })}</span>
+                  </button>
+                ))}
+                {sessions.length === 0 && (
+                  <p className="text-xs text-zinc-400 py-4 text-center">No past chats yet</p>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      ) : (
+        <>
+          {/* Messages Area - 通常のチャットUI */}
+          <div className="flex-1 overflow-y-auto px-4 py-4 space-y-6 pb-40">
         {messages.length === 0 && !currentSessionId && (
           <div className="h-full flex flex-col items-center justify-center text-zinc-400 space-y-2 opacity-50">
              <p>No messages yet.</p>
@@ -687,11 +902,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
             value={prompt}
             onChange={handlePromptChange}
             onKeyDown={handleKeyDown}
-            placeholder={
-              mode === "ask" ? "Ask a question about your code..." :
-              mode === "plan" ? "Describe a feature to plan..." :
-              "Ask anything, @ for context, / for commands"
-            }
+            placeholder="Add a follow-up"
             rows={1}
             disabled={loading}
           />
@@ -822,6 +1033,8 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
           </div>
         </div>
       </div>
+        </>
+      )}
     </div>
   );
 });
