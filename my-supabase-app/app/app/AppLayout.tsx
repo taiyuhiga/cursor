@@ -526,6 +526,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       >
         <AiPanel
           ref={aiPanelRef}
+          projectId={projectId}
           currentFileText={fileContent}
           onAppend={handleAppend}
           onRequestDiff={handleRequestDiff}

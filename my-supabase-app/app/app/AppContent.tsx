@@ -11,10 +11,12 @@ type Workspace = {
 };
 
 type Props = {
-  workspaceId?: string;
+  searchParamsPromise: Promise<{ workspace?: string }>;
 };
 
-export default async function AppContent({ workspaceId }: Props) {
+export default async function AppContent({ searchParamsPromise }: Props) {
+  const searchParams = await searchParamsPromise;
+  const workspaceId = searchParams.workspace;
   const supabase = await createClient();
 
   const {

@@ -2,12 +2,21 @@
 
 import { useState, useRef, useEffect, forwardRef, useImperativeHandle, useCallback } from "react";
 import { Icons } from "./Icons";
+import { createClient } from "@/lib/supabase/client";
+import { formatDistanceToNow } from "date-fns";
 
 type Message = {
   id: string;
   role: "user" | "assistant";
   content: string;
   isError?: boolean;
+  created_at?: string;
+};
+
+type ChatSession = {
+  id: string;
+  title: string;
+  created_at: string;
 };
 
 type ModelConfig = {
@@ -25,6 +34,7 @@ type FileNode = {
 };
 
 type Props = {
+  projectId: string;
   currentFileText: string;
   onAppend: (text: string) => void;
   onRequestDiff: (newCode: string) => void;
@@ -47,7 +57,12 @@ const DEFAULT_MODELS: ModelConfig[] = [
   { id: "gpt-5-pro", name: "GPT-5 Pro", provider: "openai", enabled: true },
 ];
 
-export const AiPanel = forwardRef<AiPanelHandle, Props>(({ currentFileText, onAppend, onRequestDiff, onFileCreated, nodes, onGetFileContent }, ref) => {
+export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFileText, onAppend, onRequestDiff, onFileCreated, nodes, onGetFileContent }, ref) => {
+  const supabase = createClient();
+  const [sessions, setSessions] = useState<ChatSession[]>([]);
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
+  const [showHistory, setShowHistory] = useState(false);
+
   const [messages, setMessages] = useState<Message[]>([]);
   const [prompt, setPrompt] = useState("");
   const [loading, setLoading] = useState(false);
@@ -67,10 +82,102 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ currentFileText, onAp
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const filesPopupRef = useRef<HTMLDivElement>(null);
 
-  // Get only files (not folders) for suggestions
-  const fileNodes = nodes.filter(n => n.type === "file");
+  // Load models
+  useEffect(() => {
+    const savedModels = localStorage.getItem("cursor_models");
+    if (savedModels) {
+      const parsed = JSON.parse(savedModels) as ModelConfig[];
+      const enabled = parsed.filter(m => m.enabled);
+      setAvailableModels(enabled.length > 0 ? enabled : DEFAULT_MODELS);
+      if (enabled.length > 0 && !enabled.find(m => m.id === selectedModel)) {
+        setSelectedModel(enabled[0].id);
+      }
+    }
+  }, []);
+
+  // Fetch chat sessions
+  const fetchSessions = useCallback(async () => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+
+    const { data, error } = await supabase
+      .from("chat_sessions")
+      .select("*")
+      .eq("project_id", projectId)
+      .eq("user_id", user.id)
+      .order("created_at", { ascending: false });
+
+    if (!error && data) {
+      setSessions(data);
+    }
+  }, [projectId, supabase]);
+
+  useEffect(() => {
+    fetchSessions();
+  }, [fetchSessions]);
+
+  // Load messages for current session
+  useEffect(() => {
+    async function loadMessages() {
+      if (!currentSessionId) {
+        setMessages([]);
+        return;
+      }
+      
+      const { data, error } = await supabase
+        .from("chat_messages")
+        .select("*")
+        .eq("session_id", currentSessionId)
+        .order("created_at", { ascending: true });
+
+      if (!error && data) {
+        setMessages(data.map(m => ({
+          id: m.id,
+          role: m.role as "user" | "assistant",
+          content: m.content,
+          created_at: m.created_at
+        })));
+      }
+    }
+    loadMessages();
+  }, [currentSessionId, supabase]);
+
+  const createNewSession = async (firstMessage: string) => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return null;
+
+    const title = firstMessage.slice(0, 30) + (firstMessage.length > 30 ? "..." : "");
+    const { data, error } = await supabase
+      .from("chat_sessions")
+      .insert({
+        user_id: user.id,
+        project_id: projectId,
+        title,
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Error creating session:", error);
+      return null;
+    }
+
+    setSessions(prev => [data, ...prev]);
+    setCurrentSessionId(data.id);
+    return data.id;
+  };
+
+  const saveMessage = async (sessionId: string, role: "user" | "assistant", content: string) => {
+    await supabase.from("chat_messages").insert({
+      session_id: sessionId,
+      role,
+      content,
+    });
+  };
+
+  // --- Core AI Logic (same as before but with persistence) ---
   
-  // Filter files based on search query
+  const fileNodes = nodes.filter(n => n.type === "file");
   const filteredFiles = filesSearchQuery
     ? fileNodes.filter(f => f.name.toLowerCase().includes(filesSearchQuery.toLowerCase()))
     : fileNodes;
@@ -83,29 +190,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ currentFileText, onAp
     scrollToBottom();
   }, [messages]);
 
-  // Load models from localStorage
-  useEffect(() => {
-    const loadModels = () => {
-      const savedModels = localStorage.getItem("cursor_models");
-      if (savedModels) {
-        const parsed = JSON.parse(savedModels) as ModelConfig[];
-        const enabled = parsed.filter(m => m.enabled);
-        setAvailableModels(enabled.length > 0 ? enabled : DEFAULT_MODELS);
-        
-        if (enabled.length > 0 && !enabled.find(m => m.id === selectedModel)) {
-          setSelectedModel(enabled[0].id);
-        }
-      } else {
-        setAvailableModels(DEFAULT_MODELS.filter(m => m.enabled));
-      }
-    };
-    
-    loadModels();
-    window.addEventListener("storage", loadModels);
-    return () => window.removeEventListener("storage", loadModels);
-  }, [selectedModel]);
-
-  // Close dropdowns when clicking outside
+  // Click outside handlers
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
@@ -119,68 +204,54 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ currentFileText, onAp
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
-  // Reset selected index when filtered files change
-  useEffect(() => {
-    setSelectedFileIndex(0);
-  }, [filteredFiles.length]);
-
   const extractCodeBlock = (text: string): string | null => {
     const match = text.match(/```[\w]*\n([\s\S]*?)```/);
-    if (match && match[1]) {
-      return match[1];
-    }
-    return null;
+    return match ? match[1] : null;
   };
 
-  // Extract @filename references from prompt and get their contents
   const buildContextFromMentions = useCallback(async (promptText: string): Promise<string> => {
     const mentionRegex = /@([^\s@]+)/g;
     const mentions: string[] = [];
     let match;
-    
-    while ((match = mentionRegex.exec(promptText)) !== null) {
-      mentions.push(match[1]);
-    }
+    while ((match = mentionRegex.exec(promptText)) !== null) mentions.push(match[1]);
     
     if (mentions.length === 0) return "";
     
     const contextParts: string[] = [];
-    
     for (const mention of mentions) {
       const file = fileNodes.find(f => f.name === mention);
       if (file) {
         try {
           const content = await onGetFileContent(file.id);
           contextParts.push(`--- File: ${file.name} ---\n${content}\n---`);
-        } catch (e) {
-          console.error(`Failed to get content for ${mention}:`, e);
-        }
+        } catch (e) { console.error(e); }
       }
     }
-    
-    return contextParts.length > 0 
-      ? `\n\n[Referenced Files Context]\n${contextParts.join("\n\n")}\n\n`
-      : "";
+    return contextParts.length > 0 ? `\n\n[Referenced Files Context]\n${contextParts.join("\n\n")}\n\n` : "";
   }, [fileNodes, onGetFileContent]);
 
   const onSubmit = async (customPrompt?: string) => {
     const promptToSend = customPrompt || prompt;
     if (!promptToSend.trim() || loading) return;
 
-    // Build context from @mentions
-    const fileContext = await buildContextFromMentions(promptToSend);
-    const fullPrompt = fileContext + promptToSend;
+    let activeSessionId = currentSessionId;
+    if (!activeSessionId) {
+      activeSessionId = await createNewSession(promptToSend);
+      if (!activeSessionId) return; // Error handling
+    }
 
-    const userMessage: Message = {
-      id: Date.now().toString(),
-      role: "user",
-      content: promptToSend,
-    };
-
-    setMessages((prev) => [...prev, userMessage]);
+    // Optimistic update
+    const tempId = Date.now().toString();
+    setMessages(prev => [...prev, { id: tempId, role: "user", content: promptToSend }]);
     if (!customPrompt) setPrompt("");
     setLoading(true);
 
+    // Save user message
+    await saveMessage(activeSessionId, "user", promptToSend);
+
+    // Build context
+    const fileContext = await buildContextFromMentions(promptToSend);
+    const fullPrompt = fileContext + promptToSend;
     const apiKeys = JSON.parse(localStorage.getItem("cursor_api_keys") || "{}");
 
     try {
@@ -198,64 +269,34 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ currentFileText, onAp
       const data = await res.json();
       
       if (data.error) {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: Date.now().toString(),
-            role: "assistant",
-            content: `Error: ${data.error}`,
-            isError: true,
-          },
-        ]);
+        setMessages(prev => [...prev, { id: Date.now().toString(), role: "assistant", content: `Error: ${data.error}`, isError: true }]);
       } else {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: Date.now().toString(),
-            role: "assistant",
-            content: data.content,
-          },
-        ]);
-        
-        const lowerContent = data.content.toLowerCase();
-        if (
-          lowerContent.includes("created") || 
-          lowerContent.includes("updated") || 
-          lowerContent.includes("deleted") ||
-          lowerContent.includes("作成") ||
-          lowerContent.includes("更新") ||
-          lowerContent.includes("削除")
-        ) {
+        const assistantMsg = data.content;
+        setMessages(prev => [...prev, { id: Date.now().toString(), role: "assistant", content: assistantMsg }]);
+        await saveMessage(activeSessionId, "assistant", assistantMsg);
+
+        // Check for side effects
+        const lower = assistantMsg.toLowerCase();
+        if (lower.includes("created") || lower.includes("updated") || lower.includes("deleted") || lower.includes("作成")) {
           onFileCreated?.();
         }
       }
     } catch (error) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: Date.now().toString(),
-          role: "assistant",
-          content: `Error: ${error}`,
-          isError: true,
-        },
-      ]);
+      setMessages(prev => [...prev, { id: Date.now().toString(), role: "assistant", content: `Error: ${error}`, isError: true }]);
     }
     setLoading(false);
   };
 
+  // --- Input Handlers ---
   const handlePromptChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const value = e.target.value;
     const cursorPos = e.target.selectionStart;
-    
     setPrompt(value);
     
-    // Detect @ and show popup
     const textBeforeCursor = value.substring(0, cursorPos);
     const lastAtIndex = textBeforeCursor.lastIndexOf("@");
-    
     if (lastAtIndex !== -1) {
       const textAfterAt = textBeforeCursor.substring(lastAtIndex + 1);
-      // Check if there's no space after @ (still typing filename)
       if (!textAfterAt.includes(" ") && !textAfterAt.includes("\n")) {
         setShowFilesPopup(true);
         setFilesSearchQuery(textAfterAt);
@@ -263,7 +304,6 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ currentFileText, onAp
         return;
       }
     }
-    
     setShowFilesPopup(false);
     setFilesSearchQuery("");
     setAtSymbolPosition(null);
@@ -271,37 +311,29 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ currentFileText, onAp
 
   const insertFileReference = (fileName: string) => {
     if (atSymbolPosition === null) return;
-    
     const beforeAt = prompt.substring(0, atSymbolPosition);
     const afterCursor = prompt.substring(atSymbolPosition + 1 + filesSearchQuery.length);
-    
-    const newPrompt = `${beforeAt}@${fileName} ${afterCursor}`;
-    setPrompt(newPrompt);
+    setPrompt(`${beforeAt}@${fileName} ${afterCursor}`);
     setShowFilesPopup(false);
-    setFilesSearchQuery("");
-    setAtSymbolPosition(null);
-    
-    // Focus textarea
     setTimeout(() => {
       if (textareaRef.current) {
         textareaRef.current.focus();
-        const newCursorPos = beforeAt.length + fileName.length + 2;
-        textareaRef.current.setSelectionRange(newCursorPos, newCursorPos);
+        const newPos = beforeAt.length + fileName.length + 2;
+        textareaRef.current.setSelectionRange(newPos, newPos);
       }
     }, 0);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    // Handle popup navigation
     if (showFilesPopup && filteredFiles.length > 0) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
-        setSelectedFileIndex((prev) => (prev + 1) % filteredFiles.length);
+        setSelectedFileIndex(prev => (prev + 1) % filteredFiles.length);
         return;
       }
       if (e.key === "ArrowUp") {
         e.preventDefault();
-        setSelectedFileIndex((prev) => (prev - 1 + filteredFiles.length) % filteredFiles.length);
+        setSelectedFileIndex(prev => (prev - 1 + filteredFiles.length) % filteredFiles.length);
         return;
       }
       if (e.key === "Enter" || e.key === "Tab") {
@@ -315,8 +347,6 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ currentFileText, onAp
         return;
       }
     }
-    
-    // Submit on Cmd+Enter
     if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
       e.preventDefault();
       onSubmit();
@@ -326,16 +356,14 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ currentFileText, onAp
   const triggerAction = (action: "explain" | "fix" | "test" | "refactor") => {
     const prompts = {
       explain: "このコードの機能を詳しく説明してください。",
-      fix: "このコードにある潜在的なバグやエラーを修正してください。修正後のコード全体を提示してください。",
+      fix: "このコードにある潜在的なバグやエラーを修正してください。",
       test: "このコードのテストケースを作成してください。",
-      refactor: "このコードをリファクタリングしてください。修正後のコード全体を提示してください。",
+      refactor: "このコードをリファクタリングしてください。",
     };
     onSubmit(prompts[action]);
   };
 
-  useImperativeHandle(ref, () => ({
-    triggerAction
-  }));
+  useImperativeHandle(ref, () => ({ triggerAction }));
 
   const currentModelName = availableModels.find(m => m.id === selectedModel)?.name || selectedModel;
 
@@ -343,53 +371,108 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ currentFileText, onAp
     e.preventDefault();
     setIsDragging(true);
   };
-
   const handleDragLeave = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
   };
-
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
     const fileName = e.dataTransfer.getData("application/cursor-node");
     if (fileName) {
-      setPrompt((prev) => {
+      setPrompt(prev => {
         const prefix = prev.trim().length > 0 ? " " : "";
         return `${prev}${prefix}@${fileName} `;
       });
     }
   };
 
+  const handleNewChat = () => {
+    setCurrentSessionId(null);
+    setMessages([]);
+    setShowHistory(false);
+    setPrompt("");
+    if (textareaRef.current) textareaRef.current.focus();
+  };
+
+  const handleDeleteSession = async (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    const { error } = await supabase.from("chat_sessions").delete().eq("id", id);
+    if (!error) {
+      setSessions(prev => prev.filter(s => s.id !== id));
+      if (currentSessionId === id) handleNewChat();
+    }
+  };
+
   return (
-    <div className="flex flex-col h-full bg-white text-zinc-800 border-l border-zinc-200">
-      {/* ヘッダー */}
-      <div className="flex items-center px-4 py-2 border-b border-zinc-200 bg-zinc-50/50">
-        <div className="text-xs font-medium text-zinc-600 bg-zinc-200/50 px-3 py-1 rounded-md cursor-default">
-          Chat
-        </div>
-        <div className="ml-auto flex items-center gap-2">
-           <button
-            onClick={() => setMessages([])}
-            className="p-1 hover:bg-zinc-200 rounded text-zinc-500 transition-colors"
-            title="Clear Chat"
+    <div className="flex flex-col h-full bg-white text-zinc-800 relative">
+      {/* Header */}
+      <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-200 bg-zinc-50/80 backdrop-blur-sm z-10">
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowHistory(!showHistory)}
+            className={`p-1.5 rounded-md hover:bg-zinc-200 text-zinc-600 transition-colors ${showHistory ? "bg-zinc-200 text-zinc-900" : ""}`}
+            title="Previous Chats"
           >
-            <Icons.Trash className="w-4 h-4" />
+            <Icons.History className="w-4 h-4" />
           </button>
+          <span className="text-xs font-medium text-zinc-500">AI Chat</span>
         </div>
+        <button
+          onClick={handleNewChat}
+          className="p-1.5 rounded-md hover:bg-zinc-200 text-zinc-600 transition-colors"
+          title="New Chat"
+        >
+          <Icons.Plus className="w-4 h-4" />
+        </button>
       </div>
 
-      {/* チャット履歴 */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-6">
+      {/* History Sidebar/Overlay */}
+      {showHistory && (
+        <div className="absolute top-[41px] left-0 bottom-0 w-64 bg-zinc-50 border-r border-zinc-200 z-20 overflow-y-auto shadow-lg animate-in slide-in-from-left-2 duration-200">
+          <div className="p-2 space-y-1">
+            <h3 className="px-2 py-1.5 text-[10px] font-semibold text-zinc-400 uppercase tracking-wider">Previous Chats</h3>
+            {sessions.map(session => (
+              <div
+                key={session.id}
+                onClick={() => {
+                  setCurrentSessionId(session.id);
+                  setShowHistory(false);
+                }}
+                className={`group flex items-center justify-between px-2 py-2 rounded-md cursor-pointer text-xs ${
+                  currentSessionId === session.id ? "bg-white shadow-sm text-zinc-900" : "text-zinc-600 hover:bg-zinc-200/50"
+                }`}
+              >
+                <div className="flex flex-col truncate min-w-0">
+                  <span className="truncate font-medium">{session.title}</span>
+                  <span className="text-[10px] text-zinc-400">{formatDistanceToNow(new Date(session.created_at), { addSuffix: true })}</span>
+                </div>
+                <button
+                  onClick={(e) => handleDeleteSession(e, session.id)}
+                  className="opacity-0 group-hover:opacity-100 p-1 hover:bg-zinc-200 rounded text-zinc-400 hover:text-red-500 transition-all"
+                >
+                  <Icons.Trash className="w-3 h-3" />
+                </button>
+              </div>
+            ))}
+            {sessions.length === 0 && (
+              <div className="px-2 py-4 text-center text-xs text-zinc-400">No past chats</div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Messages Area */}
+      <div className="flex-1 overflow-y-auto p-4 space-y-6 bg-white pb-32">
         {messages.length === 0 && (
-          <div className="flex flex-col items-center justify-center h-full text-zinc-400 space-y-4">
-            <div className="w-12 h-12 bg-zinc-100 rounded-xl flex items-center justify-center">
-              <Icons.AI className="w-6 h-6 text-zinc-400" />
+          <div className="flex flex-col items-center justify-center h-full text-zinc-400 space-y-4 mt-20">
+            <div className="w-12 h-12 bg-zinc-50 rounded-xl flex items-center justify-center border border-zinc-100 shadow-sm">
+              <Icons.AI className="w-6 h-6 text-zinc-300" />
             </div>
             <div className="text-center">
               <p className="text-sm font-medium text-zinc-600">Cursor AI</p>
-              <p className="text-xs mt-1 opacity-60">
-                Type @ to reference files
+              <p className="text-xs mt-1 text-zinc-400">
+                Type <kbd className="font-mono bg-zinc-100 px-1 rounded text-zinc-500">@</kbd> to add context
               </p>
             </div>
           </div>
@@ -397,74 +480,59 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ currentFileText, onAp
         
         {messages.map((msg) => {
           const codeBlock = msg.role === "assistant" ? extractCodeBlock(msg.content) : null;
-          
           return (
-            <div key={msg.id} className={`group flex flex-col gap-1.5 ${msg.role === "user" ? "items-end" : "items-start"}`}>
-              <div className="flex items-center gap-2 px-1">
-                <span className={`text-[10px] font-medium uppercase tracking-wider ${msg.role === "user" ? "text-blue-600" : "text-purple-600"}`}>
-                  {msg.role === "user" ? "You" : "AI"}
-                </span>
-              </div>
+            <div key={msg.id} className={`flex flex-col gap-1 ${msg.role === "user" ? "items-end" : "items-start"}`}>
+              {msg.role === "assistant" && (
+                <div className="flex items-center gap-2 mb-1 px-1">
+                  <div className="w-4 h-4 rounded-full bg-purple-100 flex items-center justify-center text-[8px] text-purple-600 font-bold border border-purple-200">AI</div>
+                  <span className="text-[10px] font-medium text-zinc-400 uppercase">Assistant</span>
+                </div>
+              )}
               
-              <div
-                className={`
-                  relative max-w-full text-sm whitespace-pre-wrap leading-relaxed
-                  ${msg.role === "user" 
-                    ? "text-zinc-800 bg-transparent px-1" 
-                    : "text-zinc-800 w-full"
-                  }
-                  ${msg.isError ? "text-red-600" : ""}
-                `}
-              >
+              <div className={`relative max-w-full text-sm leading-relaxed ${
+                msg.role === "user" 
+                  ? "bg-zinc-100 px-3 py-2 rounded-2xl rounded-tr-sm text-zinc-800 border border-zinc-200/50" 
+                  : "text-zinc-800 w-full pl-1"
+              } ${msg.isError ? "text-red-600" : ""}`}>
+                
                 {msg.role === "user" ? (
-                  <div className="bg-zinc-100 px-3 py-2 rounded-lg inline-block">
-                    {msg.content.split(/(@[^\s@]+)/g).map((part, i) => 
+                  <div>
+                     {msg.content.split(/(@[^\s@]+)/g).map((part, i) => 
                       part.startsWith("@") 
-                        ? <span key={i} className="text-blue-600 font-medium">{part}</span>
+                        ? <span key={i} className="text-blue-600 bg-blue-50 px-1 rounded mx-0.5 font-medium border border-blue-100">{part}</span>
                         : part
                     )}
                   </div>
                 ) : (
-                  <>
+                  <div className="whitespace-pre-wrap">
                     {msg.content}
                     {codeBlock && !msg.isError && (
-                      <div className="flex gap-2 mt-3">
-                        <button
-                          onClick={() => onRequestDiff(codeBlock)}
-                          className="flex items-center gap-1.5 text-xs font-medium bg-blue-50 hover:bg-blue-100 text-blue-600 border border-blue-200 rounded-md px-3 py-1.5 transition-colors"
-                        >
-                          Review Changes
-                        </button>
-                        <button
-                          onClick={() => onAppend(codeBlock)}
-                          className="text-xs font-medium bg-zinc-50 hover:bg-zinc-100 text-zinc-600 border border-zinc-200 rounded-md px-3 py-1.5 transition-colors"
-                        >
-                          Append
-                        </button>
+                      <div className="flex gap-2 mt-3 mb-1">
+                        <button onClick={() => onRequestDiff(codeBlock)} className="flex items-center gap-1.5 text-xs font-medium bg-blue-50 hover:bg-blue-100 text-blue-600 border border-blue-200 rounded px-2 py-1 transition-colors">Apply</button>
+                        <button onClick={() => onAppend(codeBlock)} className="text-xs font-medium bg-zinc-50 hover:bg-zinc-100 text-zinc-600 border border-zinc-200 rounded px-2 py-1 transition-colors">Append</button>
                       </div>
                     )}
-                  </>
+                  </div>
                 )}
               </div>
             </div>
           );
         })}
-        
         {loading && (
           <div className="flex items-center gap-2 text-zinc-400 text-sm px-1 py-2">
-             <div className="w-1.5 h-1.5 bg-zinc-400 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
-             <div className="w-1.5 h-1.5 bg-zinc-400 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
-             <div className="w-1.5 h-1.5 bg-zinc-400 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
+             <div className="w-1.5 h-1.5 bg-zinc-400 rounded-full animate-bounce delay-0" />
+             <div className="w-1.5 h-1.5 bg-zinc-400 rounded-full animate-bounce delay-150" />
+             <div className="w-1.5 h-1.5 bg-zinc-400 rounded-full animate-bounce delay-300" />
           </div>
         )}
         <div ref={messagesEndRef} />
       </div>
 
-      {/* 入力エリア */}
-      <div className="p-4 bg-white border-t border-zinc-200">
+      {/* Floating Input Area */}
+      <div className="absolute bottom-4 left-4 right-4 z-30">
         <div 
-          className={`relative flex flex-col border rounded-xl shadow-sm bg-white transition-all ${
-            isDragging ? "border-blue-500 ring-2 ring-blue-500/20 bg-blue-50/10" : "border-zinc-200 focus-within:ring-1 focus-within:ring-blue-500 focus-within:border-blue-500"
+          className={`relative flex flex-col bg-white border shadow-lg rounded-xl transition-all ${
+            isDragging ? "border-blue-500 ring-4 ring-blue-500/10" : "border-zinc-200 focus-within:border-zinc-300 focus-within:shadow-xl"
           }`}
           onDragOver={handleDragOver}
           onDragLeave={handleDragLeave}
@@ -472,106 +540,74 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ currentFileText, onAp
         >
           {/* @Files Popup */}
           {showFilesPopup && filteredFiles.length > 0 && (
-            <div 
-              ref={filesPopupRef}
-              className="absolute bottom-full left-2 mb-2 w-64 bg-white border border-zinc-200 rounded-lg shadow-xl z-50 overflow-hidden max-h-48 overflow-y-auto py-1 animate-in fade-in zoom-in-95 duration-100"
-            >
-              <div className="px-3 py-1.5 text-[10px] font-semibold text-zinc-400 uppercase tracking-wider bg-zinc-50 border-b border-zinc-100 flex items-center gap-2">
-                <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-                Files
-              </div>
+            <div ref={filesPopupRef} className="absolute bottom-full left-0 mb-2 w-64 bg-white border border-zinc-200 rounded-lg shadow-xl z-50 overflow-hidden max-h-48 overflow-y-auto py-1 animate-in fade-in slide-in-from-bottom-2 duration-100">
+              <div className="px-3 py-1.5 text-[10px] font-semibold text-zinc-400 uppercase tracking-wider bg-zinc-50 border-b border-zinc-100">Files</div>
               {filteredFiles.map((file, index) => (
                 <button
                   key={file.id}
                   onClick={() => insertFileReference(file.name)}
-                  className={`w-full text-left px-3 py-2 text-xs flex items-center gap-2 ${
-                    index === selectedFileIndex 
-                      ? "bg-blue-50 text-blue-700" 
-                      : "text-zinc-700 hover:bg-zinc-50"
-                  }`}
+                  className={`w-full text-left px-3 py-2 text-xs flex items-center gap-2 ${index === selectedFileIndex ? "bg-blue-50 text-blue-700" : "text-zinc-700 hover:bg-zinc-50"}`}
                 >
-                  <svg className="w-3.5 h-3.5 text-zinc-400 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                  <Icons.File className="w-3.5 h-3.5 text-zinc-400" />
                   <span className="truncate">{file.name}</span>
                 </button>
               ))}
             </div>
           )}
 
-          {showFilesPopup && filteredFiles.length === 0 && filesSearchQuery && (
-            <div 
-              ref={filesPopupRef}
-              className="absolute bottom-full left-2 mb-2 w-64 bg-white border border-zinc-200 rounded-lg shadow-xl z-50 overflow-hidden py-3 px-4 animate-in fade-in zoom-in-95 duration-100"
-            >
-              <p className="text-xs text-zinc-500">No files matching "{filesSearchQuery}"</p>
-            </div>
-          )}
-
           <textarea
             ref={textareaRef}
-            className="w-full max-h-60 bg-transparent p-3 text-sm text-zinc-800 resize-none focus:outline-none placeholder:text-zinc-400 min-h-[80px] rounded-t-xl"
+            className="w-full max-h-60 bg-transparent px-4 py-3 text-sm text-zinc-800 resize-none focus:outline-none placeholder:text-zinc-400 min-h-[44px] rounded-t-xl"
             value={prompt}
             onChange={handlePromptChange}
             onKeyDown={handleKeyDown}
-            placeholder="Ask AI... (@ to reference files)"
+            placeholder="Plan, @ for context, / for commands"
+            rows={1}
+            style={{ minHeight: "44px" }}
             disabled={loading}
           />
           
-          {/* Toolbar */}
-          <div className="flex items-center justify-between px-2 py-2 bg-zinc-50/50 border-t border-zinc-100 rounded-b-xl">
-            <div className="relative" ref={dropdownRef}>
+          <div className="flex items-center justify-between px-2 py-1.5 border-t border-zinc-100 bg-zinc-50/30 rounded-b-xl">
+             <div className="relative" ref={dropdownRef}>
               <button
                 onClick={() => setIsModelDropdownOpen(!isModelDropdownOpen)}
-                className="flex items-center gap-1.5 text-xs font-medium text-zinc-600 hover:text-zinc-900 hover:bg-zinc-200/50 rounded px-2 py-1 transition-colors"
+                className="flex items-center gap-1.5 text-[11px] font-medium text-zinc-500 hover:text-zinc-800 hover:bg-zinc-100 rounded px-2 py-1 transition-colors"
               >
                 <span>{currentModelName}</span>
-                <svg className="w-3 h-3 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+                <Icons.ChevronDown className="w-3 h-3 opacity-50" />
               </button>
               
               {isModelDropdownOpen && (
-                <div className="absolute bottom-full left-0 mb-2 w-56 bg-white border border-zinc-200 rounded-lg shadow-xl z-50 overflow-hidden max-h-60 overflow-y-auto py-1 animate-in fade-in zoom-in-95 duration-100 origin-bottom-left">
+                <div className="absolute bottom-full left-0 mb-2 w-56 bg-white border border-zinc-200 rounded-lg shadow-xl z-50 overflow-hidden max-h-60 overflow-y-auto py-1">
                   <div className="px-3 py-1.5 text-[10px] font-semibold text-zinc-400 uppercase tracking-wider bg-zinc-50 border-b border-zinc-100">Select Model</div>
                   {availableModels.map((model) => (
                     <button
                       key={model.id}
-                      onClick={() => {
-                        setSelectedModel(model.id);
-                        setIsModelDropdownOpen(false);
-                      }}
+                      onClick={() => { setSelectedModel(model.id); setIsModelDropdownOpen(false); }}
                       className={`w-full text-left px-3 py-2 text-xs hover:bg-zinc-50 flex items-center justify-between ${selectedModel === model.id ? "bg-blue-50 text-blue-700" : "text-zinc-700"}`}
                     >
                       <span>{model.name}</span>
-                      {selectedModel === model.id && <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" /></svg>}
+                      {selectedModel === model.id && <Icons.Check className="w-3 h-3" />}
                     </button>
                   ))}
                 </div>
               )}
             </div>
 
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => onSubmit()}
-                disabled={loading || !prompt.trim()}
-                className={`p-1.5 rounded-md transition-all ${
-                  !prompt.trim() 
-                    ? "text-zinc-300 cursor-not-allowed" 
-                    : "bg-blue-600 text-white hover:bg-blue-700 shadow-sm"
-                }`}
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <line x1="22" y1="2" x2="11" y2="13"></line>
-                  <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
-                </svg>
-              </button>
-            </div>
+            <button
+              onClick={() => onSubmit()}
+              disabled={loading || !prompt.trim()}
+              className={`p-1.5 rounded-md transition-all ${!prompt.trim() ? "text-zinc-300" : "bg-black text-white hover:bg-zinc-800 shadow-sm"}`}
+            >
+              <Icons.ArrowUp className="w-3.5 h-3.5" />
+            </button>
           </div>
         </div>
-
-        {/* Quick Actions */}
-         <div className="flex gap-2 overflow-x-auto no-scrollbar mt-3 pb-1">
-          <button onClick={() => triggerAction("explain")} disabled={loading} className="flex-shrink-0 text-[10px] font-medium px-2.5 py-1.5 rounded border border-zinc-200 text-zinc-600 hover:bg-zinc-50 hover:text-zinc-900 transition-colors whitespace-nowrap">Explain</button>
-          <button onClick={() => triggerAction("fix")} disabled={loading} className="flex-shrink-0 text-[10px] font-medium px-2.5 py-1.5 rounded border border-zinc-200 text-zinc-600 hover:bg-zinc-50 hover:text-zinc-900 transition-colors whitespace-nowrap">Fix</button>
-          <button onClick={() => triggerAction("test")} disabled={loading} className="flex-shrink-0 text-[10px] font-medium px-2.5 py-1.5 rounded border border-zinc-200 text-zinc-600 hover:bg-zinc-50 hover:text-zinc-900 transition-colors whitespace-nowrap">Test</button>
-          <button onClick={() => triggerAction("refactor")} disabled={loading} className="flex-shrink-0 text-[10px] font-medium px-2.5 py-1.5 rounded border border-zinc-200 text-zinc-600 hover:bg-zinc-50 hover:text-zinc-900 transition-colors whitespace-nowrap">Refactor</button>
+        
+        {/* Footer info */}
+        <div className="text-[10px] text-zinc-400 text-center mt-2 flex justify-center gap-3">
+          <span>Cmd+K to generate</span>
+          <span>Cmd+L to chat</span>
         </div>
       </div>
     </div>
