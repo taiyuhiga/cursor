@@ -715,23 +715,13 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
     if (autoMode) return "Auto";
     const current = availableModels.find(m => m.id === selectedModel);
     const modelName = current ? current.name : selectedModel;
-    if (maxMode) {
-      return (
-        <span className="flex items-center gap-1">
-          {modelName} <Icons.Check className="w-3 h-3" /> 1x
-        </span>
-      );
-    }
+    // Use Multiple Models takes priority
     if (useMultipleModels && selectedModels.length > 0) {
       const modelNames = selectedModels
         .map(id => availableModels.find(m => m.id === id)?.name)
         .filter(Boolean)
         .join(", ");
-      return (
-        <span className="flex items-center gap-1">
-          {modelNames} <Icons.ChevronDown className="w-3 h-3" /> <span className="text-purple-600">{selectedModels.length}x</span>
-        </span>
-      );
+      return modelNames;
     }
     return modelName;
   };
@@ -857,6 +847,12 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
                     </div>
                 )}
             </div>
+            <button 
+                className="p-1.5 hover:bg-zinc-100 rounded text-zinc-500"
+                title="More options"
+            >
+                <Icons.MoreHorizontal className="w-4 h-4" />
+            </button>
         </div>
       </div>
 
@@ -1097,9 +1093,6 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
                 <div className="flex items-center gap-1 flex-shrink-0">
                   <button className="p-1.5 hover:bg-zinc-200 rounded text-zinc-400 hover:text-zinc-600 transition-colors">
                     <span className="text-xs">@</span>
-                  </button>
-                  <button className="p-1.5 hover:bg-zinc-200 rounded text-zinc-400 hover:text-zinc-600 transition-colors">
-                    <Icons.Globe className="w-3.5 h-3.5" />
                   </button>
                   <button 
                     onClick={handleImageClick}
@@ -1422,7 +1415,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
                               <span className="text-sm text-zinc-700">Use Multiple Models</span>
                               <button
                                 onClick={() => setUseMultipleModels(!useMultipleModels)}
-                                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${useMultipleModels ? 'bg-purple-600' : 'bg-zinc-300'}`}
+                                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${useMultipleModels ? 'bg-[#2F8132]' : 'bg-zinc-300'}`}
                               >
                                 <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${useMultipleModels ? 'translate-x-6' : 'translate-x-1'}`} />
                               </button>
@@ -1448,18 +1441,18 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
                                   className={`w-full text-left px-3 py-2.5 text-sm hover:bg-zinc-50 flex items-center justify-between ${isSelected ? "bg-zinc-50" : ""}`}
                                 >
                                   <div className="flex items-center gap-2">
-                                    {/* MAX Mode: brain icon style only */}
-                                    {maxMode ? (
-                                      <>
-                                        <span className="text-zinc-700">{model.name}</span>
-                                        <Icons.Brain className="w-4 h-4 text-zinc-400" />
-                                      </>
-                                    ) : useMultipleModels ? (
-                                      /* Use Multiple Models: purple checkbox */
+                                    {/* Use Multiple Models takes priority (purple checkbox) */}
+                                    {useMultipleModels ? (
                                       <>
                                         <div className={`w-4 h-4 flex items-center justify-center rounded border ${isSelected ? "bg-purple-600 border-purple-600" : "border-zinc-300 bg-white"}`}>
                                           {isSelected && <Icons.Check className="w-3 h-3 text-white" />}
                                         </div>
+                                        <span className="text-zinc-700">{model.name}</span>
+                                        <Icons.Brain className="w-4 h-4 text-zinc-400" />
+                                      </>
+                                    ) : maxMode ? (
+                                      /* MAX Mode only: brain icon style */
+                                      <>
                                         <span className="text-zinc-700">{model.name}</span>
                                         <Icons.Brain className="w-4 h-4 text-zinc-400" />
                                       </>
@@ -1471,8 +1464,8 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
                                       </>
                                     )}
                                   </div>
-                                  {/* MAX Mode: checkmark on right */}
-                                  {maxMode && isSelected && (
+                                  {/* MAX Mode only (not multiple): checkmark on right */}
+                                  {maxMode && !useMultipleModels && isSelected && (
                                     <Icons.Check className="w-4 h-4 text-zinc-600" />
                                   )}
                                   {/* Normal mode: checkmark on right */}
@@ -1490,58 +1483,38 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
              </div>
 
             <div className="flex items-center gap-1">
+                <button className="p-1.5 hover:bg-zinc-200 rounded text-zinc-400 hover:text-zinc-600 transition-colors">
+                    <span className="text-xs">@</span>
+                </button>
+                <button 
+                    onClick={handleImageClick}
+                    className={`p-1.5 hover:bg-zinc-200 rounded transition-colors ${attachedImages.length > 0 ? "text-blue-500" : "text-zinc-400 hover:text-zinc-600"}`}
+                >
+                    <Icons.Image className="w-3.5 h-3.5" />
+                </button>
+                <input
+                  ref={imageInputRef}
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  onChange={handleImageChange}
+                  className="hidden"
+                />
                 {loading ? (
-                    <>
-                         <div className="w-4 h-4 border-2 border-zinc-300 border-t-zinc-600 rounded-full animate-spin mr-1"></div>
-                         <button className="p-1.5 hover:bg-zinc-200 rounded text-zinc-400 hover:text-zinc-600 transition-colors">
-                            <span className="text-xs">@</span>
-                        </button>
-                        <button className="p-1.5 hover:bg-zinc-200 rounded text-zinc-400 hover:text-zinc-600 transition-colors">
-                            <Icons.Globe className="w-3.5 h-3.5" />
-                        </button>
-                        <button 
-                            onClick={handleImageClick}
-                            className={`p-1.5 hover:bg-zinc-200 rounded transition-colors ${attachedImages.length > 0 ? "text-blue-500" : "text-zinc-400 hover:text-zinc-600"}`}
-                        >
-                            <Icons.Image className="w-3.5 h-3.5" />
-                        </button>
-                        <button
-                            onClick={handleStop}
-                            className="ml-1 p-1.5 rounded-full transition-all flex items-center justify-center bg-zinc-100 hover:bg-zinc-200 text-zinc-600 border border-zinc-200"
-                        >
-                            <Icons.Stop className="w-3.5 h-3.5" />
-                        </button>
-                    </>
+                    <button
+                        onClick={handleStop}
+                        className="ml-1 p-1.5 rounded-full transition-all flex items-center justify-center bg-zinc-100 hover:bg-zinc-200 text-zinc-600 border border-zinc-200"
+                    >
+                        <Icons.Stop className="w-3.5 h-3.5" />
+                    </button>
                 ) : (
-                    <>
-                        <button className="p-1.5 hover:bg-zinc-200 rounded text-zinc-400 hover:text-zinc-600 transition-colors">
-                            <span className="text-xs">@</span>
-                        </button>
-                        <button className="p-1.5 hover:bg-zinc-200 rounded text-zinc-400 hover:text-zinc-600 transition-colors">
-                            <Icons.Globe className="w-3.5 h-3.5" />
-                        </button>
-                        <button 
-                            onClick={handleImageClick}
-                            className={`p-1.5 hover:bg-zinc-200 rounded transition-colors ${attachedImages.length > 0 ? "text-blue-500" : "text-zinc-400 hover:text-zinc-600"}`}
-                        >
-                            <Icons.Image className="w-3.5 h-3.5" />
-                        </button>
-                        <input
-                          ref={imageInputRef}
-                          type="file"
-                          accept="image/*"
-                          multiple
-                          onChange={handleImageChange}
-                          className="hidden"
-                        />
-                        <button
-                          onClick={() => onSubmit()}
-                          disabled={loading || (!prompt.trim() && attachedImages.length === 0)}
-                          className={`p-1.5 rounded-full transition-all flex-shrink-0 flex items-center justify-center ${getSubmitButtonStyles(mode, prompt.trim().length > 0 || attachedImages.length > 0)}`}
-                        >
-                          <Icons.ArrowUp className="w-3.5 h-3.5" />
-                        </button>
-                    </>
+                    <button
+                      onClick={() => onSubmit()}
+                      disabled={loading || (!prompt.trim() && attachedImages.length === 0)}
+                      className={`p-1.5 rounded-full transition-all flex-shrink-0 flex items-center justify-center ${getSubmitButtonStyles(mode, prompt.trim().length > 0 || attachedImages.length > 0)}`}
+                    >
+                      <Icons.ArrowUp className="w-3.5 h-3.5" />
+                    </button>
                 )}
             </div>
           </div>
