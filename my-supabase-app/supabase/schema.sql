@@ -59,6 +59,7 @@ create table if not exists public.chat_messages (
   session_id uuid references public.chat_sessions(id) on delete cascade not null,
   role text not null check (role in ('user', 'assistant')),
   content text not null,
+  images text[] default null,
   created_at timestamp with time zone default timezone('utc'::text, now()) not null
 );
 
@@ -104,3 +105,22 @@ create policy "Users can insert messages to their sessions"
     where chat_sessions.id = chat_messages.session_id
     and chat_sessions.user_id = auth.uid()
   ));
+
+-- Storage bucket for chat images
+-- Run this in Supabase Dashboard > Storage or SQL Editor:
+-- 1. Create bucket named 'chat-images'
+-- 2. Set it to public
+-- 3. Add the following policies:
+
+-- Storage policies (run in SQL Editor):
+-- insert into storage.buckets (id, name, public) values ('chat-images', 'chat-images', true);
+
+-- Allow authenticated users to upload
+-- create policy "Authenticated users can upload images"
+--   on storage.objects for insert
+--   with check (bucket_id = 'chat-images' and auth.role() = 'authenticated');
+
+-- Allow public to view images
+-- create policy "Public can view images"
+--   on storage.objects for select
+--   using (bucket_id = 'chat-images');

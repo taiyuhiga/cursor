@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { createFile, updateFile, deleteFile, createFolder, listFiles } from "@/lib/tools/file-operations";
 
+// Body sizeの制限を増やす（画像送信のため）
+export const maxDuration = 60; // 60秒のタイムアウト
+
 // Function Callingのツール定義
 const tools = [
   {
@@ -60,7 +63,19 @@ const tools = [
   },
 ];
 
-async function callOpenAI(apiKey: string, model: string, prompt: string, systemPrompt: string) {
+async function callOpenAI(apiKey: string, model: string, prompt: string, systemPrompt: string, images?: string[]) {
+  const userContent: any[] = [{ type: "text", text: prompt }];
+  
+  // 画像があれば追加
+  if (images && images.length > 0) {
+    for (const img of images) {
+      userContent.push({
+        type: "image_url",
+        image_url: { url: img },
+      });
+    }
+  }
+
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -71,7 +86,7 @@ async function callOpenAI(apiKey: string, model: string, prompt: string, systemP
       model: model,
       messages: [
         { role: "system", content: systemPrompt },
-        { role: "user", content: prompt },
+        { role: "user", content: images && images.length > 0 ? userContent : prompt },
       ],
     }),
   });
@@ -85,7 +100,29 @@ async function callOpenAI(apiKey: string, model: string, prompt: string, systemP
   return data.choices[0].message.content;
 }
 
-async function callAnthropic(apiKey: string, model: string, prompt: string, systemPrompt: string) {
+async function callAnthropic(apiKey: string, model: string, prompt: string, systemPrompt: string, images?: string[]) {
+  const userContent: any[] = [];
+  
+  // 画像があれば先に追加
+  if (images && images.length > 0) {
+    for (const img of images) {
+      // data:image/png;base64,... 形式から media_type と data を抽出
+      const match = img.match(/^data:(.+);base64,(.+)$/);
+      if (match) {
+        userContent.push({
+          type: "image",
+          source: {
+            type: "base64",
+            media_type: match[1],
+            data: match[2],
+          },
+        });
+      }
+    }
+  }
+  
+  userContent.push({ type: "text", text: prompt });
+
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -96,7 +133,7 @@ async function callAnthropic(apiKey: string, model: string, prompt: string, syst
     body: JSON.stringify({
       model: model,
       system: systemPrompt,
-      messages: [{ role: "user", content: prompt }],
+      messages: [{ role: "user", content: userContent }],
       max_tokens: 4096,
     }),
   });
@@ -112,7 +149,7 @@ async function callAnthropic(apiKey: string, model: string, prompt: string, syst
 
 export async function POST(req: NextRequest) {
   try {
-    const { prompt, fileText, model, apiKeys, mode = "agent" } = await req.json();
+    const { prompt, fileText, model, apiKeys, mode = "agent", images = [] } = await req.json();
 
     let systemPrompt = "";
 
@@ -165,7 +202,7 @@ When generating code:
       if (!openaiKey) {
         return NextResponse.json({ error: "OpenAI API Key is missing. Please set it in Settings or .env.local." }, { status: 400 });
       }
-      const content = await callOpenAI(openaiKey, model, prompt, systemPrompt);
+      const content = await callOpenAI(openaiKey, model, prompt, systemPrompt, images);
       return NextResponse.json({ content });
     } 
     else if (model.startsWith("claude-")) {
@@ -173,7 +210,7 @@ When generating code:
       if (!anthropicKey) {
         return NextResponse.json({ error: "Anthropic API Key is missing. Please set it in Settings or .env.local." }, { status: 400 });
       }
-      const content = await callAnthropic(anthropicKey, model, prompt, systemPrompt);
+      const content = await callAnthropic(anthropicKey, model, prompt, systemPrompt, images);
       return NextResponse.json({ content });
     } 
     else {
@@ -211,7 +248,25 @@ When generating code:
         ],
       });
 
-      const result = await chat.sendMessage(prompt);
+      // メッセージパーツを作成（テキスト + 画像）
+      const messageParts: any[] = [{ text: prompt }];
+      
+      // 画像があれば追加
+      if (images && images.length > 0) {
+        for (const img of images) {
+          const match = img.match(/^data:(.+);base64,(.+)$/);
+          if (match) {
+            messageParts.push({
+              inlineData: {
+                mimeType: match[1],
+                data: match[2],
+              },
+            });
+          }
+        }
+      }
+
+      const result = await chat.sendMessage(messageParts);
       const response = result.response;
       
       // Function Callingの処理
