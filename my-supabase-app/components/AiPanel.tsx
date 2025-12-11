@@ -713,18 +713,27 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
 
   const getModelDisplay = () => {
     if (autoMode) return "Auto";
-    if (useMultipleModels && selectedModels.length > 1) {
-        return `${selectedModels.length}x ${availableModels.find(m => m.id === selectedModels[0])?.name.split(" ")[0]}...`;
-    }
     const current = availableModels.find(m => m.id === selectedModel);
-    return current ? current.name : selectedModel;
-  };
-
-  const getMaxModeIndicator = () => {
-    if (maxMode && !autoMode) {
-      return "1x";
+    const modelName = current ? current.name : selectedModel;
+    if (maxMode) {
+      return (
+        <span className="flex items-center gap-1">
+          {modelName} <Icons.Check className="w-3 h-3" /> 1x
+        </span>
+      );
     }
-    return null;
+    if (useMultipleModels && selectedModels.length > 0) {
+      const modelNames = selectedModels
+        .map(id => availableModels.find(m => m.id === id)?.name)
+        .filter(Boolean)
+        .join(", ");
+      return (
+        <span className="flex items-center gap-1">
+          {modelNames} <Icons.ChevronDown className="w-3 h-3" /> <span className="text-purple-600">{selectedModels.length}x</span>
+        </span>
+      );
+    }
+    return modelName;
   };
 
   const toggleThought = (msgId: string) => {
@@ -763,13 +772,20 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
     }
   };
 
-  const getSubmitButtonStyles = (m: "agent" | "plan" | "ask", hasText: boolean) => {
-      if (!hasText) return "text-zinc-300";
-      
+  const getSubmitButtonStyles = (m: "agent" | "plan" | "ask", hasContent: boolean) => {
+      // 入力がない時は薄い色で無効化
+      if (!hasContent) {
+          switch (m) {
+              case "ask": return "bg-[#2F8132]/40 text-white/60 cursor-not-allowed"; // Light green
+              case "plan": return "bg-[#B95D00]/40 text-white/60 cursor-not-allowed"; // Light brown
+              default: return "bg-black/30 text-white/60 cursor-not-allowed"; // Light black (Agent)
+          }
+      }
+      // 入力がある時は通常の色
       switch (m) {
           case "ask": return "bg-[#2F8132] text-white hover:bg-[#266A29] shadow-sm"; // Green
           case "plan": return "bg-[#B95D00] text-white hover:bg-[#A05300] shadow-sm"; // Brown/Orange
-          default: return "bg-black text-white hover:bg-zinc-800 shadow-sm"; // Black
+          default: return "bg-black text-white hover:bg-zinc-800 shadow-sm"; // Black (Agent)
       }
   };
 
@@ -848,7 +864,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
       {(!currentSessionId || currentSessionId?.startsWith("new-")) && messages.length === 0 ? (
         <div className="flex-1 flex flex-col justify-between">
           {/* Top Input Area */}
-          <div className="px-4 pt-4">
+          <div className="px-3 pt-4">
             <div 
               className={`relative flex flex-col bg-white border shadow-lg rounded-xl transition-all ${
                 isDragging ? "border-blue-500 ring-4 ring-blue-500/10" : "border-zinc-200 focus-within:border-zinc-300 focus-within:shadow-xl"
@@ -907,7 +923,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
                 disabled={loading}
               />
               
-              <div className="flex items-center justify-between px-2 py-1.5 border-t border-zinc-100 bg-zinc-50/30 rounded-b-xl">
+              <div className="flex items-center justify-between px-2 pr-3 py-1.5 border-t border-zinc-100 bg-zinc-50/30 rounded-b-xl">
                 <div className="flex items-center gap-1">
                   {/* Agent Dropdown */}
                   <div className="relative" ref={agentDropdownRef}>
@@ -1023,8 +1039,6 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
                         {/* Models List - Hide when Auto is on */}
                         {!autoMode && (
                             <div className="py-1">
-                            <div className="px-3 py-1.5 text-[10px] font-medium text-zinc-400">Composer 1</div>
-                            
                             {availableModels
                                 .filter(m => !modelSearchQuery || m.name.toLowerCase().includes(modelSearchQuery.toLowerCase()))
                                 .map((model) => {
@@ -1036,17 +1050,39 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
                                     <button
                                     key={model.id}
                                     onClick={() => handleModelSelect(model.id)}
-                                    className={`w-full text-left px-3 py-1.5 text-xs hover:bg-zinc-100 flex items-center justify-between group ${isSelected ? "bg-zinc-100" : ""}`}
+                                    className={`w-full text-left px-3 py-1.5 text-xs hover:bg-zinc-100 flex items-center justify-between group ${isSelected ? "bg-zinc-50" : ""}`}
                                     >
                                     <div className="flex items-center gap-2">
-                                        <div className={`w-3.5 h-3.5 flex items-center justify-center rounded border ${isSelected ? "bg-purple-600 border-purple-600" : "border-zinc-300 bg-white"}`}>
-                                        {isSelected && <Icons.Check className="w-2.5 h-2.5 text-white" />}
-                                        </div>
-                                        <span className="text-zinc-700">{model.name}</span>
-                                        <Icons.Brain className="w-3 h-3 text-zinc-300" />
+                                        {/* Use Multiple Models takes priority (purple checkbox) */}
+                                        {useMultipleModels ? (
+                                          <>
+                                            <div className={`w-4 h-4 flex items-center justify-center rounded border ${isSelected ? "bg-purple-600 border-purple-600" : "border-zinc-300 bg-white"}`}>
+                                              {isSelected && <Icons.Check className="w-3 h-3 text-white" />}
+                                            </div>
+                                            <span className="text-zinc-700">{model.name}</span>
+                                            <Icons.Brain className="w-3.5 h-3.5 text-zinc-400" />
+                                          </>
+                                        ) : maxMode ? (
+                                          /* MAX Mode only: brain icon style */
+                                          <>
+                                            <span className="text-zinc-700">{model.name}</span>
+                                            <Icons.Brain className="w-3.5 h-3.5 text-zinc-400" />
+                                          </>
+                                        ) : (
+                                          /* Normal mode: brain icon with checkmark on right */
+                                          <>
+                                            <span className="text-zinc-700">{model.name}</span>
+                                            <Icons.Brain className="w-3.5 h-3.5 text-zinc-400" />
+                                          </>
+                                        )}
                                     </div>
-                                    {useMultipleModels && isSelected && (
-                                        <span className="text-[10px] text-zinc-400">1x</span>
+                                    {/* MAX Mode only (not multiple): checkmark on right */}
+                                    {maxMode && !useMultipleModels && isSelected && (
+                                        <Icons.Check className="w-4 h-4 text-zinc-600" />
+                                    )}
+                                    {/* Normal mode: checkmark on right */}
+                                    {!maxMode && !useMultipleModels && isSelected && (
+                                        <Icons.Check className="w-4 h-4 text-zinc-600" />
                                     )}
                                     </button>
                                 );
@@ -1058,7 +1094,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
                   </div>
                 </div>
 
-                <div className="flex items-center gap-1">
+                <div className="flex items-center gap-1 flex-shrink-0">
                   <button className="p-1.5 hover:bg-zinc-200 rounded text-zinc-400 hover:text-zinc-600 transition-colors">
                     <span className="text-xs">@</span>
                   </button>
@@ -1079,19 +1115,13 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
                     onChange={handleImageChange}
                     className="hidden"
                   />
-                  {prompt.trim().length === 0 && attachedImages.length === 0 ? (
-                    <button className="p-1.5 hover:bg-zinc-200 rounded text-zinc-400 hover:text-zinc-600 transition-colors">
-                      <Icons.Mic className="w-3.5 h-3.5" />
-                    </button>
-                  ) : (
-                    <button
-                      onClick={() => onSubmit()}
-                      disabled={loading || (!prompt.trim() && attachedImages.length === 0)}
-                      className={`ml-1 p-1.5 rounded-full transition-all flex items-center justify-center ${getSubmitButtonStyles(mode, prompt.trim().length > 0 || attachedImages.length > 0)}`}
-                    >
-                      <Icons.ArrowUp className="w-3.5 h-3.5" />
-                    </button>
-                  )}
+                  <button
+                    onClick={() => onSubmit()}
+                    disabled={loading || (!prompt.trim() && attachedImages.length === 0)}
+                    className={`p-1.5 rounded-full transition-all flex-shrink-0 flex items-center justify-center ${getSubmitButtonStyles(mode, prompt.trim().length > 0 || attachedImages.length > 0)}`}
+                  >
+                    <Icons.ArrowUp className="w-3.5 h-3.5" />
+                  </button>
                 </div>
               </div>
             </div>
@@ -1288,7 +1318,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
             disabled={loading}
           />
           
-          <div className="flex items-center justify-between px-2 py-1.5 border-t border-zinc-100 bg-zinc-50/30 rounded-b-xl">
+          <div className="flex items-center justify-between px-2 pr-3 py-1.5 border-t border-zinc-100 bg-zinc-50/30 rounded-b-xl">
              <div className="flex items-center gap-1">
                 {/* Agent Dropdown */}
                 <div className="relative" ref={agentDropdownRef}>
@@ -1340,9 +1370,9 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
                 <div className="relative" ref={dropdownRef}>
                   <button
                     onClick={() => setIsModelDropdownOpen(!isModelDropdownOpen)}
-                    className="flex items-center gap-1.5 text-[11px] font-medium text-zinc-500 hover:text-zinc-800 hover:bg-zinc-100 rounded px-2 py-1 transition-colors"
+                    className="flex items-center gap-1.5 text-[11px] font-medium text-zinc-500 hover:text-zinc-800 hover:bg-zinc-100 rounded px-2 py-1 transition-colors min-w-[100px]"
                   >
-                    <span>{currentModelName}</span>
+                    <span>{getModelDisplay()}</span>
                     <Icons.ChevronDown className="w-3 h-3 opacity-50" />
                   </button>
                   
@@ -1361,59 +1391,99 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
 
                       {/* Toggle Switches */}
                       <div className="p-3 border-b border-zinc-200 space-y-2">
-                        <div className="flex items-center justify-between">
-                          <span className="text-sm text-zinc-700">Auto</span>
+                        <div className="flex items-start justify-between">
+                          <div className="flex flex-col flex-1 min-w-0 pr-3">
+                            <span className="text-sm text-zinc-700">Auto</span>
+                            {autoMode && (
+                              <span className="text-xs text-zinc-500 mt-0.5 leading-tight">Balanced quality and speed, recommended for most tasks</span>
+                            )}
+                          </div>
                           <button
                             onClick={() => setAutoMode(!autoMode)}
-                            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${autoMode ? 'bg-zinc-400' : 'bg-zinc-300'}`}
+                            className={`flex-shrink-0 relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${autoMode ? 'bg-[#2F8132]' : 'bg-zinc-300'}`}
                           >
                             <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${autoMode ? 'translate-x-6' : 'translate-x-1'}`} />
                           </button>
                         </div>
                         
-                        <div className="flex items-center justify-between">
-                          <span className="text-sm text-zinc-700">MAX Mode</span>
-                          <button
-                            onClick={() => setMaxMode(!maxMode)}
-                            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${maxMode ? 'bg-purple-600' : 'bg-zinc-300'}`}
-                          >
-                            <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${maxMode ? 'translate-x-6' : 'translate-x-1'}`} />
-                          </button>
-                        </div>
-                        
-                        <div className="flex items-center justify-between">
-                          <span className="text-sm text-zinc-700">Use Multiple Models</span>
-                          <button
-                            onClick={() => setUseMultipleModels(!useMultipleModels)}
-                            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${useMultipleModels ? 'bg-zinc-400' : 'bg-zinc-300'}`}
-                          >
-                            <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${useMultipleModels ? 'translate-x-6' : 'translate-x-1'}`} />
-                          </button>
-                        </div>
+                        {!autoMode && (
+                          <>
+                            <div className="flex items-center justify-between">
+                              <span className="text-sm text-zinc-700">MAX Mode</span>
+                              <button
+                                onClick={() => setMaxMode(!maxMode)}
+                                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${maxMode ? 'bg-purple-600' : 'bg-zinc-300'}`}
+                              >
+                                <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${maxMode ? 'translate-x-6' : 'translate-x-1'}`} />
+                              </button>
+                            </div>
+                            
+                            <div className="flex items-center justify-between">
+                              <span className="text-sm text-zinc-700">Use Multiple Models</span>
+                              <button
+                                onClick={() => setUseMultipleModels(!useMultipleModels)}
+                                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${useMultipleModels ? 'bg-purple-600' : 'bg-zinc-300'}`}
+                              >
+                                <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${useMultipleModels ? 'translate-x-6' : 'translate-x-1'}`} />
+                              </button>
+                            </div>
+                          </>
+                        )}
                       </div>
 
-                      {/* Composer 1 Section */}
-                      <div className="border-b border-zinc-200">
-                        <div className="px-3 py-2 text-xs font-semibold text-zinc-500">Composer 1</div>
-                        
-                        {availableModels
-                          .filter(m => !modelSearchQuery || m.name.toLowerCase().includes(modelSearchQuery.toLowerCase()))
-                          .map((model) => (
-                          <button
-                            key={model.id}
-                            onClick={() => { setSelectedModel(model.id); setIsModelDropdownOpen(false); }}
-                            className={`w-full text-left px-3 py-2.5 text-sm hover:bg-zinc-50 flex items-center justify-between ${selectedModel === model.id ? "bg-zinc-50" : ""}`}
-                          >
-                            <div className="flex items-center gap-2">
-                              <span className="text-zinc-700">{model.name}</span>
-                              <svg className="w-4 h-4 text-zinc-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
-                              </svg>
-                            </div>
-                            {selectedModel === model.id && <Icons.Check className="w-4 h-4 text-zinc-700" />}
-                          </button>
-                        ))}
-                      </div>
+                      {/* Models List - Hide when Auto is on */}
+                      {!autoMode && (
+                        <div className="border-b border-zinc-200 py-1">
+                          {availableModels
+                            .filter(m => !modelSearchQuery || m.name.toLowerCase().includes(modelSearchQuery.toLowerCase()))
+                            .map((model) => {
+                              const isSelected = useMultipleModels 
+                                ? selectedModels.includes(model.id)
+                                : selectedModel === model.id;
+                              
+                              return (
+                                <button
+                                  key={model.id}
+                                  onClick={() => handleModelSelect(model.id)}
+                                  className={`w-full text-left px-3 py-2.5 text-sm hover:bg-zinc-50 flex items-center justify-between ${isSelected ? "bg-zinc-50" : ""}`}
+                                >
+                                  <div className="flex items-center gap-2">
+                                    {/* MAX Mode: brain icon style only */}
+                                    {maxMode ? (
+                                      <>
+                                        <span className="text-zinc-700">{model.name}</span>
+                                        <Icons.Brain className="w-4 h-4 text-zinc-400" />
+                                      </>
+                                    ) : useMultipleModels ? (
+                                      /* Use Multiple Models: purple checkbox */
+                                      <>
+                                        <div className={`w-4 h-4 flex items-center justify-center rounded border ${isSelected ? "bg-purple-600 border-purple-600" : "border-zinc-300 bg-white"}`}>
+                                          {isSelected && <Icons.Check className="w-3 h-3 text-white" />}
+                                        </div>
+                                        <span className="text-zinc-700">{model.name}</span>
+                                        <Icons.Brain className="w-4 h-4 text-zinc-400" />
+                                      </>
+                                    ) : (
+                                      /* Normal mode: brain icon with checkmark on right */
+                                      <>
+                                        <span className="text-zinc-700">{model.name}</span>
+                                        <Icons.Brain className="w-4 h-4 text-zinc-400" />
+                                      </>
+                                    )}
+                                  </div>
+                                  {/* MAX Mode: checkmark on right */}
+                                  {maxMode && isSelected && (
+                                    <Icons.Check className="w-4 h-4 text-zinc-600" />
+                                  )}
+                                  {/* Normal mode: checkmark on right */}
+                                  {!maxMode && !useMultipleModels && isSelected && (
+                                    <Icons.Check className="w-4 h-4 text-zinc-600" />
+                                  )}
+                                </button>
+                              );
+                            })}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -1464,19 +1534,13 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
                           onChange={handleImageChange}
                           className="hidden"
                         />
-                        {prompt.trim().length === 0 && attachedImages.length === 0 ? (
-                             <button className="p-1.5 hover:bg-zinc-200 rounded text-zinc-400 hover:text-zinc-600 transition-colors">
-                                <Icons.Mic className="w-3.5 h-3.5" />
-                            </button>
-                        ) : (
-                             <button
-                                onClick={() => onSubmit()}
-                                disabled={loading || (!prompt.trim() && attachedImages.length === 0)}
-                                className={`ml-1 p-1.5 rounded-full transition-all flex items-center justify-center ${getSubmitButtonStyles(mode, prompt.trim().length > 0 || attachedImages.length > 0)}`}
-                            >
-                                <Icons.ArrowUp className="w-3.5 h-3.5" />
-                            </button>
-                        )}
+                        <button
+                          onClick={() => onSubmit()}
+                          disabled={loading || (!prompt.trim() && attachedImages.length === 0)}
+                          className={`p-1.5 rounded-full transition-all flex-shrink-0 flex items-center justify-center ${getSubmitButtonStyles(mode, prompt.trim().length > 0 || attachedImages.length > 0)}`}
+                        >
+                          <Icons.ArrowUp className="w-3.5 h-3.5" />
+                        </button>
                     </>
                 )}
             </div>
