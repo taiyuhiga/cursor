@@ -50,8 +50,8 @@ export type AiPanelHandle = {
 
 const DEFAULT_MODELS: ModelConfig[] = [
   { id: "gemini-3-pro-preview", name: "Gemini 3 Pro", provider: "google", enabled: true },
-  { id: "claude-opus-4-5-20251101", name: "Claude Opus 4.5", provider: "anthropic", enabled: true },
-  { id: "claude-sonnet-4-5-20250929", name: "Claude Sonnet 4.5", provider: "anthropic", enabled: true },
+  { id: "claude-opus-4-5-20251101", name: "Opus 4.5", provider: "anthropic", enabled: true },
+  { id: "claude-sonnet-4-5-20250929", name: "Sonnet 4.5", provider: "anthropic", enabled: true },
   { id: "gpt-5.1", name: "GPT-5.1", provider: "openai", enabled: true },
   { id: "gpt-5", name: "GPT-5", provider: "openai", enabled: true },
   { id: "gpt-5-pro", name: "GPT-5 Pro", provider: "openai", enabled: true },
@@ -61,16 +61,24 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
   const supabase = createClient();
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
-  const [showHistory, setShowHistory] = useState(false);
+  
+  // Tab Management
+  const [openTabs, setOpenTabs] = useState<ChatSession[]>([]);
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [prompt, setPrompt] = useState("");
   const [loading, setLoading] = useState(false);
   const [selectedModel, setSelectedModel] = useState<string>("gemini-3-pro-preview");
   const [availableModels, setAvailableModels] = useState<ModelConfig[]>(DEFAULT_MODELS);
+  const [mode, setMode] = useState<"agent" | "plan" | "ask">("agent");
   const [isModelDropdownOpen, setIsModelDropdownOpen] = useState(false);
+  const [isAgentDropdownOpen, setIsAgentDropdownOpen] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
+  const [showHistoryDropdown, setShowHistoryDropdown] = useState(false);
   
+  // "Thought" section state (mock)
+  const [expandedThoughts, setExpandedThoughts] = useState<Record<string, boolean>>({});
+
   // @Files popup state
   const [showFilesPopup, setShowFilesPopup] = useState(false);
   const [filesSearchQuery, setFilesSearchQuery] = useState("");
@@ -79,8 +87,12 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const agentDropdownRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const filesPopupRef = useRef<HTMLDivElement>(null);
+  const historyRef = useRef<HTMLDivElement>(null);
+
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   // Load models
   useEffect(() => {
@@ -109,8 +121,14 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
 
     if (!error && data) {
       setSessions(data);
+      // Initialize tabs: open current one or new chat
+      if (data.length > 0 && openTabs.length === 0) {
+        // Just for demo, maybe don't open any or open the most recent
+        // setOpenTabs([data[0]]);
+        // setCurrentSessionId(data[0].id);
+      }
     }
-  }, [projectId, supabase]);
+  }, [projectId, supabase, openTabs.length]);
 
   useEffect(() => {
     fetchSessions();
@@ -146,7 +164,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return null;
 
-    const title = firstMessage.slice(0, 30) + (firstMessage.length > 30 ? "..." : "");
+    const title = firstMessage.slice(0, 20) + (firstMessage.length > 20 ? "..." : "");
     const { data, error } = await supabase
       .from("chat_sessions")
       .insert({
@@ -163,6 +181,8 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
     }
 
     setSessions(prev => [data, ...prev]);
+    // タブに追加してタイトルを表示
+    setOpenTabs(prev => [...prev, data]);
     setCurrentSessionId(data.id);
     return data.id;
   };
@@ -175,7 +195,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
     });
   };
 
-  // --- Core AI Logic (same as before but with persistence) ---
+  // --- Core AI Logic ---
   
   const fileNodes = nodes.filter(n => n.type === "file");
   const filteredFiles = filesSearchQuery
@@ -196,8 +216,14 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
       if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
         setIsModelDropdownOpen(false);
       }
+      if (agentDropdownRef.current && !agentDropdownRef.current.contains(event.target as Node)) {
+        setIsAgentDropdownOpen(false);
+      }
       if (filesPopupRef.current && !filesPopupRef.current.contains(event.target as Node)) {
         setShowFilesPopup(false);
+      }
+      if (historyRef.current && !historyRef.current.contains(event.target as Node)) {
+        setShowHistoryDropdown(false);
       }
     };
     document.addEventListener("mousedown", handleClickOutside);
@@ -230,6 +256,14 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
     return contextParts.length > 0 ? `\n\n[Referenced Files Context]\n${contextParts.join("\n\n")}\n\n` : "";
   }, [fileNodes, onGetFileContent]);
 
+  const handleStop = () => {
+    if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+        abortControllerRef.current = null;
+    }
+    setLoading(false);
+  };
+
   const onSubmit = async (customPrompt?: string) => {
     const promptToSend = customPrompt || prompt;
     if (!promptToSend.trim() || loading) return;
@@ -254,6 +288,9 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
     const fullPrompt = fileContext + promptToSend;
     const apiKeys = JSON.parse(localStorage.getItem("cursor_api_keys") || "{}");
 
+    // Initialize AbortController
+    abortControllerRef.current = new AbortController();
+
     try {
       const res = await fetch("/api/ai", {
         method: "POST",
@@ -261,9 +298,11 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
           prompt: fullPrompt,
           fileText: currentFileText,
           model: selectedModel,
+          mode,
           apiKeys,
         }),
         headers: { "Content-Type": "application/json" },
+        signal: abortControllerRef.current.signal,
       });
 
       const data = await res.json();
@@ -281,10 +320,16 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
           onFileCreated?.();
         }
       }
-    } catch (error) {
-      setMessages(prev => [...prev, { id: Date.now().toString(), role: "assistant", content: `Error: ${error}`, isError: true }]);
+    } catch (error: any) {
+      if (error.name === 'AbortError') {
+          // Stopped by user, do nothing or add a "Stopped" message if desired
+      } else {
+          setMessages(prev => [...prev, { id: Date.now().toString(), role: "assistant", content: `Error: ${error}`, isError: true }]);
+      }
+    } finally {
+        setLoading(false);
+        abortControllerRef.current = null;
     }
-    setLoading(false);
   };
 
   // --- Input Handlers ---
@@ -293,6 +338,12 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
     const cursorPos = e.target.selectionStart;
     setPrompt(value);
     
+    // Resize textarea
+    if (textareaRef.current) {
+        textareaRef.current.style.height = "auto";
+        textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 200) + "px";
+    }
+
     const textBeforeCursor = value.substring(0, cursorPos);
     const lastAtIndex = textBeforeCursor.lastIndexOf("@");
     if (lastAtIndex !== -1) {
@@ -347,6 +398,13 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
         return;
       }
     }
+    if (!e.shiftKey && !e.nativeEvent.isComposing) {
+        if (e.key === "Enter") {
+            e.preventDefault();
+            onSubmit();
+            return;
+        }
+    }
     if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
       e.preventDefault();
       onSubmit();
@@ -390,121 +448,180 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
   const handleNewChat = () => {
     setCurrentSessionId(null);
     setMessages([]);
-    setShowHistory(false);
     setPrompt("");
-    if (textareaRef.current) textareaRef.current.focus();
+    if (textareaRef.current) {
+        textareaRef.current.focus();
+        textareaRef.current.style.height = "auto";
+    }
   };
 
-  const handleDeleteSession = async (e: React.MouseEvent, id: string) => {
-    e.stopPropagation();
-    const { error } = await supabase.from("chat_sessions").delete().eq("id", id);
-    if (!error) {
-      setSessions(prev => prev.filter(s => s.id !== id));
-      if (currentSessionId === id) handleNewChat();
+  const toggleThought = (msgId: string) => {
+    setExpandedThoughts(prev => ({ ...prev, [msgId]: !prev[msgId] }));
+  };
+
+  const openSession = (session: ChatSession) => {
+      if (!openTabs.find(t => t.id === session.id)) {
+          setOpenTabs(prev => [...prev, session]);
+      }
+      setCurrentSessionId(session.id);
+      setShowHistoryDropdown(false);
+  };
+
+  const closeTab = (e: React.MouseEvent, sessionId: string) => {
+      e.stopPropagation();
+      setOpenTabs(prev => prev.filter(t => t.id !== sessionId));
+      if (currentSessionId === sessionId) {
+          const remaining = openTabs.filter(t => t.id !== sessionId);
+          if (remaining.length > 0) {
+              setCurrentSessionId(remaining[remaining.length - 1].id);
+          } else {
+              handleNewChat();
+          }
+      }
+  }
+
+  const getModeStyles = (m: "agent" | "plan" | "ask") => {
+    switch (m) {
+      case "plan": return "bg-[#FFF8E6] text-[#B95D00] hover:bg-[#FFF4D6] border-transparent";
+      case "ask": return "bg-zinc-100 text-zinc-900 hover:bg-zinc-200 border-transparent";
+      default: return "bg-zinc-100 text-zinc-600 hover:bg-zinc-200 border-transparent";
+    }
+  };
+
+  const getSubmitButtonStyles = (m: "agent" | "plan" | "ask", hasText: boolean) => {
+      if (!hasText) return "text-zinc-300";
+      
+      switch (m) {
+          case "ask": return "bg-[#2F8132] text-white hover:bg-[#266A29] shadow-sm"; // Green
+          default: return "bg-black text-white hover:bg-zinc-800 shadow-sm"; // Black
+      }
+  };
+
+  const getModeIcon = (m: "agent" | "plan" | "ask", className?: string) => {
+    switch (m) {
+      case "plan": return <Icons.Plan className={className} />;
+      case "ask": return <Icons.Ask className={className} />;
+      default: return <Icons.Agent className={className} />;
     }
   };
 
   return (
-    <div className="flex flex-col h-full bg-white text-zinc-800 relative">
-      {/* Header */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-200 bg-zinc-50/80 backdrop-blur-sm z-10">
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => setShowHistory(!showHistory)}
-            className={`p-1.5 rounded-md hover:bg-zinc-200 text-zinc-600 transition-colors ${showHistory ? "bg-zinc-200 text-zinc-900" : ""}`}
-            title="Previous Chats"
-          >
-            <Icons.History className="w-4 h-4" />
-          </button>
-          <span className="text-xs font-medium text-zinc-500">AI Chat</span>
+    <div className="flex flex-col h-full bg-[#f9fafb] text-zinc-900 relative">
+      {/* Header Tabs */}
+      <div className="flex items-center gap-1 px-2 pt-2 pb-0 border-b border-zinc-200 bg-white select-none">
+        <div className="flex items-center overflow-x-auto no-scrollbar gap-1 flex-1">
+            {openTabs.map(tab => (
+                <div 
+                    key={tab.id}
+                    onClick={() => setCurrentSessionId(tab.id)}
+                    className={`group flex items-center gap-2 px-3 py-1.5 rounded-t-lg border-t border-x text-xs font-medium cursor-pointer min-w-[120px] max-w-[200px] ${
+                        currentSessionId === tab.id 
+                            ? "bg-[#f9fafb] border-zinc-200 border-b-transparent -mb-[1px] text-zinc-800" 
+                            : "bg-zinc-50 border-transparent text-zinc-500 hover:bg-zinc-100"
+                    }`}
+                >
+                    <span className="truncate flex-1">{tab.title}</span>
+                    <button 
+                        onClick={(e) => closeTab(e, tab.id)}
+                        className="opacity-0 group-hover:opacity-100 p-0.5 rounded-full hover:bg-zinc-200 text-zinc-400 hover:text-zinc-600"
+                    >
+                         <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                    </button>
+                </div>
+            ))}
+            <button 
+                onClick={handleNewChat}
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-t-lg border-t border-x text-xs font-medium cursor-pointer ${
+                    !currentSessionId 
+                        ? "bg-[#f9fafb] border-zinc-200 border-b-transparent -mb-[1px] text-zinc-800" 
+                        : "bg-zinc-50 border-transparent text-zinc-500 hover:bg-zinc-100"
+                }`}
+            >
+                New Chat
+            </button>
         </div>
-        <button
-          onClick={handleNewChat}
-          className="p-1.5 rounded-md hover:bg-zinc-200 text-zinc-600 transition-colors"
-          title="New Chat"
-        >
-          <Icons.Plus className="w-4 h-4" />
-        </button>
+        
+        <div className="flex items-center gap-1 pl-2">
+            <button 
+                onClick={handleNewChat}
+                className="p-1.5 hover:bg-zinc-100 rounded text-zinc-500"
+                title="New Chat"
+            >
+                <Icons.Plus className="w-4 h-4" />
+            </button>
+            <div className="relative" ref={historyRef}>
+                <button 
+                    onClick={() => setShowHistoryDropdown(!showHistoryDropdown)}
+                    className={`p-1.5 hover:bg-zinc-100 rounded text-zinc-500 ${showHistoryDropdown ? "bg-zinc-100 text-zinc-800" : ""}`}
+                >
+                    <Icons.History className="w-4 h-4" />
+                </button>
+                {/* History Dropdown */}
+                {showHistoryDropdown && (
+                    <div className="absolute top-full right-0 mt-1 w-64 bg-white border border-zinc-200 rounded-lg shadow-lg z-50 max-h-80 overflow-y-auto">
+                        <div className="p-2">
+                            <h3 className="px-2 py-1 text-[10px] font-semibold text-zinc-400 uppercase">Recent Chats</h3>
+                            {sessions.map(s => (
+                                <button
+                                    key={s.id}
+                                    onClick={() => openSession(s)}
+                                    className="w-full text-left px-2 py-2 text-xs text-zinc-700 hover:bg-zinc-50 rounded flex flex-col"
+                                >
+                                    <span className="font-medium truncate w-full">{s.title}</span>
+                                    <span className="text-[10px] text-zinc-400">{formatDistanceToNow(new Date(s.created_at), { addSuffix: true })}</span>
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+                )}
+            </div>
+            <button className="p-1.5 hover:bg-zinc-100 rounded text-zinc-500">
+                <Icons.MoreHorizontal className="w-4 h-4" />
+            </button>
+        </div>
       </div>
 
-      {/* History Sidebar/Overlay */}
-      {showHistory && (
-        <div className="absolute top-[41px] left-0 bottom-0 w-64 bg-zinc-50 border-r border-zinc-200 z-20 overflow-y-auto shadow-lg animate-in slide-in-from-left-2 duration-200">
-          <div className="p-2 space-y-1">
-            <h3 className="px-2 py-1.5 text-[10px] font-semibold text-zinc-400 uppercase tracking-wider">Previous Chats</h3>
-            {sessions.map(session => (
-              <div
-                key={session.id}
-                onClick={() => {
-                  setCurrentSessionId(session.id);
-                  setShowHistory(false);
-                }}
-                className={`group flex items-center justify-between px-2 py-2 rounded-md cursor-pointer text-xs ${
-                  currentSessionId === session.id ? "bg-white shadow-sm text-zinc-900" : "text-zinc-600 hover:bg-zinc-200/50"
-                }`}
-              >
-                <div className="flex flex-col truncate min-w-0">
-                  <span className="truncate font-medium">{session.title}</span>
-                  <span className="text-[10px] text-zinc-400">{formatDistanceToNow(new Date(session.created_at), { addSuffix: true })}</span>
-                </div>
-                <button
-                  onClick={(e) => handleDeleteSession(e, session.id)}
-                  className="opacity-0 group-hover:opacity-100 p-1 hover:bg-zinc-200 rounded text-zinc-400 hover:text-red-500 transition-all"
-                >
-                  <Icons.Trash className="w-3 h-3" />
-                </button>
-              </div>
-            ))}
-            {sessions.length === 0 && (
-              <div className="px-2 py-4 text-center text-xs text-zinc-400">No past chats</div>
-            )}
-          </div>
-        </div>
-      )}
-
       {/* Messages Area */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-6 bg-white pb-32">
-        {messages.length === 0 && (
-          <div className="flex flex-col items-center justify-center h-full text-zinc-400 space-y-4 mt-20">
-            <div className="w-12 h-12 bg-zinc-50 rounded-xl flex items-center justify-center border border-zinc-100 shadow-sm">
-              <Icons.AI className="w-6 h-6 text-zinc-300" />
-            </div>
-            <div className="text-center">
-              <p className="text-sm font-medium text-zinc-600">Cursor AI</p>
-              <p className="text-xs mt-1 text-zinc-400">
-                Type <kbd className="font-mono bg-zinc-100 px-1 rounded text-zinc-500">@</kbd> to add context
-              </p>
-            </div>
+      <div className="flex-1 overflow-y-auto px-4 py-4 space-y-6 pb-40">
+        {messages.length === 0 && !currentSessionId && (
+          <div className="h-full flex flex-col items-center justify-center text-zinc-400 space-y-2 opacity-50">
+             <p>No messages yet.</p>
           </div>
         )}
         
-        {messages.map((msg) => {
+        {messages.map((msg, idx) => {
           const codeBlock = msg.role === "assistant" ? extractCodeBlock(msg.content) : null;
-          return (
-            <div key={msg.id} className={`flex flex-col gap-1 ${msg.role === "user" ? "items-end" : "items-start"}`}>
-              {msg.role === "assistant" && (
-                <div className="flex items-center gap-2 mb-1 px-1">
-                  <div className="w-4 h-4 rounded-full bg-purple-100 flex items-center justify-center text-[8px] text-purple-600 font-bold border border-purple-200">AI</div>
-                  <span className="text-[10px] font-medium text-zinc-400 uppercase">Assistant</span>
-                </div>
-              )}
-              
-              <div className={`relative max-w-full text-sm leading-relaxed ${
-                msg.role === "user" 
-                  ? "bg-zinc-100 px-3 py-2 rounded-2xl rounded-tr-sm text-zinc-800 border border-zinc-200/50" 
-                  : "text-zinc-800 w-full pl-1"
-              } ${msg.isError ? "text-red-600" : ""}`}>
-                
-                {msg.role === "user" ? (
-                  <div>
-                     {msg.content.split(/(@[^\s@]+)/g).map((part, i) => 
-                      part.startsWith("@") 
-                        ? <span key={i} className="text-blue-600 bg-blue-50 px-1 rounded mx-0.5 font-medium border border-blue-100">{part}</span>
-                        : part
-                    )}
+          const isThoughtExpanded = expandedThoughts[msg.id];
+          
+          if (msg.role === "user") {
+              return (
+                  <div key={msg.id} className="text-[14px] font-normal text-zinc-900 leading-relaxed px-1">
+                     {msg.content}
                   </div>
-                ) : (
-                  <div className="whitespace-pre-wrap">
+              )
+          }
+
+          return (
+            <div key={msg.id} className="flex flex-col gap-1">
+               {/* Thought Accordion (Mock) */}
+               <div className="flex flex-col gap-1">
+                   <button 
+                       onClick={() => toggleThought(msg.id)}
+                       className="flex items-center gap-2 text-xs text-zinc-400 hover:text-zinc-600 w-fit select-none"
+                   >
+                       <Icons.ChevronDown className={`w-3 h-3 transition-transform ${isThoughtExpanded ? "" : "-rotate-90"}`} />
+                       <span>Thought for 2s</span>
+                   </button>
+                   {isThoughtExpanded && (
+                       <div className="pl-5 text-xs text-zinc-500 border-l-2 border-zinc-200 ml-1.5 py-1">
+                           {/* Placeholder thought content */}
+                           Thinking Process...
+                       </div>
+                   )}
+               </div>
+
+               <div className="text-[14px] leading-relaxed text-zinc-800">
+                   <div className="whitespace-pre-wrap">
                     {msg.content}
                     {codeBlock && !msg.isError && (
                       <div className="flex gap-2 mt-3 mb-1">
@@ -513,13 +630,22 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
                       </div>
                     )}
                   </div>
-                )}
-              </div>
+               </div>
+               
+               {/* Message Actions */}
+               <div className="flex items-center gap-2 mt-1">
+                   <button className="p-1 hover:bg-zinc-100 rounded text-zinc-400">
+                       <Icons.Copy className="w-3.5 h-3.5" />
+                   </button>
+                   <button className="p-1 hover:bg-zinc-100 rounded text-zinc-400">
+                       <Icons.MoreHorizontal className="w-3.5 h-3.5" />
+                   </button>
+               </div>
             </div>
           );
         })}
         {loading && (
-          <div className="flex items-center gap-2 text-zinc-400 text-sm px-1 py-2">
+          <div className="flex items-center gap-2 text-zinc-400 text-sm px-1">
              <div className="w-1.5 h-1.5 bg-zinc-400 rounded-full animate-bounce delay-0" />
              <div className="w-1.5 h-1.5 bg-zinc-400 rounded-full animate-bounce delay-150" />
              <div className="w-1.5 h-1.5 bg-zinc-400 rounded-full animate-bounce delay-300" />
@@ -561,53 +687,139 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
             value={prompt}
             onChange={handlePromptChange}
             onKeyDown={handleKeyDown}
-            placeholder="Plan, @ for context, / for commands"
+            placeholder={
+              mode === "ask" ? "Ask a question about your code..." :
+              mode === "plan" ? "Describe a feature to plan..." :
+              "Ask anything, @ for context, / for commands"
+            }
             rows={1}
-            style={{ minHeight: "44px" }}
             disabled={loading}
           />
           
           <div className="flex items-center justify-between px-2 py-1.5 border-t border-zinc-100 bg-zinc-50/30 rounded-b-xl">
-             <div className="relative" ref={dropdownRef}>
-              <button
-                onClick={() => setIsModelDropdownOpen(!isModelDropdownOpen)}
-                className="flex items-center gap-1.5 text-[11px] font-medium text-zinc-500 hover:text-zinc-800 hover:bg-zinc-100 rounded px-2 py-1 transition-colors"
-              >
-                <span>{currentModelName}</span>
-                <Icons.ChevronDown className="w-3 h-3 opacity-50" />
-              </button>
-              
-              {isModelDropdownOpen && (
-                <div className="absolute bottom-full left-0 mb-2 w-56 bg-white border border-zinc-200 rounded-lg shadow-xl z-50 overflow-hidden max-h-60 overflow-y-auto py-1">
-                  <div className="px-3 py-1.5 text-[10px] font-semibold text-zinc-400 uppercase tracking-wider bg-zinc-50 border-b border-zinc-100">Select Model</div>
-                  {availableModels.map((model) => (
+             <div className="flex items-center gap-1">
+                {/* Agent Dropdown */}
+                <div className="relative" ref={agentDropdownRef}>
                     <button
-                      key={model.id}
-                      onClick={() => { setSelectedModel(model.id); setIsModelDropdownOpen(false); }}
-                      className={`w-full text-left px-3 py-2 text-xs hover:bg-zinc-50 flex items-center justify-between ${selectedModel === model.id ? "bg-blue-50 text-blue-700" : "text-zinc-700"}`}
+                        onClick={() => setIsAgentDropdownOpen(!isAgentDropdownOpen)}
+                        className={`flex items-center gap-1.5 text-[11px] font-medium rounded px-2 py-1 transition-colors ${getModeStyles(mode)}`}
                     >
-                      <span>{model.name}</span>
-                      {selectedModel === model.id && <Icons.Check className="w-3 h-3" />}
+                        {getModeIcon(mode, "w-3.5 h-3.5")}
+                        <span className="capitalize">{mode}</span>
+                        <Icons.ChevronDown className="w-3 h-3 opacity-50" />
                     </button>
-                  ))}
+                     {isAgentDropdownOpen && (
+                        <div className="absolute bottom-full left-0 mb-2 w-32 bg-white border border-zinc-200 rounded-lg shadow-xl z-50 py-1 overflow-hidden">
+                            <button 
+                                onClick={() => { setMode("agent"); setIsAgentDropdownOpen(false); }}
+                                className={`w-full text-left px-3 py-1.5 text-xs hover:bg-zinc-50 flex items-center justify-between ${mode === "agent" ? "bg-zinc-100 text-zinc-900 font-medium" : "text-zinc-600"}`}
+                            >
+                                <div className="flex items-center gap-2">
+                                    <Icons.Agent className="w-3.5 h-3.5" />
+                                    <span>Agent</span>
+                                </div>
+                                {mode === "agent" && <Icons.Check className="w-3 h-3" />}
+                            </button>
+                            <button 
+                                onClick={() => { setMode("plan"); setIsAgentDropdownOpen(false); }}
+                                className={`w-full text-left px-3 py-1.5 text-xs hover:bg-zinc-50 flex items-center justify-between ${mode === "plan" ? "bg-[#FFF8E6] text-[#B95D00] font-medium" : "text-zinc-600"}`}
+                            >
+                                <div className="flex items-center gap-2">
+                                    <Icons.Plan className="w-3.5 h-3.5" />
+                                    <span>Plan</span>
+                                </div>
+                                {mode === "plan" && <Icons.Check className="w-3 h-3" />}
+                            </button>
+                            <button 
+                                onClick={() => { setMode("ask"); setIsAgentDropdownOpen(false); }}
+                                className={`w-full text-left px-3 py-1.5 text-xs hover:bg-zinc-50 flex items-center justify-between ${mode === "ask" ? "bg-green-50 text-green-700 font-medium" : "text-zinc-600"}`}
+                            >
+                                <div className="flex items-center gap-2">
+                                    <Icons.Ask className="w-3.5 h-3.5" />
+                                    <span>Ask</span>
+                                </div>
+                                {mode === "ask" && <Icons.Check className="w-3 h-3" />}
+                            </button>
+                        </div>
+                    )}
                 </div>
-              )}
-            </div>
 
-            <button
-              onClick={() => onSubmit()}
-              disabled={loading || !prompt.trim()}
-              className={`p-1.5 rounded-md transition-all ${!prompt.trim() ? "text-zinc-300" : "bg-black text-white hover:bg-zinc-800 shadow-sm"}`}
-            >
-              <Icons.ArrowUp className="w-3.5 h-3.5" />
-            </button>
+                {/* Model Dropdown */}
+                <div className="relative" ref={dropdownRef}>
+                  <button
+                    onClick={() => setIsModelDropdownOpen(!isModelDropdownOpen)}
+                    className="flex items-center gap-1.5 text-[11px] font-medium text-zinc-500 hover:text-zinc-800 hover:bg-zinc-100 rounded px-2 py-1 transition-colors"
+                  >
+                    <span>{currentModelName}</span>
+                    <Icons.ChevronDown className="w-3 h-3 opacity-50" />
+                  </button>
+                  
+                  {isModelDropdownOpen && (
+                    <div className="absolute bottom-full left-0 mb-2 w-56 bg-white border border-zinc-200 rounded-lg shadow-xl z-50 overflow-hidden max-h-60 overflow-y-auto py-1">
+                      <div className="px-3 py-1.5 text-[10px] font-semibold text-zinc-400 uppercase tracking-wider bg-zinc-50 border-b border-zinc-100">Select Model</div>
+                      {availableModels.map((model) => (
+                        <button
+                          key={model.id}
+                          onClick={() => { setSelectedModel(model.id); setIsModelDropdownOpen(false); }}
+                          className={`w-full text-left px-3 py-2 text-xs hover:bg-zinc-50 flex items-center justify-between ${selectedModel === model.id ? "bg-blue-50 text-blue-700" : "text-zinc-700"}`}
+                        >
+                          <span>{model.name}</span>
+                          {selectedModel === model.id && <Icons.Check className="w-3 h-3" />}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+             </div>
+
+            <div className="flex items-center gap-1">
+                {loading ? (
+                    <>
+                         <div className="w-4 h-4 border-2 border-zinc-300 border-t-zinc-600 rounded-full animate-spin mr-1"></div>
+                         <button className="p-1.5 hover:bg-zinc-200 rounded text-zinc-400 hover:text-zinc-600 transition-colors">
+                            <span className="text-xs">@</span>
+                        </button>
+                        <button className="p-1.5 hover:bg-zinc-200 rounded text-zinc-400 hover:text-zinc-600 transition-colors">
+                            <Icons.Globe className="w-3.5 h-3.5" />
+                        </button>
+                        <button className="p-1.5 hover:bg-zinc-200 rounded text-zinc-400 hover:text-zinc-600 transition-colors">
+                            <Icons.Image className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                            onClick={handleStop}
+                            className="ml-1 p-1.5 rounded-full transition-all flex items-center justify-center bg-zinc-100 hover:bg-zinc-200 text-zinc-600 border border-zinc-200"
+                        >
+                            <Icons.Stop className="w-3.5 h-3.5" />
+                        </button>
+                    </>
+                ) : (
+                    <>
+                        <button className="p-1.5 hover:bg-zinc-200 rounded text-zinc-400 hover:text-zinc-600 transition-colors">
+                            <span className="text-xs">@</span>
+                        </button>
+                        <button className="p-1.5 hover:bg-zinc-200 rounded text-zinc-400 hover:text-zinc-600 transition-colors">
+                            <Icons.Globe className="w-3.5 h-3.5" />
+                        </button>
+                        <button className="p-1.5 hover:bg-zinc-200 rounded text-zinc-400 hover:text-zinc-600 transition-colors">
+                            <Icons.Image className="w-3.5 h-3.5" />
+                        </button>
+                        {prompt.trim().length === 0 ? (
+                             <button className="p-1.5 hover:bg-zinc-200 rounded text-zinc-400 hover:text-zinc-600 transition-colors">
+                                <Icons.Mic className="w-3.5 h-3.5" />
+                            </button>
+                        ) : (
+                             <button
+                                onClick={() => onSubmit()}
+                                disabled={loading || !prompt.trim()}
+                                className={`ml-1 p-1.5 rounded-full transition-all flex items-center justify-center ${getSubmitButtonStyles(mode, prompt.trim().length > 0)}`}
+                            >
+                                <Icons.ArrowUp className="w-3.5 h-3.5" />
+                            </button>
+                        )}
+                    </>
+                )}
+            </div>
           </div>
-        </div>
-        
-        {/* Footer info */}
-        <div className="text-[10px] text-zinc-400 text-center mt-2 flex justify-center gap-3">
-          <span>Cmd+K to generate</span>
-          <span>Cmd+L to chat</span>
         </div>
       </div>
     </div>

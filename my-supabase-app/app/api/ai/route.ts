@@ -112,10 +112,38 @@ async function callAnthropic(apiKey: string, model: string, prompt: string, syst
 
 export async function POST(req: NextRequest) {
   try {
-    const { prompt, fileText, model, apiKeys } = await req.json();
+    const { prompt, fileText, model, apiKeys, mode = "agent" } = await req.json();
 
-    // システムプロンプト
-    const systemPrompt = `
+    let systemPrompt = "";
+
+    // Mode-specific instructions
+    if (mode === "ask") {
+        systemPrompt = `
+You are an expert AI coding assistant acting in "ASK" mode.
+Your role is to answer questions, explain code, and help the user understand the project.
+You have read-only access to the file system (via provided context or list_files tool).
+You CANNOT create, update, or delete files.
+If the user asks for code changes, explain that you are in Ask mode and provide the code snippet for them to apply manually, or suggest switching to Agent mode.
+
+Current file content:
+${fileText ? "```\n" + fileText + "\n```" : "(No file selected)"}
+`;
+    } else if (mode === "plan") {
+        systemPrompt = `
+You are an expert AI coding assistant acting in "PLAN" mode.
+Your goal is to create a comprehensive implementation plan for the user's request.
+1. Analyze the request and the codebase.
+2. Ask clarifying questions if requirements are vague.
+3. Output a detailed step-by-step plan in Markdown format.
+4. Do NOT execute any file changes yet, even if you have the tools.
+5. Once the plan is clear, the user will switch to Agent mode to execute it (or you can provide the code blocks for them).
+
+Current file content:
+${fileText ? "```\n" + fileText + "\n```" : "(No file selected)"}
+`;
+    } else {
+        // Agent mode (default)
+        systemPrompt = `
 You are an expert AI coding assistant similar to Cursor.
 You help users write, debug, and refactor code.
 You have access to the file system and can create/update files when asked.
@@ -129,6 +157,7 @@ When generating code:
 3. If the user asks to create or update a file, suggest the code first, then if they approve (or if the prompt implies immediate action), you can use the available tools.
 (Note: Currently tool execution is only fully supported for Gemini. For others, provide the code and suggest the user to apply it.)
 `;
+    }
 
     // モデルごとの処理分岐
     if (model.startsWith("gpt-") || model.startsWith("o1-")) {
@@ -157,13 +186,19 @@ When generating code:
 
       const genAI = new GoogleGenerativeAI(apiKey);
       
+      // Filter tools based on mode
+      let enabledTools = tools;
+      if (mode === "ask") {
+          enabledTools = tools.filter(t => t.name === "list_files");
+      }
+      
       // Function Calling用のツール定義（Gemini SDK形式）
       const toolConfig = {
-        functionDeclarations: tools,
+        functionDeclarations: enabledTools,
       };
 
       const generativeModel = genAI.getGenerativeModel({ 
-        model: model || "gemini-2.0-flash-exp",
+        model: model || "gemini-3.0-pro-preview",
         tools: [toolConfig],
       });
 
@@ -185,6 +220,11 @@ When generating code:
       if (functionCalls && functionCalls.length > 0) {
         const call = functionCalls[0];
         const { name, args } = call;
+        
+        // Additional check: prevent writing tools in Ask mode even if the model tried to call them (though filtered above, good for safety)
+        if (mode === "ask" && name !== "list_files") {
+             return NextResponse.json({ content: "Error: File modifications are not allowed in Ask mode." });
+        }
         
         let toolResult;
         try {
