@@ -209,17 +209,24 @@ async function executeToolCall(
           const path = args.path;
           const existingId = context.reviewState.nodeIdByPath.get(path);
           const staged = context.reviewState.filesByPath.get(path);
+          // 既存ファイルがあり、未削除ならエラー
           if ((existingId && staged?.status !== "deleted") || (staged && staged.status !== "deleted")) {
             return { error: `File '${path}' already exists. Use update_file instead.` };
           }
-          const file: StagedFile = {
-            path,
-            nodeId: existingId,
-            originalContent: "",
-            content: args.content ?? "",
-            status: "created",
-          };
-          context.reviewState.filesByPath.set(path, file);
+          // delete → create の場合は「更新」として扱い、元の内容を保持する
+          if (staged && staged.status === "deleted") {
+            staged.content = args.content ?? "";
+            staged.status = "updated";
+          } else {
+            const file: StagedFile = {
+              path,
+              nodeId: existingId,
+              originalContent: "",
+              content: args.content ?? "",
+              status: "created",
+            };
+            context.reviewState.filesByPath.set(path, file);
+          }
           return { success: true, fileName: path, action: "created" };
         }
         return await createFile(args.path, args.content, context.projectId);
