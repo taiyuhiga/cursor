@@ -3,6 +3,7 @@
 import { createClient } from "@/lib/supabase/client";
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
+import { diffLines } from "diff";
 import { AiPanel, AiPanelHandle } from "@/components/AiPanel";
 import { TabBar } from "@/components/TabBar";
 import { PageHeader } from "@/components/PageHeader";
@@ -14,6 +15,7 @@ import { FileTree } from "@/components/FileTree";
 import { WorkspaceSwitcher } from "@/components/WorkspaceSwitcher";
 import { CreateWorkspaceDialog } from "@/components/CreateWorkspaceDialog";
 import { SettingsView } from "@/components/SettingsView";
+import { ReviewPanel, PendingChange } from "@/components/ReviewPanel";
 
 type Node = {
   id: string;
@@ -41,6 +43,16 @@ type Props = {
 
 type Activity = "explorer" | "search" | "git" | "ai" | "settings";
 
+type VirtualDoc = {
+  id: string; // virtual-plan:...
+  kind: "plan";
+  title: string;
+  fileName: string; // e.g. plan-YYYYMMDD-HHMMSS.md
+  pathHint: string; // e.g. .cursor/plans/...
+  content: string;
+  created_at: string;
+};
+
 export default function AppLayout({ projectId, workspaces, currentWorkspace, userEmail }: Props) {
   const router = useRouter();
   const [nodes, setNodes] = useState<Node[]>([]);
@@ -54,6 +66,11 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     show: boolean;
     newCode: string;
   }>({ show: false, newCode: "" });
+  const [virtualDocs, setVirtualDocs] = useState<Record<string, VirtualDoc>>({});
+  const [showReview, setShowReview] = useState(false);
+  const [pendingChanges, setPendingChanges] = useState<PendingChange[]>([]);
+  const [reviewIssues, setReviewIssues] = useState<string | null>(null);
+  const [isFindingIssues, setIsFindingIssues] = useState(false);
   const [showCreateWorkspace, setShowCreateWorkspace] = useState(false);
   const [currentWorkspaces, setCurrentWorkspaces] = useState(workspaces);
   const [activeWorkspace, setActiveWorkspace] = useState(currentWorkspace);
@@ -237,6 +254,13 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
 
   const handleCloseTab = (id: string) => {
     setOpenTabs((prev) => prev.filter((x) => x !== id));
+    if (id.startsWith("virtual-plan:")) {
+      setVirtualDocs((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+    }
     if (activeNodeId === id) {
       setOpenTabs((prev) => {
         const newTabs = prev.filter((x) => x !== id);
@@ -258,6 +282,10 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       setFileContent("");
       return;
     }
+    // Virtual doc はSupabaseから取得しない
+    if (activeNodeId.startsWith("virtual-plan:")) {
+      return;
+    }
     const fetchContent = async () => {
       const { data, error } = await supabase
         .from("file_contents")
@@ -277,6 +305,8 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   // 保存
   const saveContent = useCallback(async () => {
     if (!activeNodeId) return;
+    // Virtual doc は通常保存しない（Save to workspace を使う）
+    if (activeNodeId.startsWith("virtual-plan:")) return;
     setIsSaving(true);
     const { error } = await supabase
       .from("file_contents")
@@ -297,9 +327,177 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     }
   };
 
-  const handleAppend = (text: string) => setFileContent((prev) => prev + "\n\n" + text);
+  const getActiveVirtualDoc = useCallback((): VirtualDoc | null => {
+    if (!activeNodeId) return null;
+    return virtualDocs[activeNodeId] ?? null;
+  }, [activeNodeId, virtualDocs]);
+
+  const setActiveEditorContent = useCallback((next: string) => {
+    if (!activeNodeId) return;
+    if (activeNodeId.startsWith("virtual-plan:")) {
+      setVirtualDocs((prev) => {
+        const doc = prev[activeNodeId];
+        if (!doc) return prev;
+        return { ...prev, [activeNodeId]: { ...doc, content: next } };
+      });
+      return;
+    }
+    setFileContent(next);
+  }, [activeNodeId]);
+
+  const handleAppend = (text: string) => {
+    const virtual = getActiveVirtualDoc();
+    if (virtual) {
+      setActiveEditorContent(virtual.content + "\n\n" + text);
+      return;
+    }
+    setFileContent((prev) => prev + "\n\n" + text);
+  };
+
+  // Plan: 仮想ファイルを開く
+  const handleOpenPlan = useCallback((planMarkdown: string, titleHint?: string) => {
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const d = new Date();
+    const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+    const fileName = `plan-${stamp}.md`;
+    const id = `virtual-plan:${Date.now()}`;
+    const title = fileName;
+    const pathHint = `.cursor/plans/${fileName}`;
+
+    const doc: VirtualDoc = {
+      id,
+      kind: "plan",
+      title,
+      fileName,
+      pathHint,
+      content: planMarkdown,
+      created_at: new Date().toISOString(),
+    };
+
+    setVirtualDocs((prev) => ({ ...prev, [id]: doc }));
+    setOpenTabs((prev) => (prev.includes(id) ? prev : [...prev, id]));
+    setActiveNodeId(id);
+    // Editor側にフォーカスが欲しい場合はここで何かする（現状はタブを開くだけ）
+  }, []);
+
+  // Plan: Save to workspace（.cursor/plans/）
+  const handleSavePlanToWorkspace = useCallback(async (virtualId: string) => {
+    const doc = virtualDocs[virtualId];
+    if (!doc) return;
+
+    try {
+      const res = await fetch("/api/files", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "create_file",
+          path: doc.pathHint,
+          content: doc.content,
+          projectId,
+        }),
+      });
+
+      const json = await res.json();
+      if (!res.ok) throw new Error(json?.error || "Failed to save plan");
+
+      await fetchNodes();
+      if (json?.nodeId) {
+        handleOpenNode(json.nodeId);
+      }
+
+      // 仮想タブを閉じる
+      setVirtualDocs((prev) => {
+        const next = { ...prev };
+        delete next[virtualId];
+        return next;
+      });
+      setOpenTabs((prev) => prev.filter((x) => x !== virtualId));
+    } catch (e: any) {
+      alert(`Error: ${e.message || e}`);
+    }
+  }, [fetchNodes, handleOpenNode, projectId, virtualDocs]);
+
+  // Review handlers
+  const handleRequestReview = useCallback((changes: PendingChange[]) => {
+    setPendingChanges(changes);
+    setShowReview(true);
+  }, []);
+
+  const handleAcceptAll = useCallback(async () => {
+    for (const change of pendingChanges.filter(c => c.status === "pending")) {
+      if (change.action === "create" || change.action === "update") {
+        // Apply the change
+        const { error } = await supabase
+          .from("file_contents")
+          .upsert({
+            node_id: change.id,
+            text: change.newContent,
+          });
+        if (!error) {
+          // Update local state if this is the active file
+          if (activeNodeId === change.id) {
+            setFileContent(change.newContent);
+          }
+        }
+      }
+    }
+    setPendingChanges(prev => prev.map(c => ({ ...c, status: "accepted" as const })));
+    setShowReview(false);
+  }, [pendingChanges, activeNodeId, supabase]);
+
+  const handleRejectAll = useCallback(() => {
+    setPendingChanges(prev => prev.map(c => ({ ...c, status: "rejected" as const })));
+    setShowReview(false);
+  }, []);
+
+  const handleAcceptFile = useCallback(async (changeId: string) => {
+    const change = pendingChanges.find(c => c.id === changeId);
+    if (!change) return;
+
+    if (change.action === "create" || change.action === "update") {
+      const { error } = await supabase
+        .from("file_contents")
+        .upsert({
+          node_id: change.id,
+          text: change.newContent,
+        });
+      if (!error && activeNodeId === change.id) {
+        setFileContent(change.newContent);
+      }
+    }
+    
+    setPendingChanges(prev => 
+      prev.map(c => c.id === changeId ? { ...c, status: "accepted" as const } : c)
+    );
+  }, [pendingChanges, activeNodeId, supabase]);
+
+  const handleRejectFile = useCallback((changeId: string) => {
+    setPendingChanges(prev => 
+      prev.map(c => c.id === changeId ? { ...c, status: "rejected" as const } : c)
+    );
+  }, []);
+
+  const handleAcceptLine = useCallback((changeId: string, lineIndex: number) => {
+    setPendingChanges(prev => 
+      prev.map(c => {
+        if (c.id !== changeId) return c;
+        const lineStatuses = { ...c.lineStatuses, [lineIndex]: "accepted" as const };
+        return { ...c, lineStatuses };
+      })
+    );
+  }, []);
+
+  const handleRejectLine = useCallback((changeId: string, lineIndex: number) => {
+    setPendingChanges(prev => 
+      prev.map(c => {
+        if (c.id !== changeId) return c;
+        const lineStatuses = { ...c.lineStatuses, [lineIndex]: "rejected" as const };
+        return { ...c, lineStatuses };
+      })
+    );
+  }, []);
   const handleReplace = (text: string) => {
-    setFileContent(text);
+    setActiveEditorContent(text);
     setDiffState({ show: false, newCode: "" });
   };
   const handleRequestDiff = (newCode: string) => setDiffState({ show: true, newCode });
@@ -356,12 +554,18 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const tabs = openTabs
     .map((id) => {
       const node = nodes.find((n) => n.id === id);
-      if (!node) return null;
-      return { id, title: node.name };
+      if (node) return { id, title: node.name };
+      const v = virtualDocs[id];
+      if (v) return { id, title: v.title };
+      return null;
     })
     .filter((t): t is { id: string; title: string } => t !== null);
 
-  const activeNode = nodes.find((n) => n.id === activeNodeId) ?? null;
+  const activeVirtual = activeNodeId ? virtualDocs[activeNodeId] ?? null : null;
+  const activeNode = activeNodeId && !activeNodeId.startsWith("virtual-plan:")
+    ? (nodes.find((n) => n.id === activeNodeId) ?? null)
+    : null;
+  const activeEditorContent = activeVirtual ? activeVirtual.content : fileContent;
 
   // ワークスペース切り替え
   const handleSwitchWorkspace = async (workspaceId: string) => {
@@ -435,10 +639,23 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       
       {diffState.show && (
         <DiffView
-          oldCode={fileContent}
+          oldCode={activeEditorContent}
           newCode={diffState.newCode}
           onApply={() => handleReplace(diffState.newCode)}
           onCancel={() => setDiffState({ show: false, newCode: "" })}
+        />
+      )}
+
+      {showReview && pendingChanges.length > 0 && (
+        <ReviewPanel
+          changes={pendingChanges}
+          onAcceptAll={handleAcceptAll}
+          onRejectAll={handleRejectAll}
+          onAcceptFile={handleAcceptFile}
+          onRejectFile={handleRejectFile}
+          onAcceptLine={handleAcceptLine}
+          onRejectLine={handleRejectLine}
+          onClose={() => setShowReview(false)}
         />
       )}
 
@@ -484,15 +701,62 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
           onSelect={setActiveNodeId}
           onClose={handleCloseTab}
         />
-        <PageHeader node={activeNode} isSaving={isSaving} />
+        {activeVirtual ? (
+          <div className="px-6 py-3 border-b border-zinc-200 bg-zinc-50 flex items-center justify-between">
+            <div>
+              <div className="text-xs text-zinc-500 mb-0.5">Plan</div>
+              <div className="text-lg font-semibold text-zinc-900 flex items-center gap-2">
+                {activeVirtual.fileName}
+                <span className="text-[11px] font-medium px-2 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200">
+                  Unsaved
+                </span>
+              </div>
+              <div className="text-xs text-zinc-500 mt-0.5">
+                Save to: <span className="font-mono">{activeVirtual.pathHint}</span>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => handleSavePlanToWorkspace(activeVirtual.id)}
+                className="px-3 py-1.5 text-sm font-medium bg-blue-600 hover:bg-blue-700 text-white rounded-md transition-colors"
+              >
+                Save to workspace
+              </button>
+            </div>
+          </div>
+        ) : (
+          <PageHeader node={activeNode} isSaving={isSaving} />
+        )}
         <div className="flex-1 p-0 relative overflow-hidden">
-          {activeNodeId && activeNode ? (
-            <MainEditor
-              value={fileContent}
-              onChange={setFileContent}
-              fileName={activeNode.name}
-              onSave={saveContent}
-            />
+          {activeNodeId ? (
+            activeVirtual ? (
+              <MainEditor
+                value={activeVirtual.content}
+                onChange={(v) => {
+                  setVirtualDocs((prev) => {
+                    const doc = prev[activeVirtual.id];
+                    if (!doc) return prev;
+                    return { ...prev, [activeVirtual.id]: { ...doc, content: v } };
+                  });
+                }}
+                fileName={activeVirtual.fileName}
+                onSave={() => handleSavePlanToWorkspace(activeVirtual.id)}
+              />
+            ) : activeNode ? (
+              <MainEditor
+                value={fileContent}
+                onChange={setFileContent}
+                fileName={activeNode.name}
+                onSave={saveContent}
+              />
+            ) : (
+              <div className="absolute inset-0 flex items-center justify-center text-zinc-400">
+                <div className="text-center">
+                  <p className="mb-2">Select a file to edit</p>
+                  <p className="text-xs opacity-60">Cmd+S to save</p>
+                </div>
+              </div>
+            )
           ) : (
             <div className="absolute inset-0 flex items-center justify-center text-zinc-400">
               <div className="text-center">
@@ -519,9 +783,11 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         <AiPanel
           ref={aiPanelRef}
           projectId={projectId}
-          currentFileText={fileContent}
+          currentFileText={activeEditorContent}
           onAppend={handleAppend}
           onRequestDiff={handleRequestDiff}
+          onRequestReview={handleRequestReview}
+          onOpenPlan={handleOpenPlan}
           onFileCreated={handleFileCreated}
           nodes={nodes}
           onGetFileContent={handleGetFileContent}

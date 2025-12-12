@@ -13,9 +13,8 @@ const DEFAULT_MODELS: ModelConfig[] = [
   { id: "gemini-3-pro-preview", name: "Gemini 3 Pro", provider: "google", enabled: true },
   { id: "claude-opus-4-5-20251101", name: "Claude Opus 4.5", provider: "anthropic", enabled: true },
   { id: "claude-sonnet-4-5-20250929", name: "Claude Sonnet 4.5", provider: "anthropic", enabled: true },
-  { id: "gpt-5.1", name: "GPT-5.1", provider: "openai", enabled: true },
-  { id: "gpt-5", name: "GPT-5", provider: "openai", enabled: true },
-  { id: "gpt-5-pro", name: "GPT-5 Pro", provider: "openai", enabled: true },
+  { id: "gpt-5.2", name: "GPT-5.2", provider: "openai", enabled: true },
+  { id: "gpt-5.2-extra-high", name: "GPT-5.2 Extra High", provider: "openai", enabled: true },
 ];
 
 export function SettingsView() {

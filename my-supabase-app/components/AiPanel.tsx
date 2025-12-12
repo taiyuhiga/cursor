@@ -5,6 +5,12 @@ import { Icons } from "./Icons";
 import { createClient } from "@/lib/supabase/client";
 import { formatDistanceToNow } from "date-fns";
 
+type ToolCall = {
+  tool: string;
+  args: any;
+  result: any;
+};
+
 type Message = {
   id: string;
   role: "user" | "assistant";
@@ -12,6 +18,24 @@ type Message = {
   isError?: boolean;
   created_at?: string;
   images?: string[]; // Base64 画像の配列
+  checkpointId?: string; // このメッセージに関連するチェックポイントID
+  toolCalls?: ToolCall[]; // AIが使用したツール呼び出し
+};
+
+// チェックポイント: AIの変更のスナップショット
+type Checkpoint = {
+  id: string;
+  messageId: string;
+  timestamp: string;
+  fileSnapshots: FileSnapshot[];
+  description: string;
+};
+
+type FileSnapshot = {
+  nodeId: string;
+  fileName: string;
+  content: string;
+  action: "created" | "updated" | "deleted";
 };
 
 type ChatSession = {
@@ -34,11 +58,23 @@ type FileNode = {
   parent_id: string | null;
 };
 
+type PendingChange = {
+  id: string;
+  filePath: string;
+  fileName: string;
+  oldContent: string;
+  newContent: string;
+  action: "create" | "update" | "delete";
+  status: "pending" | "accepted" | "rejected";
+};
+
 type Props = {
   projectId: string;
   currentFileText: string;
   onAppend: (text: string) => void;
   onRequestDiff: (newCode: string) => void;
+  onRequestReview?: (changes: PendingChange[]) => void;
+  onOpenPlan?: (planMarkdown: string, titleHint?: string) => void;
   onReplace?: (text: string) => void;
   onFileCreated?: () => void;
   nodes: FileNode[];
@@ -53,12 +89,11 @@ const DEFAULT_MODELS: ModelConfig[] = [
   { id: "gemini-3-pro-preview", name: "Gemini 3 Pro", provider: "google", enabled: true },
   { id: "claude-opus-4-5-20251101", name: "Opus 4.5", provider: "anthropic", enabled: true },
   { id: "claude-sonnet-4-5-20250929", name: "Sonnet 4.5", provider: "anthropic", enabled: true },
-  { id: "gpt-5.1", name: "GPT-5.1", provider: "openai", enabled: true },
-  { id: "gpt-5", name: "GPT-5", provider: "openai", enabled: true },
-  { id: "gpt-5-pro", name: "GPT-5 Pro", provider: "openai", enabled: true },
+  { id: "gpt-5.2", name: "GPT-5.2", provider: "openai", enabled: true },
+  { id: "gpt-5.2-extra-high", name: "GPT-5.2 Extra High", provider: "openai", enabled: true },
 ];
 
-export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFileText, onAppend, onRequestDiff, onFileCreated, nodes, onGetFileContent }, ref) => {
+export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFileText, onAppend, onRequestDiff, onRequestReview, onOpenPlan, onFileCreated, nodes, onGetFileContent }, ref) => {
   const supabase = createClient();
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
@@ -96,7 +131,20 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
   // Image upload state
   const [attachedImages, setAttachedImages] = useState<{ file: File; preview: string }[]>([]);
   
+  // Checkpoint state
+  const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([]);
+  const [showRestoreDialog, setShowRestoreDialog] = useState(false);
+  const [selectedCheckpoint, setSelectedCheckpoint] = useState<Checkpoint | null>(null);
+  const [dontAskAgain, setDontAskAgain] = useState(false);
+  
+  // Copy feedback state
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  
+  // Message action menu state
+  const [openMessageMenu, setOpenMessageMenu] = useState<string | null>(null);
+  
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messageMenuRef = useRef<HTMLDivElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const agentDropdownRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -313,6 +361,9 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
       if (historyRef.current && !historyRef.current.contains(event.target as Node)) {
         setShowHistoryDropdown(false);
       }
+      if (messageMenuRef.current && !messageMenuRef.current.contains(event.target as Node)) {
+        setOpenMessageMenu(null);
+      }
     };
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
@@ -419,12 +470,19 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
       const res = await fetch("/api/ai", {
         method: "POST",
         body: JSON.stringify({
+          projectId,
           prompt: fullPrompt,
           fileText: currentFileText,
           model: selectedModel,
           mode,
           apiKeys,
           images: imageBase64List,
+          autoMode,
+          maxMode,
+          useMultipleModels,
+          selectedModels,
+          // Cursor-like review: Agentモードでは編集ツールをステージングして差分を返す
+          reviewMode: mode === "agent",
         }),
         headers: { "Content-Type": "application/json" },
         signal: abortControllerRef.current.signal,
@@ -441,15 +499,79 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
       
       if (data.error) {
         setMessages(prev => [...prev, { id: Date.now().toString(), role: "assistant", content: `Error: ${data.error}`, isError: true }]);
+      } else if (data.multipleResults) {
+        // Multiple Models mode: 複数の結果を表示
+        for (const result of data.multipleResults) {
+          const modelName = availableModels.find(m => m.id === result.model)?.name || result.model;
+          if (result.error) {
+            setMessages(prev => [...prev, { 
+              id: Date.now().toString() + result.model, 
+              role: "assistant", 
+              content: `**[${modelName}]** Error: ${result.error}`,
+              isError: true 
+            }]);
+          } else {
+            setMessages(prev => [...prev, { 
+              id: Date.now().toString() + result.model, 
+              role: "assistant", 
+              content: `**[${modelName}]**\n\n${result.content}` 
+            }]);
+            await saveMessage(activeSessionId, "assistant", `**[${modelName}]**\n\n${result.content}`);
+          }
+        }
       } else {
-        const assistantMsg = data.content;
-        setMessages(prev => [...prev, { id: Date.now().toString(), role: "assistant", content: assistantMsg }]);
+        // 通常モードまたはAutoモード
+        const usedModelName = data.usedModel 
+          ? (availableModels.find(m => m.id === data.usedModel)?.name || data.usedModel)
+          : null;
+        const prefix = autoMode && usedModelName ? `*[Auto: ${usedModelName}]*\n\n` : "";
+        const assistantMsg = prefix + data.content;
+        const assistantMsgId = Date.now().toString();
+        setMessages(prev => [...prev, { 
+          id: assistantMsgId, 
+          role: "assistant", 
+          content: assistantMsg,
+          toolCalls: Array.isArray(data.toolCalls) ? data.toolCalls : undefined,
+        }]);
         await saveMessage(activeSessionId, "assistant", assistantMsg);
 
-        // Check for side effects
+        // Review UI: 提案された変更がある場合はレビュー画面を開く（Cursor-like）
+        if (onRequestReview && Array.isArray(data.proposedChanges) && data.proposedChanges.length > 0) {
+          onRequestReview(
+            data.proposedChanges.map((c: any) => ({
+              id: String(c.id),
+              filePath: String(c.filePath || c.path || ""),
+              fileName: String(c.fileName || (c.filePath || "").split("/").pop() || ""),
+              oldContent: String(c.oldContent || ""),
+              newContent: String(c.newContent || ""),
+              action: c.action as "create" | "update" | "delete",
+              status: "pending" as const,
+            }))
+          );
+        }
+
+        // Planモード: 生成されたプランを仮想ファイルとして開く
+        if (mode === "plan" && onOpenPlan) {
+          onOpenPlan(data.content, promptToSend);
+        }
+
+        // Check for side effects and create checkpoint
         const lower = assistantMsg.toLowerCase();
-        if (lower.includes("created") || lower.includes("updated") || lower.includes("deleted") || lower.includes("作成")) {
+        const hasProposedChanges = Array.isArray(data.proposedChanges) && data.proposedChanges.length > 0;
+        if (!hasProposedChanges && (lower.includes("created") || lower.includes("updated") || lower.includes("deleted") || lower.includes("作成") || lower.includes("更新") || lower.includes("削除"))) {
           onFileCreated?.();
+          
+          // ファイル名を抽出してチェックポイントを作成
+          const fileNameRegex = /`([^`]+\.[a-zA-Z]+)`/g;
+          const changedFiles: string[] = [];
+          let fileMatch;
+          while ((fileMatch = fileNameRegex.exec(assistantMsg)) !== null) {
+            changedFiles.push(fileMatch[1]);
+          }
+          
+          if (changedFiles.length > 0) {
+            await createCheckpoint(assistantMsgId, changedFiles);
+          }
         }
       }
     } catch (error: any) {
@@ -509,6 +631,23 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    // Cmd+. でモード切替ドロップダウンを開く/閉じる（Cursorっぽい）
+    if ((e.metaKey || e.ctrlKey) && e.key === ".") {
+      e.preventDefault();
+      setIsAgentDropdownOpen(prev => !prev);
+      setIsModelDropdownOpen(false);
+      setShowFilesPopup(false);
+      return;
+    }
+
+    // Shift+Tab で Plan モードに切り替え（入力欄がアクティブなとき）
+    if (e.key === "Tab" && e.shiftKey) {
+      e.preventDefault();
+      setMode("plan");
+      setShowFilesPopup(false);
+      return;
+    }
+
     if (showFilesPopup && filteredFiles.length > 0) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
@@ -598,6 +737,98 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
         textareaRef.current.style.height = "auto";
       }
     }, 0);
+  };
+
+  // Duplicate Chat - 現在のチャットを複製
+  const duplicateChat = async () => {
+    if (!currentSessionId || messages.length === 0) return;
+    
+    // メッセージの上書きを防ぐ
+    isSubmittingRef.current = true;
+    
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) {
+      isSubmittingRef.current = false;
+      return;
+    }
+    
+    // 現在のセッションのタイトルを取得
+    const currentSession = openTabs.find(t => t.id === currentSessionId) || sessions.find(s => s.id === currentSessionId);
+    const baseTitle = currentSession?.title || "Chat";
+    
+    // 先頭の (1), (2) などの番号を除去してベースタイトルを取得
+    const cleanTitle = baseTitle.replace(/^\(\d+\)\s*/, "");
+    
+    // 同じベースタイトルを持つセッションから最大番号を取得
+    let maxNumber = 0;
+    sessions.forEach(s => {
+      // 先頭の番号を抽出
+      const match = s.title.match(/^\((\d+)\)\s*/);
+      const sClean = s.title.replace(/^\(\d+\)\s*/, "");
+      
+      if (sClean === cleanTitle) {
+        if (match) {
+          const num = parseInt(match[1], 10);
+          if (num > maxNumber) maxNumber = num;
+        } else {
+          // 番号なしの元のタイトルが存在する場合
+          if (maxNumber < 1) maxNumber = 0;
+        }
+      }
+    });
+    
+    // 元のタイトルと同じものがあれば次の番号を付ける
+    const newTitle = `(${maxNumber + 1}) ${cleanTitle}`;
+    
+    // 新しいセッションを作成
+    const { data: newSession, error } = await supabase
+      .from("chat_sessions")
+      .insert({
+        user_id: user.id,
+        project_id: projectId,
+        title: newTitle,
+      })
+      .select()
+      .single();
+    
+    if (error || !newSession) {
+      console.error("Error duplicating chat:", error);
+      isSubmittingRef.current = false;
+      return;
+    }
+    
+    // メッセージをコピー
+    const messagesToCopy = messages.map(msg => ({
+      session_id: newSession.id,
+      role: msg.role,
+      content: msg.content,
+      images: msg.images || null,
+    }));
+    
+    await supabase.from("chat_messages").insert(messagesToCopy);
+    
+    // 現在のメッセージを保存
+    const copiedMessages = messages.map(m => ({ ...m }));
+    
+    // メニューを閉じる
+    setOpenMessageMenu(null);
+    
+    // セッションリストを更新
+    setSessions(prev => [newSession, ...prev]);
+    
+    // 新しいタブを開いて選択、メッセージをセット
+    setOpenTabs(prev => [...prev, newSession]);
+    setMessages(copiedMessages);
+    setCurrentSessionId(newSession.id);
+    
+    // 状態更新後にフラグをリセット
+    setTimeout(() => {
+      isSubmittingRef.current = false;
+      // タブバーを右端までスクロール
+      if (tabsContainerRef.current) {
+        tabsContainerRef.current.scrollLeft = tabsContainerRef.current.scrollWidth;
+      }
+    }, 100);
   };
 
   // Image upload handlers
@@ -695,6 +926,115 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
     });
   };
 
+  // チェックポイントを作成
+  const createCheckpoint = useCallback(async (messageId: string, changedFiles: string[]): Promise<Checkpoint | null> => {
+    if (changedFiles.length === 0) return null;
+    
+    const fileSnapshots: FileSnapshot[] = [];
+    
+    for (const fileName of changedFiles) {
+      const node = nodes.find(n => n.name === fileName);
+      if (node) {
+        try {
+          const content = await onGetFileContent(node.id);
+          fileSnapshots.push({
+            nodeId: node.id,
+            fileName: node.name,
+            content,
+            action: "updated", // 簡易実装: すべてupdatedとして扱う
+          });
+        } catch (e) {
+          console.error(`Failed to snapshot file ${fileName}:`, e);
+        }
+      }
+    }
+    
+    if (fileSnapshots.length === 0) return null;
+    
+    const checkpoint: Checkpoint = {
+      id: `cp-${Date.now()}`,
+      messageId,
+      timestamp: new Date().toISOString(),
+      fileSnapshots,
+      description: `${fileSnapshots.length} file(s) changed`,
+    };
+    
+    setCheckpoints(prev => [...prev, checkpoint]);
+    return checkpoint;
+  }, [nodes, onGetFileContent]);
+  
+  // チェックポイントを復元
+  const restoreCheckpoint = useCallback(async (checkpoint: Checkpoint) => {
+    // メッセージをチェックポイント時点まで戻す
+    const checkpointMsgIndex = messages.findIndex(m => m.id === checkpoint.messageId);
+    if (checkpointMsgIndex >= 0) {
+      // チェックポイント以降のメッセージを削除
+      setMessages(prev => prev.slice(0, checkpointMsgIndex));
+      
+      // チェックポイント以降のチェックポイントも削除
+      setCheckpoints(prev => {
+        const cpIndex = prev.findIndex(cp => cp.id === checkpoint.id);
+        return cpIndex >= 0 ? prev.slice(0, cpIndex) : prev;
+      });
+    }
+    
+    // ダイアログを閉じる
+    setShowRestoreDialog(false);
+    setSelectedCheckpoint(null);
+  }, [messages]);
+  
+  // 復元の確認
+  const handleRestoreClick = (checkpoint: Checkpoint) => {
+    // "Don't ask again"が有効な場合は直接復元
+    const skipDialog = localStorage.getItem("checkpoint_dont_ask") === "true";
+    if (skipDialog) {
+      restoreCheckpoint(checkpoint);
+      return;
+    }
+    
+    setSelectedCheckpoint(checkpoint);
+    setShowRestoreDialog(true);
+  };
+  
+  // メッセージインデックスを指定して復元（チェックポイント不要版）
+  const [restoreToIndex, setRestoreToIndex] = useState<number | null>(null);
+  
+  const handleRestoreToMessage = (messageIndex: number) => {
+    const skipDialog = localStorage.getItem("checkpoint_dont_ask") === "true";
+    if (skipDialog) {
+      performRestoreToMessage(messageIndex);
+      return;
+    }
+    
+    setRestoreToIndex(messageIndex);
+    setShowRestoreDialog(true);
+  };
+  
+  const performRestoreToMessage = async (messageIndex: number) => {
+    // メッセージをその位置までトリミング（次のアシスタントメッセージまで含める）
+    const nextIndex = messageIndex + 1;
+    const hasAssistantResponse = messages[nextIndex]?.role === "assistant";
+    const cutIndex = hasAssistantResponse ? nextIndex + 1 : nextIndex;
+    
+    setMessages(prev => prev.slice(0, cutIndex));
+    
+    // ダイアログを閉じる
+    setShowRestoreDialog(false);
+    setRestoreToIndex(null);
+  };
+  
+  // 復元を確定
+  const confirmRestore = () => {
+    if (dontAskAgain) {
+      localStorage.setItem("checkpoint_dont_ask", "true");
+    }
+    if (selectedCheckpoint) {
+      restoreCheckpoint(selectedCheckpoint);
+    } else if (restoreToIndex !== null) {
+      performRestoreToMessage(restoreToIndex);
+    }
+  };
+
   const handleModelSelect = (modelId: string) => {
     if (useMultipleModels) {
       setSelectedModels(prev => {
@@ -784,6 +1124,36 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
       case "plan": return <Icons.Plan className={className} />;
       case "ask": return <Icons.Ask className={className} />;
       default: return <Icons.Agent className={className} />;
+    }
+  };
+
+  const safeJSONStringify = (value: any) => {
+    try {
+      return JSON.stringify(value, null, 2);
+    } catch {
+      return String(value);
+    }
+  };
+
+  const getToolIcon = (toolName: string, className?: string) => {
+    switch (toolName) {
+      case "web_search":
+        return <Icons.Globe className={className} />;
+      case "grep":
+      case "codebase_search":
+      case "file_search":
+        return <Icons.Search className={className} />;
+      case "list_directory":
+      case "list_files":
+        return <Icons.Explorer className={className} />;
+      case "create_file":
+      case "update_file":
+      case "delete_file":
+      case "edit_file":
+      case "create_folder":
+      case "read_file":
+      default:
+        return <Icons.File className={className} />;
     }
   };
 
@@ -1173,26 +1543,42 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
           const isThoughtExpanded = expandedThoughts[msg.id];
           
           if (msg.role === "user") {
+              // 後続のメッセージがある場合のみ復元ボタンを表示
+              const canRestore = idx < messages.length - 1;
+              
               return (
-                  <div key={msg.id} className="flex flex-col gap-2 px-1">
-                     {/* ユーザーが送信した画像 */}
-                     {msg.images && msg.images.length > 0 && (
-                       <div className="flex gap-2 flex-wrap">
-                         {msg.images.map((img, imgIdx) => (
-                           <img 
-                             key={imgIdx}
-                             src={img} 
-                             alt={`Attached ${imgIdx + 1}`}
-                             className="max-w-[240px] max-h-[240px] w-auto h-auto object-contain rounded-lg border border-zinc-200 cursor-pointer hover:opacity-90 transition-opacity"
-                             onClick={() => window.open(img, '_blank')}
-                           />
-                         ))}
-                       </div>
-                     )}
-                     {msg.content && (
-                       <div className="text-[14px] font-normal text-zinc-900 leading-relaxed whitespace-pre-wrap">
-                         {msg.content}
-                       </div>
+                  <div key={msg.id} className="group flex items-start justify-between gap-2 px-1">
+                     <div className="flex flex-col gap-2 flex-1">
+                       {/* ユーザーが送信した画像 */}
+                       {msg.images && msg.images.length > 0 && (
+                         <div className="flex gap-2 flex-wrap">
+                           {msg.images.map((img, imgIdx) => (
+                             <img 
+                               key={imgIdx}
+                               src={img} 
+                               alt={`Attached ${imgIdx + 1}`}
+                               className="max-w-[240px] max-h-[240px] w-auto h-auto object-contain rounded-lg border border-zinc-200 cursor-pointer hover:opacity-90 transition-opacity"
+                               onClick={() => window.open(img, '_blank')}
+                             />
+                           ))}
+                         </div>
+                       )}
+                       {msg.content && (
+                         <div className="text-[14px] font-normal text-zinc-900 leading-relaxed whitespace-pre-wrap">
+                           {msg.content}
+                         </div>
+                       )}
+                     </div>
+                     
+                     {/* Restore Button - ホバー時に表示（後続メッセージがある場合） */}
+                     {canRestore && (
+                       <button
+                         onClick={() => handleRestoreToMessage(idx)}
+                         className="flex-shrink-0 p-1.5 text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 rounded opacity-0 group-hover:opacity-100 transition-opacity"
+                         title="Restore to this point"
+                       >
+                         <Icons.Restore className="w-4 h-4" />
+                       </button>
                      )}
                   </div>
               )
@@ -1217,11 +1603,70 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
                    )}
                </div>
 
+               {/* Tool Calls (Cursor-like) */}
+               {msg.toolCalls && msg.toolCalls.length > 0 && (
+                 <div className="mt-2 space-y-2">
+                   {msg.toolCalls.map((tc, i) => {
+                     const hasError = Boolean(tc?.result?.error);
+                     return (
+                       <details
+                         key={`${msg.id}-tool-${i}`}
+                         className="rounded-lg border border-zinc-200 bg-zinc-50 overflow-hidden"
+                       >
+                         <summary className="flex items-center justify-between gap-2 px-3 py-2 text-xs text-zinc-600 cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden">
+                           <div className="flex items-center gap-2 min-w-0">
+                             {getToolIcon(tc.tool, "w-3.5 h-3.5 text-zinc-500")}
+                             <span className="font-medium truncate">{tc.tool}</span>
+                             <span className={`text-[10px] font-semibold ${hasError ? "text-red-500" : "text-green-600"}`}>
+                               {hasError ? "Error" : "Success"}
+                             </span>
+                           </div>
+                           <Icons.ChevronDown className="w-3 h-3 text-zinc-400 flex-shrink-0" />
+                         </summary>
+                         <div className="px-3 pb-3 pt-1 text-xs text-zinc-700 space-y-2">
+                           <div>
+                             <div className="text-[10px] font-semibold text-zinc-400 uppercase tracking-wider">Args</div>
+                             <pre className="mt-1 whitespace-pre-wrap break-words rounded-md bg-white border border-zinc-200 p-2 text-[11px] leading-snug text-zinc-700 overflow-x-auto">{safeJSONStringify(tc?.args)}</pre>
+                           </div>
+                           <div>
+                             <div className="text-[10px] font-semibold text-zinc-400 uppercase tracking-wider">Result</div>
+                             <pre className="mt-1 whitespace-pre-wrap break-words rounded-md bg-white border border-zinc-200 p-2 text-[11px] leading-snug text-zinc-700 overflow-x-auto">{safeJSONStringify(tc?.result)}</pre>
+                           </div>
+                         </div>
+                       </details>
+                     );
+                   })}
+                 </div>
+               )}
+
                <div className="text-[14px] leading-relaxed text-zinc-800">
                    <div className="whitespace-pre-wrap">
                     {msg.content}
                     {codeBlock && !msg.isError && (
                       <div className="flex gap-2 mt-3 mb-1">
+                        <button 
+                          onClick={() => {
+                            if (onRequestReview) {
+                              const activeNode = nodes.find(n => n.id === msg.id) || nodes[0];
+                              const change: PendingChange = {
+                                id: activeNode?.id || Date.now().toString(),
+                                filePath: activeNode?.name || "untitled",
+                                fileName: activeNode?.name || "untitled",
+                                oldContent: currentFileText,
+                                newContent: codeBlock,
+                                action: "update",
+                                status: "pending",
+                              };
+                              onRequestReview([change]);
+                            } else {
+                              onRequestDiff(codeBlock);
+                            }
+                          }} 
+                          className="flex items-center gap-1.5 text-xs font-medium bg-green-50 hover:bg-green-100 text-green-600 border border-green-200 rounded px-2 py-1 transition-colors"
+                        >
+                          <Icons.Review className="w-3.5 h-3.5" />
+                          Review
+                        </button>
                         <button onClick={() => onRequestDiff(codeBlock)} className="flex items-center gap-1.5 text-xs font-medium bg-blue-50 hover:bg-blue-100 text-blue-600 border border-blue-200 rounded px-2 py-1 transition-colors">Apply</button>
                         <button onClick={() => onAppend(codeBlock)} className="text-xs font-medium bg-zinc-50 hover:bg-zinc-100 text-zinc-600 border border-zinc-200 rounded px-2 py-1 transition-colors">Append</button>
                       </div>
@@ -1229,14 +1674,42 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
                   </div>
                </div>
                
-               {/* Message Actions */}
-               <div className="flex items-center gap-2 mt-1">
-                   <button className="p-1 hover:bg-zinc-100 rounded text-zinc-400">
-                       <Icons.Copy className="w-3.5 h-3.5" />
+               {/* Message Actions - 右下に配置 */}
+               <div className="flex items-center justify-end gap-1 mt-1">
+                   <button 
+                     onClick={() => {
+                       navigator.clipboard.writeText(msg.content);
+                       setCopiedMessageId(msg.id);
+                       setTimeout(() => setCopiedMessageId(null), 2000);
+                     }}
+                     className={`p-1 hover:bg-zinc-100 rounded transition-colors ${copiedMessageId === msg.id ? "text-green-500" : "text-zinc-400 hover:text-zinc-600"}`}
+                     title="Copy to clipboard"
+                   >
+                       {copiedMessageId === msg.id ? (
+                         <Icons.Check className="w-3.5 h-3.5" />
+                       ) : (
+                         <Icons.Copy className="w-3.5 h-3.5" />
+                       )}
                    </button>
-                   <button className="p-1 hover:bg-zinc-100 rounded text-zinc-400">
-                       <Icons.MoreHorizontal className="w-3.5 h-3.5" />
-                   </button>
+                   <div className="relative" ref={openMessageMenu === msg.id ? messageMenuRef : null}>
+                     <button 
+                       onClick={() => setOpenMessageMenu(openMessageMenu === msg.id ? null : msg.id)}
+                       className="p-1 hover:bg-zinc-100 rounded text-zinc-400 hover:text-zinc-600 transition-colors"
+                     >
+                         <Icons.MoreHorizontal className="w-3.5 h-3.5" />
+                     </button>
+                     {openMessageMenu === msg.id && (
+                       <div className="absolute top-full right-0 mt-1 w-40 bg-white border border-zinc-200 rounded-lg shadow-xl z-50 py-1 overflow-hidden">
+                         <button
+                           onClick={duplicateChat}
+                           className="w-full text-left px-3 py-2 text-xs text-zinc-700 hover:bg-zinc-50 flex items-center gap-2"
+                         >
+                           <Icons.Copy className="w-3.5 h-3.5 text-zinc-400" />
+                           <span>Duplicate Chat</span>
+                         </button>
+                       </div>
+                     )}
+                   </div>
                </div>
             </div>
           );
@@ -1370,15 +1843,15 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
                   </button>
                   
                   {isModelDropdownOpen && (
-                    <div className="absolute bottom-full left-0 mb-2 w-96 bg-white border border-zinc-200 rounded-lg shadow-xl z-50 overflow-hidden max-h-[500px] overflow-y-auto">
+                    <div className="absolute bottom-full left-0 mb-2 w-72 bg-white border border-zinc-200 rounded-lg shadow-xl z-50 overflow-hidden max-h-[500px] overflow-y-auto">
                       {/* Search Box */}
-                      <div className="p-3 border-b border-zinc-200">
+                      <div className="p-2 border-b border-zinc-200">
                         <input
                           type="text"
                           placeholder="Search models"
                           value={modelSearchQuery}
                           onChange={(e) => setModelSearchQuery(e.target.value)}
-                          className="w-full px-3 py-1.5 text-sm border border-zinc-300 rounded-md focus:outline-none focus:border-blue-500"
+                          className="w-full px-2 py-1.5 text-xs bg-zinc-50 border-none rounded focus:outline-none focus:ring-0 placeholder:text-zinc-400"
                         />
                       </div>
 
@@ -1386,38 +1859,38 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
                       <div className="p-3 border-b border-zinc-200 space-y-2">
                         <div className="flex items-start justify-between">
                           <div className="flex flex-col flex-1 min-w-0 pr-3">
-                            <span className="text-sm text-zinc-700">Auto</span>
+                            <span className="text-xs text-zinc-700 font-medium">Auto</span>
                             {autoMode && (
-                              <span className="text-xs text-zinc-500 mt-0.5 leading-tight">Balanced quality and speed, recommended for most tasks</span>
+                              <span className="text-[10px] text-zinc-500 mt-0.5 leading-tight">Balanced quality and speed, recommended for most tasks</span>
                             )}
                           </div>
                           <button
                             onClick={() => setAutoMode(!autoMode)}
-                            className={`flex-shrink-0 relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${autoMode ? 'bg-[#2F8132]' : 'bg-zinc-300'}`}
+                            className={`flex-shrink-0 inline-flex h-4 w-7 items-center rounded-full transition-colors ${autoMode ? 'bg-[#2F8132]' : 'bg-zinc-200'}`}
                           >
-                            <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${autoMode ? 'translate-x-6' : 'translate-x-1'}`} />
+                            <span className={`inline-block h-2.5 w-2.5 transform rounded-full bg-white transition-transform ${autoMode ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
                           </button>
                         </div>
                         
                         {!autoMode && (
                           <>
                             <div className="flex items-center justify-between">
-                              <span className="text-sm text-zinc-700">MAX Mode</span>
+                              <span className="text-xs text-zinc-700 font-medium">MAX Mode</span>
                               <button
                                 onClick={() => setMaxMode(!maxMode)}
-                                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${maxMode ? 'bg-purple-600' : 'bg-zinc-300'}`}
+                                className={`relative inline-flex h-4 w-7 flex-shrink-0 items-center rounded-full transition-colors ${maxMode ? 'bg-purple-600' : 'bg-zinc-200'}`}
                               >
-                                <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${maxMode ? 'translate-x-6' : 'translate-x-1'}`} />
+                                <span className={`inline-block h-2.5 w-2.5 transform rounded-full bg-white transition-transform ${maxMode ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
                               </button>
                             </div>
                             
                             <div className="flex items-center justify-between">
-                              <span className="text-sm text-zinc-700">Use Multiple Models</span>
+                              <span className="text-xs text-zinc-700 font-medium">Use Multiple Models</span>
                               <button
                                 onClick={() => setUseMultipleModels(!useMultipleModels)}
-                                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${useMultipleModels ? 'bg-[#2F8132]' : 'bg-zinc-300'}`}
+                                className={`relative inline-flex h-4 w-7 flex-shrink-0 items-center rounded-full transition-colors ${useMultipleModels ? 'bg-[#2F8132]' : 'bg-zinc-200'}`}
                               >
-                                <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${useMultipleModels ? 'translate-x-6' : 'translate-x-1'}`} />
+                                <span className={`inline-block h-2.5 w-2.5 transform rounded-full bg-white transition-transform ${useMultipleModels ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
                               </button>
                             </div>
                           </>
@@ -1426,7 +1899,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
 
                       {/* Models List - Hide when Auto is on */}
                       {!autoMode && (
-                        <div className="border-b border-zinc-200 py-1">
+                        <div className="py-1">
                           {availableModels
                             .filter(m => !modelSearchQuery || m.name.toLowerCase().includes(modelSearchQuery.toLowerCase()))
                             .map((model) => {
@@ -1438,7 +1911,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
                                 <button
                                   key={model.id}
                                   onClick={() => handleModelSelect(model.id)}
-                                  className={`w-full text-left px-3 py-2.5 text-sm hover:bg-zinc-50 flex items-center justify-between ${isSelected ? "bg-zinc-50" : ""}`}
+                                  className={`w-full text-left px-3 py-1.5 text-xs hover:bg-zinc-100 flex items-center justify-between group ${isSelected ? "bg-zinc-50" : ""}`}
                                 >
                                   <div className="flex items-center gap-2">
                                     {/* Use Multiple Models takes priority (purple checkbox) */}
@@ -1448,19 +1921,19 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
                                           {isSelected && <Icons.Check className="w-3 h-3 text-white" />}
                                         </div>
                                         <span className="text-zinc-700">{model.name}</span>
-                                        <Icons.Brain className="w-4 h-4 text-zinc-400" />
+                                        <Icons.Brain className="w-3.5 h-3.5 text-zinc-400" />
                                       </>
                                     ) : maxMode ? (
                                       /* MAX Mode only: brain icon style */
                                       <>
                                         <span className="text-zinc-700">{model.name}</span>
-                                        <Icons.Brain className="w-4 h-4 text-zinc-400" />
+                                        <Icons.Brain className="w-3.5 h-3.5 text-zinc-400" />
                                       </>
                                     ) : (
                                       /* Normal mode: brain icon with checkmark on right */
                                       <>
                                         <span className="text-zinc-700">{model.name}</span>
-                                        <Icons.Brain className="w-4 h-4 text-zinc-400" />
+                                        <Icons.Brain className="w-3.5 h-3.5 text-zinc-400" />
                                       </>
                                     )}
                                   </div>
@@ -1521,6 +1994,62 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
         </div>
       </div>
         </>
+      )}
+      
+      {/* Restore Checkpoint Confirmation Dialog */}
+      {showRestoreDialog && (selectedCheckpoint || restoreToIndex !== null) && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-[#1e2028] rounded-lg shadow-2xl w-[420px] overflow-hidden">
+            <div className="p-5">
+              <div className="flex items-start gap-3">
+                <div className="flex-shrink-0 w-8 h-8 bg-amber-500/20 rounded-lg flex items-center justify-center">
+                  <Icons.Warning className="w-5 h-5 text-amber-500" />
+                </div>
+                <div className="flex-1">
+                  <h3 className="text-white font-medium text-sm">
+                    Discard all changes up to this checkpoint?
+                  </h3>
+                  <p className="text-zinc-400 text-xs mt-1">
+                    You can always undo this later.
+                  </p>
+                </div>
+              </div>
+              
+              <div className="mt-4 flex items-center gap-2">
+                <input 
+                  type="checkbox" 
+                  id="dontAskAgain"
+                  checked={dontAskAgain}
+                  onChange={(e) => setDontAskAgain(e.target.checked)}
+                  className="w-3.5 h-3.5 rounded border-zinc-600 bg-zinc-700 text-blue-500 focus:ring-0 focus:ring-offset-0"
+                />
+                <label htmlFor="dontAskAgain" className="text-zinc-400 text-xs">
+                  Don't ask again
+                </label>
+              </div>
+            </div>
+            
+            <div className="flex items-center justify-end gap-2 px-5 py-3 bg-[#16181d] border-t border-zinc-800">
+              <button
+                onClick={() => {
+                  setShowRestoreDialog(false);
+                  setSelectedCheckpoint(null);
+                  setRestoreToIndex(null);
+                }}
+                className="px-3 py-1.5 text-xs text-zinc-400 hover:text-zinc-200 transition-colors"
+              >
+                Cancel (esc)
+              </button>
+              <button
+                onClick={confirmRestore}
+                className="px-3 py-1.5 text-xs bg-zinc-700 hover:bg-zinc-600 text-white rounded transition-colors flex items-center gap-1.5"
+              >
+                Continue
+                <Icons.Restore className="w-3 h-3" />
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
