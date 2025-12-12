@@ -778,7 +778,10 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
           onRejectFile={handleRejectFile}
           onAcceptLine={handleAcceptLine}
           onRejectLine={handleRejectLine}
-          onClose={() => setShowReview(false)}
+          onFindIssues={handleFindIssues}
+          issues={reviewIssues}
+          isFindingIssues={isFindingIssues}
+          onClose={() => { setShowReview(false); setReviewIssues(null); }}
         />
       )}
 
