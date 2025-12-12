@@ -420,56 +420,129 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   // Review handlers
   const handleRequestReview = useCallback((changes: PendingChange[]) => {
     setPendingChanges(changes);
+    setReviewIssues(null);
     setShowReview(true);
   }, []);
 
-  const handleAcceptAll = useCallback(async () => {
-    for (const change of pendingChanges.filter(c => c.status === "pending")) {
-      if (change.action === "create" || change.action === "update") {
-        // Apply the change
-        const { error } = await supabase
-          .from("file_contents")
-          .upsert({
-            node_id: change.id,
-            text: change.newContent,
-          });
-        if (!error) {
-          // Update local state if this is the active file
-          if (activeNodeId === change.id) {
-            setFileContent(change.newContent);
-          }
+  const buildAppliedContentFromLineSelections = useCallback((change: PendingChange): string => {
+    // 行単位の拒否が無ければそのまま
+    if (!change.lineStatuses || Object.keys(change.lineStatuses).length === 0) {
+      return change.newContent;
+    }
+
+    const parts = diffLines(change.oldContent, change.newContent);
+    let lineIndex = 0;
+    const out: string[] = [];
+
+    for (const part of parts) {
+      const type = part.added ? "added" : part.removed ? "removed" : "context";
+      const lines = part.value
+        .split("\n")
+        .filter((line, i, arr) => !(i === arr.length - 1 && line === ""));
+
+      for (const line of lines) {
+        const status = change.lineStatuses?.[lineIndex] || "pending";
+        if (type === "context") {
+          out.push(line);
+        } else if (type === "added") {
+          // 追加行: rejected のみスキップ
+          if (status !== "rejected") out.push(line);
+        } else {
+          // 削除行: rejected は「削除しない」= 残す
+          if (status === "rejected") out.push(line);
         }
+        lineIndex++;
       }
     }
-    setPendingChanges(prev => prev.map(c => ({ ...c, status: "accepted" as const })));
-    setShowReview(false);
-  }, [pendingChanges, activeNodeId, supabase]);
+
+    return out.join("\n");
+  }, []);
+
+  const applyOneChange = useCallback(async (change: PendingChange) => {
+    if (change.status === "rejected") return;
+
+    if (change.action === "create") {
+      const contentToWrite = buildAppliedContentFromLineSelections(change);
+      const res = await fetch("/api/files", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "create_file", path: change.filePath, content: contentToWrite, projectId }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json?.error || "Failed to create file");
+      await fetchNodes();
+      if (json?.nodeId) {
+        handleOpenNode(json.nodeId);
+      }
+      return;
+    }
+
+    if (change.action === "update") {
+      const nodeId = change.id;
+      if (!nodeId || nodeId.startsWith("create:")) {
+        throw new Error("Missing nodeId for update");
+      }
+      const contentToWrite = buildAppliedContentFromLineSelections(change);
+      const { error } = await supabase
+        .from("file_contents")
+        .upsert({ node_id: nodeId, text: contentToWrite });
+      if (error) throw new Error(error.message);
+      if (activeNodeId === nodeId) {
+        setFileContent(contentToWrite);
+      }
+      return;
+    }
+
+    if (change.action === "delete") {
+      const nodeId = change.id;
+      if (!nodeId || nodeId.startsWith("create:")) {
+        // まだ作っていないファイルのdelete（差分なし）扱い
+        return;
+      }
+      const res = await fetch("/api/files", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "delete_node", id: nodeId }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json?.error || "Failed to delete");
+      handleCloseTab(nodeId);
+      await fetchNodes();
+      return;
+    }
+  }, [activeNodeId, buildAppliedContentFromLineSelections, fetchNodes, handleCloseTab, handleOpenNode, projectId, supabase]);
+
+  const handleAcceptAll = useCallback(async () => {
+    try {
+      for (const change of pendingChanges) {
+        if (change.status === "rejected" || change.status === "accepted") continue;
+        await applyOneChange(change);
+      }
+      setPendingChanges(prev => prev.map(c => c.status === "rejected" ? c : ({ ...c, status: "accepted" as const })));
+      setShowReview(false);
+    } catch (e: any) {
+      alert(`Error: ${e.message || e}`);
+    }
+  }, [applyOneChange, pendingChanges]);
 
   const handleRejectAll = useCallback(() => {
     setPendingChanges(prev => prev.map(c => ({ ...c, status: "rejected" as const })));
+    setReviewIssues(null);
     setShowReview(false);
   }, []);
 
   const handleAcceptFile = useCallback(async (changeId: string) => {
     const change = pendingChanges.find(c => c.id === changeId);
     if (!change) return;
-
-    if (change.action === "create" || change.action === "update") {
-      const { error } = await supabase
-        .from("file_contents")
-        .upsert({
-          node_id: change.id,
-          text: change.newContent,
-        });
-      if (!error && activeNodeId === change.id) {
-        setFileContent(change.newContent);
-      }
+    try {
+      await applyOneChange(change);
+      setPendingChanges(prev => 
+        prev.map(c => c.id === changeId ? { ...c, status: "accepted" as const } : c)
+      );
+    } catch (e: any) {
+      alert(`Error: ${e.message || e}`);
     }
-    
-    setPendingChanges(prev => 
-      prev.map(c => c.id === changeId ? { ...c, status: "accepted" as const } : c)
-    );
-  }, [pendingChanges, activeNodeId, supabase]);
+  }, [applyOneChange, pendingChanges]);
 
   const handleRejectFile = useCallback((changeId: string) => {
     setPendingChanges(prev => 
@@ -496,6 +569,56 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       })
     );
   }, []);
+
+  const handleFindIssues = useCallback(async () => {
+    try {
+      setIsFindingIssues(true);
+      setReviewIssues(null);
+
+      const diffs = pendingChanges
+        .filter(c => c.status !== "rejected")
+        .map((c) => {
+          const parts = diffLines(c.oldContent, c.newContent);
+          const lines: string[] = [];
+          for (const part of parts) {
+            const prefix = part.added ? "+" : part.removed ? "-" : " ";
+            const split = part.value.split("\n").filter((line, i, arr) => !(i === arr.length - 1 && line === ""));
+            for (const line of split) lines.push(prefix + line);
+          }
+          return `File: ${c.filePath}\nAction: ${c.action}\n${lines.join("\n")}`;
+        })
+        .join("\n\n---\n\n");
+
+      const reviewPrompt = `You are running Agent Review (Cursor-like).\nAnalyze the proposed changes below and find potential issues, bugs, type errors, missing imports, edge cases, and risky edits.\nReturn a concise list with severity (High/Medium/Low) and the file/line context when possible.\n\n${diffs}`;
+
+      const apiKeys = JSON.parse(localStorage.getItem("cursor_api_keys") || "{}");
+      const res = await fetch("/api/ai", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectId,
+          prompt: reviewPrompt,
+          fileText: "",
+          model: "gemini-3-pro-preview",
+          mode: "ask",
+          apiKeys,
+          autoMode: true,
+          maxMode: false,
+          useMultipleModels: false,
+          images: [],
+          reviewMode: false,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || data.error) throw new Error(data.error || "Failed to run review");
+      setReviewIssues(String(data.content || ""));
+    } catch (e: any) {
+      alert(`Error: ${e.message || e}`);
+    } finally {
+      setIsFindingIssues(false);
+    }
+  }, [pendingChanges, projectId]);
   const handleReplace = (text: string) => {
     setActiveEditorContent(text);
     setDiffState({ show: false, newCode: "" });
