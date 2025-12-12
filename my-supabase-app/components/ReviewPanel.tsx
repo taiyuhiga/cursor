@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useEffect, useState, useMemo } from "react";
 import { diffLines } from "diff";
 import { Icons } from "./Icons";
 
@@ -25,6 +25,8 @@ type Props = {
   onRejectLine: (changeId: string, lineIndex: number) => void;
   onClose: () => void;
   onFindIssues?: () => void;
+  issues?: string | null;
+  isFindingIssues?: boolean;
 };
 
 export function ReviewPanel({
@@ -37,11 +39,24 @@ export function ReviewPanel({
   onRejectLine,
   onClose,
   onFindIssues,
+  issues,
+  isFindingIssues,
 }: Props) {
   const [selectedChangeId, setSelectedChangeId] = useState<string | null>(
     changes[0]?.id || null
   );
   const [showLineActions, setShowLineActions] = useState(false);
+
+  // changes が更新された時に選択状態が壊れないようにする
+  useEffect(() => {
+    if (!changes || changes.length === 0) {
+      setSelectedChangeId(null);
+      return;
+    }
+    if (!selectedChangeId || !changes.find(c => c.id === selectedChangeId)) {
+      setSelectedChangeId(changes[0].id);
+    }
+  }, [changes, selectedChangeId]);
 
   const selectedChange = changes.find((c) => c.id === selectedChangeId);
 
@@ -147,7 +162,7 @@ export function ReviewPanel({
               className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-purple-600 bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded-md transition-colors"
             >
               <Icons.Search className="w-4 h-4" />
-              Find Issues
+              {isFindingIssues ? "Finding..." : "Find Issues"}
             </button>
           )}
           <button
@@ -180,6 +195,21 @@ export function ReviewPanel({
           </button>
         </div>
       </div>
+
+      {/* Issues panel */}
+      {(isFindingIssues || issues) && (
+        <div className="border-b border-zinc-200 bg-white px-4 py-3">
+          <div className="flex items-center justify-between">
+            <div className="text-sm font-semibold text-zinc-900">Agent Review</div>
+            <div className="text-xs text-zinc-500">
+              {isFindingIssues ? "Analyzing diffs..." : "Done"}
+            </div>
+          </div>
+          <div className="mt-2 text-sm text-zinc-700 whitespace-pre-wrap leading-relaxed max-h-40 overflow-auto">
+            {isFindingIssues ? "Please wait..." : issues}
+          </div>
+        </div>
+      )}
 
       <div className="flex flex-1 overflow-hidden">
         {/* File List Sidebar */}
