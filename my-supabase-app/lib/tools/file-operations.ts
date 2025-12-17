@@ -68,7 +68,7 @@ async function ensureParentFolders(supabase: any, projectId: string, path: strin
       currentParentId = existingFolder.id;
     } else {
       // なければ作成
-      const { data: newFolder, error } = await supabase
+      const insertRes: any = await supabase
         .from("nodes")
         .insert({
           project_id: projectId,
@@ -79,8 +79,9 @@ async function ensureParentFolders(supabase: any, projectId: string, path: strin
         .select("id")
         .single();
 
-      if (error) throw new Error(`Failed to create folder '${folderName}': ${error.message}`);
-      currentParentId = newFolder.id;
+      if (insertRes.error) throw new Error(`Failed to create folder '${folderName}': ${insertRes.error.message}`);
+      if (!insertRes.data) throw new Error(`Failed to create folder '${folderName}'`);
+      currentParentId = insertRes.data.id;
     }
   }
 
@@ -367,7 +368,7 @@ export async function grep(pattern: string, searchPath?: string, projectId?: str
     const lines = content.text.split("\n");
     const regex = new RegExp(pattern, "gi");
 
-    lines.forEach((line, index) => {
+    lines.forEach((line: string, index: number) => {
       if (regex.test(line)) {
         results.push({
           path: file.path,

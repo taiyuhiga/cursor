@@ -184,6 +184,36 @@ export const Icons = {
       <path d="M20 6 9 17l-5-5" />
     </svg>
   ),
+  ThumbUp: ({ className }: { className?: string }) => (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <path d="M7 10v12" />
+      <path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H7a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.5a2 2 0 0 0 1.69-.9L15 5.88z" />
+    </svg>
+  ),
+  ThumbDown: ({ className }: { className?: string }) => (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <path d="M17 14V2" />
+      <path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H17a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.5a2 2 0 0 0-1.69.9L9 18.12z" />
+    </svg>
+  ),
   ArrowUp: ({ className }: { className?: string }) => (
     <svg
       xmlns="http://www.w3.org/2000/svg"
@@ -197,6 +227,21 @@ export const Icons = {
     >
       <path d="m5 12 7-7 7 7" />
       <path d="M12 19V5" />
+    </svg>
+  ),
+  ArrowDown: ({ className }: { className?: string }) => (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <path d="m5 12 7 7 7-7" />
+      <path d="M12 5v14" />
     </svg>
   ),
   MoreHorizontal: ({ className }: { className?: string }) => (
@@ -436,22 +481,6 @@ export const Icons = {
     >
       <polyline points="4 17 10 11 4 5" />
       <line x1="12" x2="20" y1="19" y2="19" />
-    </svg>
-  ),
-  
-  Search: ({ className }: { className?: string }) => (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={className}
-    >
-      <circle cx="11" cy="11" r="8" />
-      <path d="m21 21-4.3-4.3" />
     </svg>
   ),
   

@@ -1,7 +1,7 @@
 "use client";
 
 import { createClient } from "@/lib/supabase/client";
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { diffLines } from "diff";
 import { AiPanel, AiPanelHandle } from "@/components/AiPanel";
@@ -15,7 +15,10 @@ import { FileTree } from "@/components/FileTree";
 import { WorkspaceSwitcher } from "@/components/WorkspaceSwitcher";
 import { CreateWorkspaceDialog } from "@/components/CreateWorkspaceDialog";
 import { SettingsView } from "@/components/SettingsView";
-import { ReviewPanel, PendingChange } from "@/components/ReviewPanel";
+import { ReviewPanel } from "@/components/ReviewPanel";
+import { SourceControlPanel, type SourceControlChange } from "@/components/SourceControlPanel";
+import type { PendingChange, ReviewIssue } from "@/lib/review/types";
+import type { AgentCheckpointChange, AgentCheckpointRecordInput } from "@/lib/checkpoints/types";
 
 type Node = {
   id: string;
@@ -40,6 +43,70 @@ type Props = {
   currentWorkspace: Workspace;
   userEmail: string;
 };
+
+function extractJsonCandidate(text: string): string | null {
+  if (!text) return null;
+  const fence = text.match(/```(?:json)?\\s*([\\s\\S]*?)\\s*```/i);
+  const candidate = fence ? fence[1] : text;
+  const first = candidate.indexOf("{");
+  const last = candidate.lastIndexOf("}");
+  if (first === -1 || last === -1 || last <= first) return null;
+  return candidate.slice(first, last + 1);
+}
+
+function normalizeSeverity(value: any): "high" | "medium" | "low" {
+  const v = String(value || "").toLowerCase();
+  if (v.startsWith("h")) return "high";
+  if (v.startsWith("m")) return "medium";
+  return "low";
+}
+
+function parseAgentReviewIssues(text: string): ReviewIssue[] | null {
+  const jsonStr = extractJsonCandidate(text);
+  if (!jsonStr) return null;
+  let parsed: any;
+  try {
+    parsed = JSON.parse(jsonStr);
+  } catch {
+    return null;
+  }
+
+  const issues = Array.isArray(parsed) ? parsed : parsed?.issues;
+  if (!Array.isArray(issues)) return null;
+
+  const makeId = () => {
+    try {
+      return crypto.randomUUID();
+    } catch {
+      return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    }
+  };
+
+  const out: ReviewIssue[] = [];
+  for (const i of issues) {
+    const filePath = String(i?.filePath || i?.path || "").trim();
+    const title = String(i?.title || i?.summary || "Issue").trim();
+    const description = String(i?.description || i?.details || "").trim();
+    if (!filePath || !description) continue;
+
+    const startLine = Number.isFinite(i?.startLine) ? Number(i.startLine) : undefined;
+    const endLine = Number.isFinite(i?.endLine) ? Number(i.endLine) : undefined;
+
+    out.push({
+      id: String(i?.id || makeId()),
+      filePath,
+      title,
+      description,
+      severity: normalizeSeverity(i?.severity),
+      startLine,
+      endLine,
+      fixPrompt: typeof i?.fixPrompt === "string" ? i.fixPrompt : undefined,
+      status: "open",
+    });
+  }
+
+  return out;
+}
 
 type Activity = "explorer" | "search" | "git" | "ai" | "settings";
 
@@ -67,10 +134,23 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     newCode: string;
   }>({ show: false, newCode: "" });
   const [virtualDocs, setVirtualDocs] = useState<Record<string, VirtualDoc>>({});
-  const [showReview, setShowReview] = useState(false);
+  const [reviewOverlayOpen, setReviewOverlayOpen] = useState(false);
+  const [reviewSelectedChangeId, setReviewSelectedChangeId] = useState<string | null>(null);
+  const [reviewFocusIssue, setReviewFocusIssue] = useState<{ id: string; nonce: number } | null>(null);
   const [pendingChanges, setPendingChanges] = useState<PendingChange[]>([]);
-  const [reviewIssues, setReviewIssues] = useState<string | null>(null);
-  const [isFindingIssues, setIsFindingIssues] = useState(false);
+  const [reviewOrigin, setReviewOrigin] = useState<{ sessionId: string; userMessageId: string; assistantMessageId: string } | null>(null);
+  const [reviewIssues, setReviewIssues] = useState<ReviewIssue[] | null>(null);
+  const [isFindingReviewIssues, setIsFindingReviewIssues] = useState(false);
+
+  // Source Control (Cursor-like, localStorage-based baseline)
+  const [scCommitMessage, setScCommitMessage] = useState("");
+  const [scBaseline, setScBaseline] = useState<Record<string, { nodeId?: string; content: string }> | null>(null);
+  const [scChanges, setScChanges] = useState<SourceControlChange[]>([]);
+  const [scChangeDetails, setScChangeDetails] = useState<
+    Record<string, { nodeId?: string; filePath: string; oldContent: string; newContent: string }>
+  >({});
+  const [scIssues, setScIssues] = useState<ReviewIssue[] | null>(null);
+  const [isFindingScIssues, setIsFindingScIssues] = useState(false);
   const [showCreateWorkspace, setShowCreateWorkspace] = useState(false);
   const [currentWorkspaces, setCurrentWorkspaces] = useState(workspaces);
   const [activeWorkspace, setActiveWorkspace] = useState(currentWorkspace);
@@ -83,6 +163,30 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
 
   const aiPanelRef = useRef<AiPanelHandle>(null);
   const supabase = createClient();
+
+  const nodeById = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
+
+  const pathByNodeId = useMemo(() => {
+    const cache = new Map<string, string>();
+
+    const build = (id: string, seen: Set<string>): string => {
+      if (cache.has(id)) return cache.get(id)!;
+      if (seen.has(id)) return ""; // cycle guard
+      const node = nodeById.get(id);
+      if (!node) return "";
+      seen.add(id);
+      const parentPath = node.parent_id ? build(node.parent_id, seen) : "";
+      const full = parentPath ? `${parentPath}/${node.name}` : node.name;
+      cache.set(id, full);
+      return full;
+    };
+
+    for (const n of nodes) {
+      build(n.id, new Set());
+    }
+
+    return cache;
+  }, [nodeById, nodes]);
 
   // ノード一覧を取得
   const fetchNodes = useCallback(async () => {
@@ -105,6 +209,156 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   useEffect(() => {
     fetchNodes();
   }, [fetchNodes]);
+
+  // --- Source Control helpers ---
+  const scBaselineStorageKey = useMemo(() => `cursor_sc_baseline_${projectId}`, [projectId]);
+
+  const loadScBaseline = useCallback(() => {
+    try {
+      const raw = localStorage.getItem(scBaselineStorageKey);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object") return null;
+      return parsed as Record<string, { nodeId?: string; content: string }>;
+    } catch {
+      return null;
+    }
+  }, [scBaselineStorageKey]);
+
+  const saveScBaseline = useCallback(
+    (snapshot: Record<string, { nodeId?: string; content: string }>) => {
+      try {
+        localStorage.setItem(scBaselineStorageKey, JSON.stringify(snapshot));
+      } catch {
+        // ignore
+      }
+    },
+    [scBaselineStorageKey]
+  );
+
+  const countAddedRemoved = useCallback((oldContent: string, newContent: string) => {
+    const parts = diffLines(oldContent, newContent);
+    let added = 0;
+    let removed = 0;
+    for (const part of parts) {
+      const split = part.value.split("\n").filter((line, i, arr) => !(i === arr.length - 1 && line === ""));
+      if (part.added) added += split.length;
+      else if (part.removed) removed += split.length;
+    }
+    return { added, removed };
+  }, []);
+
+  const buildCurrentSnapshot = useCallback(async () => {
+    const fileNodes = nodes.filter((n) => n.type === "file" && !String(n.id).startsWith("temp-"));
+    const ids = fileNodes.map((n) => n.id);
+    if (ids.length === 0) return {} as Record<string, { nodeId?: string; content: string }>;
+
+    const { data, error } = await supabase
+      .from("file_contents")
+      .select("node_id, text")
+      .in("node_id", ids);
+    if (error) throw new Error(error.message);
+
+    const contentById = new Map<string, string>();
+    for (const row of data || []) {
+      contentById.set(String(row.node_id), String((row as any).text || ""));
+    }
+
+    const snap: Record<string, { nodeId?: string; content: string }> = {};
+    for (const n of fileNodes) {
+      const path = pathByNodeId.get(n.id) || n.name;
+      snap[path] = { nodeId: n.id, content: contentById.get(n.id) ?? "" };
+    }
+    return snap;
+  }, [nodes, pathByNodeId, supabase]);
+
+  const refreshSourceControl = useCallback(async () => {
+    let includeUntrackedFiles = true;
+    try {
+      const raw = localStorage.getItem("cursor_agent_review_settings");
+      const parsed = raw ? JSON.parse(raw) : null;
+      if (parsed && typeof parsed === "object" && parsed.includeUntrackedFiles === false) {
+        includeUntrackedFiles = false;
+      }
+    } catch {
+      // ignore
+    }
+
+    const baseline = scBaseline ?? loadScBaseline();
+    if (!baseline) {
+      const current = await buildCurrentSnapshot();
+      setScBaseline(current);
+      saveScBaseline(current);
+      setScChanges([]);
+      setScChangeDetails({});
+      return;
+    }
+
+    setScBaseline(baseline);
+    const current = await buildCurrentSnapshot();
+
+    const allPaths = new Set<string>([...Object.keys(baseline), ...Object.keys(current)]);
+    const nextChanges: SourceControlChange[] = [];
+    const nextDetails: Record<string, { nodeId?: string; filePath: string; oldContent: string; newContent: string }> = {};
+
+    for (const filePath of Array.from(allPaths)) {
+      const base = baseline[filePath];
+      const cur = current[filePath];
+      const oldContent = base?.content ?? "";
+      const newContent = cur?.content ?? "";
+
+      if (!base && cur) {
+        if (!includeUntrackedFiles) continue;
+        const { added, removed } = countAddedRemoved("", newContent);
+        nextChanges.push({
+          id: filePath,
+          filePath,
+          fileName: filePath.split("/").pop() || filePath,
+          status: "added",
+          added,
+          removed,
+        });
+        nextDetails[filePath] = { nodeId: cur.nodeId, filePath, oldContent: "", newContent };
+        continue;
+      }
+
+      if (base && !cur) {
+        const { added, removed } = countAddedRemoved(oldContent, "");
+        nextChanges.push({
+          id: filePath,
+          filePath,
+          fileName: filePath.split("/").pop() || filePath,
+          status: "deleted",
+          added,
+          removed,
+        });
+        nextDetails[filePath] = { nodeId: base.nodeId, filePath, oldContent, newContent: "" };
+        continue;
+      }
+
+      if (base && cur && oldContent !== newContent) {
+        const { added, removed } = countAddedRemoved(oldContent, newContent);
+        nextChanges.push({
+          id: filePath,
+          filePath,
+          fileName: filePath.split("/").pop() || filePath,
+          status: "modified",
+          added,
+          removed,
+        });
+        nextDetails[filePath] = { nodeId: cur.nodeId, filePath, oldContent, newContent };
+      }
+    }
+
+    nextChanges.sort((a, b) => a.filePath.localeCompare(b.filePath));
+    setScChanges(nextChanges);
+    setScChangeDetails(nextDetails);
+  }, [buildCurrentSnapshot, countAddedRemoved, loadScBaseline, saveScBaseline, scBaseline]);
+
+  useEffect(() => {
+    if (activeActivity !== "git") return;
+    void refreshSourceControl();
+  }, [activeActivity, refreshSourceControl]);
 
   // ファイル操作アクション（Optimistic UI）
   const handleCreateFile = async (path: string) => {
@@ -314,7 +568,10 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       .eq("node_id", activeNodeId);
     if (error) console.error("Error saving content:", error);
     setIsSaving(false);
-  }, [activeNodeId, fileContent, supabase]);
+    if (activeActivity === "git") {
+      void refreshSourceControl();
+    }
+  }, [activeActivity, activeNodeId, fileContent, refreshSourceControl, supabase]);
 
   // AIアクション
   const handleAiAction = (action: string) => {
@@ -418,11 +675,343 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   }, [fetchNodes, handleOpenNode, projectId, virtualDocs]);
 
   // Review handlers
-  const handleRequestReview = useCallback((changes: PendingChange[]) => {
+  const handleRequestReview = useCallback((changes: PendingChange[], origin?: { sessionId: string; userMessageId: string; assistantMessageId: string }) => {
     setPendingChanges(changes);
+    setReviewOrigin(origin ?? null);
     setReviewIssues(null);
-    setShowReview(true);
+    setReviewSelectedChangeId(changes.find(c => c.status === "pending")?.id ?? changes[0]?.id ?? null);
+    setReviewFocusIssue(null);
+    setReviewOverlayOpen(true);
   }, []);
+
+  const handleReviewSelectFile = useCallback((changeId: string) => {
+    setReviewSelectedChangeId(changeId);
+    setReviewFocusIssue(null);
+    setReviewOverlayOpen(true);
+  }, []);
+
+  const handleReviewSelectIssue = useCallback((issueId: string) => {
+    const issue = reviewIssues?.find((i) => i.id === issueId);
+    if (!issue) return;
+    const change = pendingChanges.find((c) => c.filePath === issue.filePath);
+    if (change) {
+      setReviewSelectedChangeId(change.id);
+      setReviewOverlayOpen(true);
+    }
+    setReviewFocusIssue({ id: issueId, nonce: Date.now() });
+  }, [pendingChanges, reviewIssues]);
+
+  const handleReviewClose = useCallback(() => {
+    setReviewOverlayOpen(false);
+    setReviewFocusIssue(null);
+  }, []);
+
+  // Auto-close review when everything is resolved
+  useEffect(() => {
+    if (pendingChanges.length === 0) return;
+    const hasPending = pendingChanges.some((c) => c.status === "pending");
+    if (hasPending) return;
+
+    setPendingChanges([]);
+    setReviewOrigin(null);
+    setReviewOverlayOpen(false);
+    setReviewSelectedChangeId(null);
+    setReviewIssues(null);
+    setReviewFocusIssue(null);
+  }, [pendingChanges]);
+
+  const handleReviewDismissIssue = useCallback((issueId: string) => {
+    setReviewIssues((prev) =>
+      prev ? prev.map((i) => (i.id === issueId ? { ...i, status: "dismissed" as const } : i)) : prev
+    );
+  }, []);
+
+  const handleReviewFixIssueInChat = useCallback(
+    (issueId: string) => {
+      const issue = reviewIssues?.find((i) => i.id === issueId);
+      if (!issue || issue.status !== "open") return;
+
+      const prompt = issue.fixPrompt
+        ? `Fix the following issue in the workspace.\n\nTarget file: ${issue.filePath}\nIssue: ${issue.title}\nDetails: ${issue.description}\n\nInstruction:\n${issue.fixPrompt}\n\nMake minimal changes.`
+        : `Fix the following issue in the workspace.\n\nTarget file: ${issue.filePath}\nIssue: ${issue.title}\nDetails: ${issue.description}\n\nMake minimal changes.`;
+
+      aiPanelRef.current?.sendPrompt(prompt, { mode: "agent" });
+      setReviewIssues((prev) =>
+        prev ? prev.map((i) => (i.id === issueId ? { ...i, status: "fixed" as const } : i)) : prev
+      );
+    },
+    [reviewIssues]
+  );
+
+  const handleReviewFixAllIssuesInChat = useCallback(() => {
+    const open = (reviewIssues || []).filter((i) => i.status === "open");
+    if (open.length === 0) return;
+
+    const prompt = `Fix the following issues in the workspace. Make minimal changes.\n\n${open
+      .map((i, idx) => {
+        const header = `Issue ${idx + 1} (${i.severity.toUpperCase()}): ${i.title}`;
+        const lines = [
+          header,
+          `File: ${i.filePath}${i.startLine ? `:${i.startLine}` : ""}`,
+          `Details: ${i.description}`,
+        ];
+        if (i.fixPrompt) lines.push(`Instruction: ${i.fixPrompt}`);
+        return lines.join("\n");
+      })
+      .join("\n\n---\n\n")}`;
+
+    aiPanelRef.current?.sendPrompt(prompt, { mode: "agent" });
+    setReviewIssues((prev) => (prev ? prev.map((i) => (i.status === "open" ? { ...i, status: "fixed" as const } : i)) : prev));
+  }, [reviewIssues]);
+
+  // --- Source Control handlers ---
+  const handleScCommit = useCallback(async () => {
+    try {
+      let autoRunOnCommit = false;
+      try {
+        const raw = localStorage.getItem("cursor_agent_review_settings");
+        const parsed = raw ? JSON.parse(raw) : null;
+        autoRunOnCommit = Boolean(parsed?.autoRunOnCommit);
+      } catch {
+        autoRunOnCommit = false;
+      }
+
+      const entriesForReview = Object.values(scChangeDetails);
+      const diffsForReview =
+        autoRunOnCommit && entriesForReview.length > 0
+          ? entriesForReview
+              .map((d) => {
+                const parts = diffLines(d.oldContent, d.newContent);
+                const lines: string[] = [];
+                for (const part of parts) {
+                  const prefix = part.added ? "+" : part.removed ? "-" : " ";
+                  const split = part.value
+                    .split("\n")
+                    .filter((line, i, arr) => !(i === arr.length - 1 && line === ""));
+                  for (const line of split) lines.push(prefix + line);
+                }
+                return `File: ${d.filePath}\n${lines.join("\n")}`;
+              })
+              .join("\n\n---\n\n")
+          : null;
+
+      const current = await buildCurrentSnapshot();
+      setScBaseline(current);
+      saveScBaseline(current);
+      setScChanges([]);
+      setScChangeDetails({});
+      setScIssues(null);
+      setScCommitMessage("");
+
+      if (autoRunOnCommit && diffsForReview) {
+        setIsFindingScIssues(true);
+        try {
+          const prompt = `You are running Agent Review (Auto-run on commit, Cursor-like).
+Analyze these committed diffs and find potential issues (bugs, type errors, missing imports, edge cases, risky edits).
+
+Return JSON only in this shape:
+{
+  "issues": [
+    {
+      "filePath": "path/to/file",
+      "title": "Short title",
+      "description": "What is wrong and why it matters",
+      "severity": "high|medium|low",
+      "startLine": 1,
+      "endLine": 1,
+      "fixPrompt": "A short instruction for the agent to fix this"
+    }
+  ]
+}
+
+Rules:
+- Only include actionable issues (not style nitpicks).
+- Use 1-based line numbers for the current version when possible.
+- If line numbers are unknown, omit startLine/endLine.
+- Do not include markdown or code fences.
+
+Diffs:
+${diffsForReview}`;
+
+          const apiKeys = JSON.parse(localStorage.getItem("cursor_api_keys") || "{}");
+          const res = await fetch("/api/ai", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              projectId,
+              prompt,
+              fileText: "",
+              model: "gemini-3-pro-preview",
+              mode: "ask",
+              apiKeys,
+              autoMode: true,
+              maxMode: false,
+              useMultipleModels: false,
+              images: [],
+              reviewMode: false,
+            }),
+          });
+
+          const data = await res.json();
+          if (!res.ok || data.error) throw new Error(data.error || "Failed to run review");
+
+          const content = String(data.content || "");
+          const parsed = parseAgentReviewIssues(content);
+          setScIssues(parsed && parsed.length > 0 ? parsed : null);
+        } catch (e: any) {
+          alert(`Auto-run review failed: ${e.message || e}`);
+        } finally {
+          setIsFindingScIssues(false);
+        }
+      }
+    } catch (e: any) {
+      alert(`Error: ${e.message || e}`);
+    }
+  }, [buildCurrentSnapshot, projectId, saveScBaseline, scChangeDetails]);
+
+  const handleScSelectChange = useCallback(
+    (changeId: string) => {
+      const detail = scChangeDetails[changeId];
+      if (!detail?.nodeId) return;
+
+      setOpenTabs((prev) => (prev.includes(detail.nodeId!) ? prev : [...prev, detail.nodeId!]));
+      setActiveNodeId(detail.nodeId!);
+    },
+    [scChangeDetails]
+  );
+
+  const handleScRunReview = useCallback(async () => {
+    try {
+      setIsFindingScIssues(true);
+      setScIssues(null);
+
+      const entries = Object.values(scChangeDetails);
+      if (entries.length === 0) return;
+
+      const diffs = entries
+        .map((d) => {
+          const parts = diffLines(d.oldContent, d.newContent);
+          const lines: string[] = [];
+          for (const part of parts) {
+            const prefix = part.added ? "+" : part.removed ? "-" : " ";
+            const split = part.value.split("\n").filter((line, i, arr) => !(i === arr.length - 1 && line === ""));
+            for (const line of split) lines.push(prefix + line);
+          }
+          return `File: ${d.filePath}\n${lines.join("\n")}`;
+        })
+        .join("\n\n---\n\n");
+
+      const prompt = `You are running Agent Review (Source Control, Cursor-like).
+Analyze these diffs against the main branch and find potential issues (bugs, type errors, missing imports, edge cases, risky edits).
+
+Return JSON only in this shape:
+{
+  "issues": [
+    {
+      "filePath": "path/to/file",
+      "title": "Short title",
+      "description": "What is wrong and why it matters",
+      "severity": "high|medium|low",
+      "startLine": 1,
+      "endLine": 1,
+      "fixPrompt": "A short instruction for the agent to fix this"
+    }
+  ]
+}
+
+Rules:
+- Only include actionable issues (not style nitpicks).
+- Use 1-based line numbers for the current version when possible.
+- If line numbers are unknown, omit startLine/endLine.
+- Do not include markdown or code fences.
+
+Diffs:
+${diffs}`;
+
+      const apiKeys = JSON.parse(localStorage.getItem("cursor_api_keys") || "{}");
+      const res = await fetch("/api/ai", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectId,
+          prompt,
+          fileText: "",
+          model: "gemini-3-pro-preview",
+          mode: "ask",
+          apiKeys,
+          autoMode: true,
+          maxMode: false,
+          useMultipleModels: false,
+          images: [],
+          reviewMode: false,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || data.error) throw new Error(data.error || "Failed to run review");
+
+      const content = String(data.content || "");
+      const parsed = parseAgentReviewIssues(content);
+      if (parsed && parsed.length > 0) {
+        setScIssues(parsed);
+      } else {
+        setScIssues([
+          {
+            id: `${Date.now()}`,
+            filePath: entries[0]?.filePath || "(unknown)",
+            title: "Agent Review (unparsed)",
+            description: content || "No output",
+            severity: "low",
+            status: "open",
+          },
+        ]);
+      }
+    } catch (e: any) {
+      alert(`Error: ${e.message || e}`);
+    } finally {
+      setIsFindingScIssues(false);
+    }
+  }, [projectId, scChangeDetails]);
+
+  const handleScDismissIssue = useCallback((issueId: string) => {
+    setScIssues((prev) => (prev ? prev.map((i) => (i.id === issueId ? { ...i, status: "dismissed" as const } : i)) : prev));
+  }, []);
+
+  const handleScFixIssueInChat = useCallback(
+    (issueId: string) => {
+      const issue = scIssues?.find((i) => i.id === issueId);
+      if (!issue || issue.status !== "open") return;
+
+      const prompt = issue.fixPrompt
+        ? `Fix the following issue (Source Control review).\n\nTarget file: ${issue.filePath}\nIssue: ${issue.title}\nDetails: ${issue.description}\n\nInstruction:\n${issue.fixPrompt}\n\nMake minimal changes.`
+        : `Fix the following issue (Source Control review).\n\nTarget file: ${issue.filePath}\nIssue: ${issue.title}\nDetails: ${issue.description}\n\nMake minimal changes.`;
+
+      aiPanelRef.current?.sendPrompt(prompt, { mode: "agent" });
+      setScIssues((prev) => (prev ? prev.map((i) => (i.id === issueId ? { ...i, status: "fixed" as const } : i)) : prev));
+    },
+    [scIssues]
+  );
+
+  const handleScFixAllIssuesInChat = useCallback(() => {
+    const open = (scIssues || []).filter((i) => i.status === "open");
+    if (open.length === 0) return;
+
+    const prompt = `Fix the following issues (Source Control review). Make minimal changes.\n\n${open
+      .map((i, idx) => {
+        const header = `Issue ${idx + 1} (${i.severity.toUpperCase()}): ${i.title}`;
+        const lines = [
+          header,
+          `File: ${i.filePath}${i.startLine ? `:${i.startLine}` : ""}`,
+          `Details: ${i.description}`,
+        ];
+        if (i.fixPrompt) lines.push(`Instruction: ${i.fixPrompt}`);
+        return lines.join("\n");
+      })
+      .join("\n\n---\n\n")}`;
+
+    aiPanelRef.current?.sendPrompt(prompt, { mode: "agent" });
+    setScIssues((prev) => (prev ? prev.map((i) => (i.status === "open" ? { ...i, status: "fixed" as const } : i)) : prev));
+  }, [scIssues]);
 
   const buildAppliedContentFromLineSelections = useCallback((change: PendingChange): string => {
     // 行単位の拒否が無ければそのまま
@@ -458,11 +1047,17 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     return out.join("\n");
   }, []);
 
-  const applyOneChange = useCallback(async (change: PendingChange) => {
-    if (change.status === "rejected") return;
+  const applyOneChange = useCallback(async (change: PendingChange): Promise<AgentCheckpointChange | null> => {
+    if (change.status === "rejected") return null;
 
     if (change.action === "create") {
       const contentToWrite = buildAppliedContentFromLineSelections(change);
+      const applied: AgentCheckpointChange = {
+        path: change.filePath,
+        kind: "create",
+        beforeText: "",
+        afterText: contentToWrite,
+      };
       const res = await fetch("/api/files", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -474,7 +1069,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       if (json?.nodeId) {
         handleOpenNode(json.nodeId);
       }
-      return;
+      return applied;
     }
 
     if (change.action === "update") {
@@ -483,6 +1078,13 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         throw new Error("Missing nodeId for update");
       }
       const contentToWrite = buildAppliedContentFromLineSelections(change);
+      const { data: beforeRow, error: beforeError } = await supabase
+        .from("file_contents")
+        .select("text")
+        .eq("node_id", nodeId)
+        .single();
+      if (beforeError) throw new Error(beforeError.message);
+      const beforeText = String(beforeRow?.text || "");
       const { error } = await supabase
         .from("file_contents")
         .upsert({ node_id: nodeId, text: contentToWrite });
@@ -490,15 +1092,27 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       if (activeNodeId === nodeId) {
         setFileContent(contentToWrite);
       }
-      return;
+      return {
+        path: change.filePath,
+        kind: "update",
+        beforeText,
+        afterText: contentToWrite,
+      };
     }
 
     if (change.action === "delete") {
       const nodeId = change.id;
       if (!nodeId || nodeId.startsWith("create:")) {
         // まだ作っていないファイルのdelete（差分なし）扱い
-        return;
+        return null;
       }
+      const { data: beforeRow, error: beforeError } = await supabase
+        .from("file_contents")
+        .select("text")
+        .eq("node_id", nodeId)
+        .single();
+      if (beforeError) throw new Error(beforeError.message);
+      const beforeText = String(beforeRow?.text || "");
       const res = await fetch("/api/files", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -508,41 +1122,71 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       if (!res.ok) throw new Error(json?.error || "Failed to delete");
       handleCloseTab(nodeId);
       await fetchNodes();
-      return;
+      return {
+        path: change.filePath,
+        kind: "delete",
+        beforeText,
+        afterText: "",
+      };
     }
+    return null;
   }, [activeNodeId, buildAppliedContentFromLineSelections, fetchNodes, handleCloseTab, handleOpenNode, projectId, supabase]);
 
   const handleAcceptAll = useCallback(async () => {
     try {
+      const applied: AgentCheckpointChange[] = [];
       for (const change of pendingChanges) {
         if (change.status === "rejected" || change.status === "accepted") continue;
-        await applyOneChange(change);
+        const r = await applyOneChange(change);
+        if (r) applied.push(r);
       }
-      setPendingChanges(prev => prev.map(c => c.status === "rejected" ? c : ({ ...c, status: "accepted" as const })));
-      setShowReview(false);
+      if (applied.length > 0 && reviewOrigin?.userMessageId) {
+        const payload: AgentCheckpointRecordInput = {
+          anchorMessageId: reviewOrigin.userMessageId,
+          changes: applied,
+          description: `Edited ${applied.length} file(s)`,
+        };
+        aiPanelRef.current?.recordAgentCheckpoint?.(payload);
+      }
+      setPendingChanges([]);
+      setReviewOrigin(null);
+      setReviewOverlayOpen(false);
+      setReviewSelectedChangeId(null);
+      setReviewFocusIssue(null);
     } catch (e: any) {
       alert(`Error: ${e.message || e}`);
     }
-  }, [applyOneChange, pendingChanges]);
+  }, [applyOneChange, pendingChanges, reviewOrigin]);
 
   const handleRejectAll = useCallback(() => {
-    setPendingChanges(prev => prev.map(c => ({ ...c, status: "rejected" as const })));
+    setPendingChanges([]);
+    setReviewOrigin(null);
     setReviewIssues(null);
-    setShowReview(false);
+    setReviewOverlayOpen(false);
+    setReviewSelectedChangeId(null);
+    setReviewFocusIssue(null);
   }, []);
 
   const handleAcceptFile = useCallback(async (changeId: string) => {
     const change = pendingChanges.find(c => c.id === changeId);
     if (!change) return;
     try {
-      await applyOneChange(change);
+      const r = await applyOneChange(change);
+      if (r && reviewOrigin?.userMessageId) {
+        const payload: AgentCheckpointRecordInput = {
+          anchorMessageId: reviewOrigin.userMessageId,
+          changes: [r],
+          description: `Edited 1 file`,
+        };
+        aiPanelRef.current?.recordAgentCheckpoint?.(payload);
+      }
       setPendingChanges(prev => 
         prev.map(c => c.id === changeId ? { ...c, status: "accepted" as const } : c)
       );
     } catch (e: any) {
       alert(`Error: ${e.message || e}`);
     }
-  }, [applyOneChange, pendingChanges]);
+  }, [applyOneChange, pendingChanges, reviewOrigin]);
 
   const handleRejectFile = useCallback((changeId: string) => {
     setPendingChanges(prev => 
@@ -572,7 +1216,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
 
   const handleFindIssues = useCallback(async () => {
     try {
-      setIsFindingIssues(true);
+      setIsFindingReviewIssues(true);
       setReviewIssues(null);
 
       const diffs = pendingChanges
@@ -589,7 +1233,32 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         })
         .join("\n\n---\n\n");
 
-      const reviewPrompt = `You are running Agent Review (Cursor-like).\nAnalyze the proposed changes below and find potential issues, bugs, type errors, missing imports, edge cases, and risky edits.\nReturn a concise list with severity (High/Medium/Low) and the file/line context when possible.\n\n${diffs}`;
+      const reviewPrompt = `You are running Agent Review (Cursor-like).
+Analyze the proposed changes below and find potential issues (bugs, type errors, missing imports, edge cases, risky edits).
+
+Return JSON only in this shape:
+{
+  "issues": [
+    {
+      "filePath": "path/to/file",
+      "title": "Short title",
+      "description": "What is wrong and why it matters",
+      "severity": "high|medium|low",
+      "startLine": 1,
+      "endLine": 1,
+      "fixPrompt": "A short instruction for the agent to fix this"
+    }
+  ]
+}
+
+Rules:
+- Only include actionable issues (not style nitpicks).
+- Use 1-based line numbers for the newContent when possible.
+- If line numbers are unknown, omit startLine/endLine.
+- Do not include markdown or code fences.
+
+Diffs:
+${diffs}`;
 
       const apiKeys = JSON.parse(localStorage.getItem("cursor_api_keys") || "{}");
       const res = await fetch("/api/ai", {
@@ -612,11 +1281,26 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
 
       const data = await res.json();
       if (!res.ok || data.error) throw new Error(data.error || "Failed to run review");
-      setReviewIssues(String(data.content || ""));
+      const content = String(data.content || "");
+      const parsed = parseAgentReviewIssues(content);
+      if (parsed && parsed.length > 0) {
+        setReviewIssues(parsed);
+      } else {
+        setReviewIssues([
+          {
+            id: `${Date.now()}`,
+            filePath: pendingChanges[0]?.filePath || "(unknown)",
+            title: "Agent Review (unparsed)",
+            description: content || "No output",
+            severity: "low",
+            status: "open",
+          },
+        ]);
+      }
     } catch (e: any) {
       alert(`Error: ${e.message || e}`);
     } finally {
-      setIsFindingIssues(false);
+      setIsFindingReviewIssues(false);
     }
   }, [pendingChanges, projectId]);
   const handleReplace = (text: string) => {
@@ -624,7 +1308,12 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     setDiffState({ show: false, newCode: "" });
   };
   const handleRequestDiff = (newCode: string) => setDiffState({ show: true, newCode });
-  const handleFileCreated = useCallback(() => fetchNodes(), [fetchNodes]);
+  const handleFileCreated = useCallback(() => {
+    void fetchNodes();
+    if (activeActivity === "git") {
+      void refreshSourceControl();
+    }
+  }, [activeActivity, fetchNodes, refreshSourceControl]);
 
   // Get file content by node ID for @Files feature
   const handleGetFileContent = useCallback(async (nodeId: string): Promise<string> => {
@@ -739,6 +1428,22 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
             onDeleteNode={handleDeleteNode}
           />
         );
+      case "git":
+        return (
+          <SourceControlPanel
+            commitMessage={scCommitMessage}
+            onCommitMessageChange={setScCommitMessage}
+            onCommit={handleScCommit}
+            changes={scChanges}
+            onSelectChange={handleScSelectChange}
+            issues={scIssues}
+            isReviewing={isFindingScIssues}
+            onRunReview={handleScRunReview}
+            onFixIssue={handleScFixIssueInChat}
+            onDismissIssue={handleScDismissIssue}
+            onFixAllIssues={handleScFixAllIssuesInChat}
+          />
+        );
       default:
         return null;
     }
@@ -769,22 +1474,6 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         />
       )}
 
-      {showReview && pendingChanges.length > 0 && (
-        <ReviewPanel
-          changes={pendingChanges}
-          onAcceptAll={handleAcceptAll}
-          onRejectAll={handleRejectAll}
-          onAcceptFile={handleAcceptFile}
-          onRejectFile={handleRejectFile}
-          onAcceptLine={handleAcceptLine}
-          onRejectLine={handleRejectLine}
-          onFindIssues={handleFindIssues}
-          issues={reviewIssues}
-          isFindingIssues={isFindingIssues}
-          onClose={() => { setShowReview(false); setReviewIssues(null); }}
-        />
-      )}
-
       <ActivityBar activeActivity={activeActivity} onSelect={setActiveActivity} />
 
       <aside 
@@ -792,15 +1481,17 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         style={{ width: leftPanelWidth }}
       >
         {/* ワークスペース切り替え */}
-        <div className="p-2 border-b border-zinc-200">
-          <WorkspaceSwitcher
-            workspaces={currentWorkspaces}
-            currentWorkspace={activeWorkspace}
-            userEmail={userEmail}
-            onSwitch={handleSwitchWorkspace}
-            onCreateNew={() => setShowCreateWorkspace(true)}
-          />
-        </div>
+        {activeActivity !== "git" && (
+          <div className="p-2 border-b border-zinc-200">
+            <WorkspaceSwitcher
+              workspaces={currentWorkspaces}
+              currentWorkspace={activeWorkspace}
+              userEmail={userEmail}
+              onSwitch={handleSwitchWorkspace}
+              onCreateNew={() => setShowCreateWorkspace(true)}
+            />
+          </div>
+        )}
         {renderSidebarContent()}
       </aside>
 
@@ -891,6 +1582,29 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
               </div>
             </div>
           )}
+
+          {reviewOverlayOpen && pendingChanges.length > 0 && (
+            <ReviewPanel
+              changes={pendingChanges}
+              selectedChangeId={reviewSelectedChangeId}
+              onSelectChange={handleReviewSelectFile}
+              onAcceptFile={handleAcceptFile}
+              onRejectFile={handleRejectFile}
+              onAcceptLine={handleAcceptLine}
+              onRejectLine={handleRejectLine}
+              focusIssue={reviewFocusIssue}
+              issues={reviewIssues}
+              isFindingIssues={isFindingReviewIssues}
+              onFindIssues={handleFindIssues}
+              onDismissIssue={handleReviewDismissIssue}
+              onFixIssueInChat={handleReviewFixIssueInChat}
+              onFixAllIssuesInChat={handleReviewFixAllIssuesInChat}
+              onClose={() => {
+                handleReviewClose();
+                setReviewIssues(null);
+              }}
+            />
+          )}
         </div>
       </main>
 
@@ -906,19 +1620,30 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         className="border-l border-zinc-200 flex-shrink-0 bg-zinc-50"
         style={{ width: rightPanelWidth }}
       >
-        <AiPanel
-          ref={aiPanelRef}
-          projectId={projectId}
-          currentFileText={activeEditorContent}
-          onAppend={handleAppend}
-          onRequestDiff={handleRequestDiff}
-          onRequestReview={handleRequestReview}
-          onOpenPlan={handleOpenPlan}
-          onFileCreated={handleFileCreated}
-          nodes={nodes}
-          onGetFileContent={handleGetFileContent}
-        />
-      </aside>
-    </div>
+          <AiPanel
+            ref={aiPanelRef}
+            projectId={projectId}
+            currentFileText={activeEditorContent}
+            onAppend={handleAppend}
+            onRequestDiff={handleRequestDiff}
+            onRequestReview={handleRequestReview}
+            onOpenPlan={handleOpenPlan}
+            onFileCreated={handleFileCreated}
+            nodes={nodes}
+            onGetFileContent={handleGetFileContent}
+            reviewChanges={pendingChanges}
+            reviewIssues={reviewIssues}
+            isFindingReviewIssues={isFindingReviewIssues}
+            onReviewSelectFile={handleReviewSelectFile}
+            onReviewSelectIssue={handleReviewSelectIssue}
+            onReviewAcceptAll={handleAcceptAll}
+            onReviewRejectAll={handleRejectAll}
+            onReviewFindIssues={handleFindIssues}
+            onReviewDismissIssue={handleReviewDismissIssue}
+            onReviewFixIssueInChat={handleReviewFixIssueInChat}
+            onReviewFixAllIssuesInChat={handleReviewFixAllIssuesInChat}
+          />
+        </aside>
+      </div>
   );
 }

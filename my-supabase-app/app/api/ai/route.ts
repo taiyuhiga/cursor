@@ -27,6 +27,8 @@ type ReviewState = {
   nodeIdByPath: Map<string, string>;
 };
 
+type AgentMode = "agent" | "plan" | "ask";
+
 async function initReviewState(projectId?: string): Promise<ReviewState> {
   const nodes = await listFiles(projectId);
   const nodeIdByPath = new Map<string, string>();
@@ -157,11 +159,18 @@ async function webSearch(query: string) {
 async function executeToolCall(
   name: string, 
   args: any, 
-  context: { projectId?: string; reviewMode?: boolean; reviewState?: ReviewState }
+  context: { projectId?: string; reviewMode?: boolean; reviewState?: ReviewState; mode?: AgentMode }
 ): Promise<any> {
   console.log(`Executing tool: ${name}`, args);
   
   try {
+    const mutatingTools = new Set(["create_file", "update_file", "delete_file", "edit_file", "create_folder"]);
+    if ((context.mode === "plan" || context.mode === "ask") && mutatingTools.has(name)) {
+      return {
+        error: `Tool '${name}' is disabled in ${context.mode.toUpperCase()} mode. Switch to Agent mode to apply changes.`,
+      };
+    }
+
     switch (name) {
       // Search Tools
       case "read_file":
@@ -359,7 +368,7 @@ async function callOpenAIWithTools(params: {
   maxMode?: boolean;
   tools: any[];
   allowedToolNames: Set<string>;
-  context: { projectId?: string; reviewMode?: boolean; reviewState?: ReviewState };
+  context: { projectId?: string; reviewMode?: boolean; reviewState?: ReviewState; mode?: AgentMode };
 }): Promise<{ content: string; toolCalls: ToolCallHistoryItem[] }> {
   const { apiKey, model, prompt, systemPrompt, images, maxMode, tools, allowedToolNames, context } = params;
   const toolCallHistory: ToolCallHistoryItem[] = [];
@@ -504,7 +513,7 @@ async function callAnthropicWithTools(params: {
   maxMode?: boolean;
   tools: any[];
   allowedToolNames: Set<string>;
-  context: { projectId?: string; reviewMode?: boolean; reviewState?: ReviewState };
+  context: { projectId?: string; reviewMode?: boolean; reviewState?: ReviewState; mode?: AgentMode };
 }): Promise<{ content: string; toolCalls: ToolCallHistoryItem[] }> {
   const { apiKey, model, prompt, systemPrompt, images, maxMode, tools, allowedToolNames, context } = params;
   const toolCallHistory: ToolCallHistoryItem[] = [];
@@ -608,7 +617,8 @@ Current file content:
 ${fileText ? "```\n" + fileText + "\n```" : "(No file selected)"}`;
   } else if (mode === "plan") {
     systemPrompt = `You are an expert AI coding assistant acting in "PLAN" mode.
-Your goal is to create a comprehensive implementation plan for the user's request.
+Your goal is to create a detailed, reviewable implementation plan before writing code.
+Do NOT apply any file changes. If changes are required, describe them and suggest switching to Agent mode to execute.
 Current file content:
 ${fileText ? "```\n" + fileText + "\n```" : "(No file selected)"}`;
   } else {
@@ -707,12 +717,11 @@ ${fileText ? "```\n" + fileText + "\n```" : "(No file selected)"}
     } else if (mode === "plan") {
         systemPrompt = `
 You are an expert AI coding assistant acting in "PLAN" mode.
-Your goal is to create a comprehensive implementation plan for the user's request.
-1. Analyze the request and the codebase.
+Your goal is to create a detailed, reviewable implementation plan before writing code.
+1. Analyze the request and investigate the codebase (use search tools as needed).
 2. Ask clarifying questions if requirements are vague.
 3. Output a detailed step-by-step plan in Markdown format.
-4. Do NOT execute any file changes yet, even if you have the tools.
-5. Once the plan is clear, the user will switch to Agent mode to execute it (or you can provide the code blocks for them).
+4. Do NOT apply any file changes in Plan mode. If changes are needed, describe them and suggest switching to Agent mode to execute.
 
 Current file content:
 ${fileText ? "```\n" + fileText + "\n```" : "(No file selected)"}
@@ -758,7 +767,7 @@ When generating code:
         maxMode,
         tools: openaiTools,
         allowedToolNames,
-        context: { projectId, reviewMode: effectiveReviewMode, reviewState },
+        context: { projectId, reviewMode: effectiveReviewMode, reviewState, mode },
       });
       const proposedChanges = buildProposedChanges(reviewState);
       return NextResponse.json({ 
@@ -783,7 +792,7 @@ When generating code:
         maxMode,
         tools: anthropicTools,
         allowedToolNames,
-        context: { projectId, reviewMode: effectiveReviewMode, reviewState },
+        context: { projectId, reviewMode: effectiveReviewMode, reviewState, mode },
       });
       const proposedChanges = buildProposedChanges(reviewState);
       return NextResponse.json({ 
@@ -876,7 +885,7 @@ When generating code:
           }
           
           // ツール実行
-          const toolResult = await executeToolCall(name, args, { projectId, reviewMode: effectiveReviewMode, reviewState });
+          const toolResult = await executeToolCall(name, args, { projectId, reviewMode: effectiveReviewMode, reviewState, mode });
           toolCallHistory.push({ tool: name, args, result: toolResult });
           
           functionResponses.push({

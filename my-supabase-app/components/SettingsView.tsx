@@ -25,6 +25,11 @@ export function SettingsView() {
     google: "",
   });
   const [models, setModels] = useState<ModelConfig[]>(DEFAULT_MODELS);
+  const [agentReviewSettings, setAgentReviewSettings] = useState({
+    autoRunOnCommit: false,
+    includeSubmodules: false,
+    includeUntrackedFiles: true,
+  });
 
   // Load settings from localStorage
   useEffect(() => {
@@ -36,6 +41,15 @@ export function SettingsView() {
     const savedModels = localStorage.getItem("cursor_models");
     if (savedModels) {
       setModels(JSON.parse(savedModels));
+    }
+
+    const savedAgentReview = localStorage.getItem("cursor_agent_review_settings");
+    if (savedAgentReview) {
+      try {
+        setAgentReviewSettings(JSON.parse(savedAgentReview));
+      } catch {
+        // ignore
+      }
     }
   }, []);
 
@@ -179,8 +193,64 @@ export function SettingsView() {
           )}
 
           {activeTab === "general" && (
-            <div className="text-zinc-500">
-              General settings content coming soon...
+            <div className="max-w-2xl space-y-10">
+              <section>
+                <h2 className="text-lg font-medium mb-4">Agent Review</h2>
+                <div className="space-y-3 border border-zinc-200 rounded-lg p-4">
+                  {(
+                    [
+                      {
+                        key: "autoRunOnCommit",
+                        title: "Auto-run on commit",
+                        desc: "各コミット後にコードを自動的にスキャンしてバグを検出します",
+                      },
+                      {
+                        key: "includeSubmodules",
+                        title: "Include submodules",
+                        desc: "レビューにサブmoduleの変更を含めます（このデモでは未対応）",
+                      },
+                      {
+                        key: "includeUntrackedFiles",
+                        title: "Include untracked files",
+                        desc: "レビューに未追跡ファイル（新規ファイル）を含めます",
+                      },
+                    ] as const
+                  ).map((item) => (
+                    <div
+                      key={item.key}
+                      className="flex items-center justify-between gap-4"
+                    >
+                      <div className="min-w-0">
+                        <div className="text-sm font-medium text-zinc-900">
+                          {item.title}
+                        </div>
+                        <div className="text-xs text-zinc-500">{item.desc}</div>
+                      </div>
+                      <button
+                        onClick={() => {
+                          setAgentReviewSettings((prev) => {
+                            const next = { ...prev, [item.key]: !prev[item.key] };
+                            localStorage.setItem(
+                              "cursor_agent_review_settings",
+                              JSON.stringify(next)
+                            );
+                            return next;
+                          });
+                        }}
+                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                          agentReviewSettings[item.key] ? "bg-blue-600" : "bg-zinc-200"
+                        }`}
+                      >
+                        <span
+                          className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                            agentReviewSettings[item.key] ? "translate-x-6" : "translate-x-1"
+                          }`}
+                        />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </section>
             </div>
           )}
         </div>
@@ -188,4 +258,3 @@ export function SettingsView() {
     </div>
   );
 }
-

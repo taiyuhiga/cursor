@@ -261,8 +261,8 @@ export const getToolsForMode = (mode: "agent" | "plan" | "ask"): ToolDefinition[
       // Ask mode: 読み取り専用のツールのみ
       return allTools.filter(t => t.category === "search");
     case "plan":
-      // Plan mode: 検索ツールのみ（ファイル変更は提案のみ）
-      return allTools.filter(t => t.category === "search");
+      // Plan mode: 全てのツールを使用可能（ただし実装側で変更系ツールは抑制する）
+      return allTools;
     case "agent":
     default:
       // Agent mode: 全てのツールを使用可能
@@ -317,5 +317,4 @@ export const toAnthropicTools = (tools: ToolDefinition[]) => {
     },
   }));
 };
-
 

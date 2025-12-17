@@ -14,12 +14,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useState, type ComponentPropsWithoutRef, type FormEvent } from "react";
 
 export function SignUpForm({
   className,
   ...props
-}: React.ComponentPropsWithoutRef<"div">) {
+}: ComponentPropsWithoutRef<"div">) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [repeatPassword, setRepeatPassword] = useState("");
@@ -27,7 +27,7 @@ export function SignUpForm({
   const [isLoading, setIsLoading] = useState(false);
   const router = useRouter();
 
-  const handleSignUp = async (e: React.FormEvent) => {
+  const handleSignUp = async (e: FormEvent) => {
     e.preventDefault();
     const supabase = createClient();
     setIsLoading(true);

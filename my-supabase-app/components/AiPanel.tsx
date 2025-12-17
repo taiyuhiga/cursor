@@ -1,9 +1,14 @@
 "use client";
 
-import { useState, useRef, useEffect, forwardRef, useImperativeHandle, useCallback } from "react";
+import { useState, useRef, useEffect, useMemo, forwardRef, useImperativeHandle, useCallback } from "react";
 import { Icons } from "./Icons";
+import { ReviewChangesCard } from "./ReviewChangesCard";
 import { createClient } from "@/lib/supabase/client";
 import { formatDistanceToNow } from "date-fns";
+import { applyPatch, createTwoFilesPatch, formatPatch, parsePatch, reversePatch } from "diff";
+import type { PendingChange, ReviewIssue } from "@/lib/review/types";
+import type { AgentCheckpointRecordInput, StoredCheckpoint, StoredCheckpointOperation, StoredCheckpointState } from "@/lib/checkpoints/types";
+import { loadCheckpointState, makeEmptyCheckpointState, saveCheckpointState } from "@/lib/checkpoints/storage";
 
 type ToolCall = {
   tool: string;
@@ -18,25 +23,7 @@ type Message = {
   isError?: boolean;
   created_at?: string;
   images?: string[]; // Base64 画像の配列
-  checkpointId?: string; // このメッセージに関連するチェックポイントID
   toolCalls?: ToolCall[]; // AIが使用したツール呼び出し
-};
-
-// チェックポイント: AIの変更のスナップショット
-type Checkpoint = {
-  id: string;
-  messageId: string;
-  timestamp: string;
-  fileSnapshots: FileSnapshot[];
-  description: string;
-};
-
-type FileSnapshot = {
-  nodeId: string;
-  fileName: string;
-  parentId?: string | null;
-  content: string;
-  action: "created" | "updated" | "deleted";
 };
 
 type ChatSession = {
@@ -59,31 +46,36 @@ type FileNode = {
   parent_id: string | null;
 };
 
-type PendingChange = {
-  id: string;
-  filePath: string;
-  fileName: string;
-  oldContent: string;
-  newContent: string;
-  action: "create" | "update" | "delete";
-  status: "pending" | "accepted" | "rejected";
-};
-
 type Props = {
   projectId: string;
   currentFileText: string;
   onAppend: (text: string) => void;
   onRequestDiff: (newCode: string) => void;
-  onRequestReview?: (changes: PendingChange[]) => void;
+  onRequestReview?: (changes: PendingChange[], origin?: { sessionId: string; userMessageId: string; assistantMessageId: string }) => void;
   onOpenPlan?: (planMarkdown: string, titleHint?: string) => void;
   onReplace?: (text: string) => void;
   onFileCreated?: () => void;
   nodes: FileNode[];
   onGetFileContent: (nodeId: string) => Promise<string>;
+
+  // Cursor-like Review (rendered inside the chat panel)
+  reviewChanges?: PendingChange[];
+  reviewIssues?: ReviewIssue[] | null;
+  isFindingReviewIssues?: boolean;
+  onReviewSelectFile?: (changeId: string) => void;
+  onReviewSelectIssue?: (issueId: string) => void;
+  onReviewAcceptAll?: () => void;
+  onReviewRejectAll?: () => void;
+  onReviewFindIssues?: () => void;
+  onReviewDismissIssue?: (issueId: string) => void;
+  onReviewFixIssueInChat?: (issueId: string) => void;
+  onReviewFixAllIssuesInChat?: () => void;
 };
 
 export type AiPanelHandle = {
   triggerAction: (action: "explain" | "fix" | "test" | "refactor") => void;
+  sendPrompt: (prompt: string, opts?: { mode?: "agent" | "plan" | "ask" }) => void;
+  recordAgentCheckpoint: (input: AgentCheckpointRecordInput) => void;
 };
 
 const DEFAULT_MODELS: ModelConfig[] = [
@@ -94,7 +86,28 @@ const DEFAULT_MODELS: ModelConfig[] = [
   { id: "gpt-5.2-extra-high", name: "GPT-5.2 Extra High", provider: "openai", enabled: true },
 ];
 
-export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFileText, onAppend, onRequestDiff, onRequestReview, onOpenPlan, onFileCreated, nodes, onGetFileContent }, ref) => {
+export const AiPanel = forwardRef<AiPanelHandle, Props>(({
+  projectId,
+  currentFileText,
+  onAppend,
+  onRequestDiff,
+  onRequestReview,
+  onOpenPlan,
+  onFileCreated,
+  nodes,
+  onGetFileContent,
+  reviewChanges,
+  reviewIssues,
+  isFindingReviewIssues,
+  onReviewSelectFile,
+  onReviewSelectIssue,
+  onReviewAcceptAll,
+  onReviewRejectAll,
+  onReviewFindIssues,
+  onReviewDismissIssue,
+  onReviewFixIssueInChat,
+  onReviewFixAllIssuesInChat,
+}, ref) => {
   const supabase = createClient();
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
@@ -132,11 +145,15 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
   // Image upload state
   const [attachedImages, setAttachedImages] = useState<{ file: File; preview: string }[]>([]);
   
-  // Checkpoint state
-  const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([]);
+  // Checkpoints (Cursor-like)
+  const [messageHead, setMessageHead] = useState<number | null>(null);
+  const [checkpoints, setCheckpoints] = useState<StoredCheckpoint[]>([]);
+  // null = before the first checkpoint
+  const [headCheckpointId, setHeadCheckpointId] = useState<string | null>(null);
   const [showRestoreDialog, setShowRestoreDialog] = useState(false);
-  const [selectedCheckpoint, setSelectedCheckpoint] = useState<Checkpoint | null>(null);
+  const [restoreToIndex, setRestoreToIndex] = useState<number | null>(null);
   const [dontAskAgain, setDontAskAgain] = useState(false);
+  const [redoSnapshot, setRedoSnapshot] = useState<{ messageHead: number | null; headCheckpointId: string | null } | null>(null);
 
   // Submit-from-previous / message edit (Cursor-like)
   const [editingMessageIndex, setEditingMessageIndex] = useState<number | null>(null);
@@ -234,9 +251,22 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
       // 一時的なタブID（new-で始まる）またはnullの場合はメッセージをクリア
       if (!currentSessionId || currentSessionId.startsWith("new-")) {
         setMessages([]);
+        setMessageHead(null);
+        setCheckpoints([]);
+        setHeadCheckpointId(null);
+        setRedoSnapshot(null);
+        setShowRestoreDialog(false);
+        setRestoreToIndex(null);
         return;
       }
-      
+
+      const persisted = loadCheckpointState(currentSessionId) ?? makeEmptyCheckpointState({ projectId, sessionId: currentSessionId });
+      setCheckpoints(persisted.checkpoints || []);
+      setHeadCheckpointId(persisted.headCheckpointId ?? null);
+      setRedoSnapshot(null);
+      setShowRestoreDialog(false);
+      setRestoreToIndex(null);
+
       const { data, error } = await supabase
         .from("chat_messages")
         .select("*")
@@ -244,17 +274,40 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
         .order("created_at", { ascending: true });
 
       if (!error && data) {
-        setMessages(data.map(m => ({
+        const loaded = data.map(m => ({
           id: m.id,
           role: m.role as "user" | "assistant",
           content: m.content,
           created_at: m.created_at,
           images: m.images || undefined,
-        })));
+        }));
+        setMessages(loaded);
+
+        if (!persisted.headMessageId) {
+          setMessageHead(null);
+        } else {
+          const idx = loaded.findIndex((m) => m.id === persisted.headMessageId);
+          setMessageHead(idx >= 0 ? idx + 1 : null);
+        }
       }
     }
     loadMessages();
-  }, [currentSessionId, supabase]);
+  }, [currentSessionId, projectId, supabase]);
+
+  useEffect(() => {
+    if (!currentSessionId || currentSessionId.startsWith("new-")) return;
+    const headMessageId = messageHead === null ? null : (messages[Math.max(0, messageHead - 1)]?.id ?? null);
+    const state: StoredCheckpointState = {
+      v: 1,
+      projectId,
+      sessionId: currentSessionId,
+      checkpoints,
+      headCheckpointId,
+      headMessageId,
+      updatedAt: new Date().toISOString(),
+    };
+    saveCheckpointState(state);
+  }, [checkpoints, currentSessionId, headCheckpointId, messageHead, messages, projectId]);
 
   const createNewSession = async (firstMessage: string, tempTabId?: string) => {
     const { data: { user } } = await supabase.auth.getUser();
@@ -398,7 +451,6 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
 
       if (showRestoreDialog) {
         setShowRestoreDialog(false);
-        setSelectedCheckpoint(null);
         setRestoreToIndex(null);
         return;
       }
@@ -493,10 +545,32 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
     setSubmitPrevDontAskAgain(false);
   };
 
-  const onSubmit = async (customPrompt?: string) => {
+  const onSubmit = async (
+    customPrompt?: string,
+    opts?: { mode?: "agent" | "plan" | "ask" }
+  ) => {
+    const effectiveMode = opts?.mode ?? mode;
+    if (opts?.mode && opts.mode !== mode) {
+      setMode(opts.mode);
+    }
+
     const promptToSend = customPrompt || prompt;
     // テキストまたは画像がある場合に送信可能
     if ((!promptToSend.trim() && attachedImages.length === 0) || loading) return;
+
+    // If time-traveled, committing a new message clears the "future"
+    if (messageHead !== null && currentSessionId && !currentSessionId.startsWith("new-")) {
+      const cutIndex = messageHead;
+      const idsToDelete = messages.slice(cutIndex).map((m) => m.id);
+      await deleteMessagesByIds(idsToDelete);
+      setMessages((prev) => prev.slice(0, cutIndex));
+      setMessageHead(null);
+      setRedoSnapshot(null);
+      setCheckpoints((prev) => {
+        const headIdx = headCheckpointId ? prev.findIndex((cp) => cp.id === headCheckpointId) : -1;
+        return headIdx >= 0 ? prev.slice(0, headIdx + 1) : [];
+      });
+    }
 
     // 送信中フラグをセット（loadMessagesによる上書きを防ぐ）
     isSubmittingRef.current = true;
@@ -578,7 +652,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
           prompt: fullPrompt,
           fileText: currentFileText,
           model: selectedModel,
-          mode,
+          mode: effectiveMode,
           apiKeys,
           images: imageBase64List,
           autoMode,
@@ -586,7 +660,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
           useMultipleModels,
           selectedModels,
           // Cursor-like review: Agentモードでは編集ツールをステージングして差分を返す
-          reviewMode: mode === "agent",
+          reviewMode: effectiveMode === "agent",
         }),
         headers: { "Content-Type": "application/json" },
         signal: abortControllerRef.current.signal,
@@ -653,53 +727,27 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
 
         // Review UI: 提案された変更がある場合はレビュー画面を開く（Cursor-like）
         if (onRequestReview && Array.isArray(data.proposedChanges) && data.proposedChanges.length > 0) {
-          onRequestReview(
-            data.proposedChanges.map((c: any) => ({
-              id: String(c.id),
-              filePath: String(c.filePath || c.path || ""),
-              fileName: String(c.fileName || (c.filePath || "").split("/").pop() || ""),
-              oldContent: String(c.oldContent || ""),
-              newContent: String(c.newContent || ""),
-              action: c.action as "create" | "update" | "delete",
-              status: "pending" as const,
-            }))
-          );
+          const changes = data.proposedChanges.map((c: any) => ({
+            id: String(c.id),
+            filePath: String(c.filePath || c.path || ""),
+            fileName: String(c.fileName || (c.filePath || "").split("/").pop() || ""),
+            oldContent: String(c.oldContent || ""),
+            newContent: String(c.newContent || ""),
+            action: c.action as "create" | "update" | "delete",
+            status: "pending" as const,
+          }));
+
+          const origin =
+            savedUserMsgId && finalAssistantMsgId
+              ? { sessionId: activeSessionId, userMessageId: savedUserMsgId, assistantMessageId: finalAssistantMsgId }
+              : undefined;
+
+          onRequestReview(changes, origin);
         }
 
         // Planモード: 生成されたプランを仮想ファイルとして開く
-        if (mode === "plan" && onOpenPlan) {
+        if (effectiveMode === "plan" && onOpenPlan) {
           onOpenPlan(data.content, promptToSend);
-        }
-
-        // Checkpoint: toolCallsベースで作成（ファイル変更ツールが動いたとき）
-        const toolCallsForCheckpoint = Array.isArray(data.toolCalls) ? data.toolCalls : [];
-        const mutatingTools = new Set(["create_file", "update_file", "delete_file", "edit_file", "create_folder"]);
-        const changedFilesFromTools = toolCallsForCheckpoint
-          .filter((tc: any) => mutatingTools.has(tc.tool))
-          .map((tc: any) => tc?.result?.fileName || tc?.args?.path)
-          .filter((v: any) => typeof v === "string" && v.length > 0)
-          .map((p: string) => p.split("/").pop() || p);
-
-        if (changedFilesFromTools.length > 0) {
-          onFileCreated?.();
-          const unique = Array.from(new Set(changedFilesFromTools)) as string[];
-          await createCheckpoint(finalAssistantMsgId, unique);
-        } else {
-          // 互換: toolCallsが無い場合のみ、テキストから推測（提案のみの変更は除外）
-          const lower = assistantMsg.toLowerCase();
-          const hasProposedChanges = Array.isArray(data.proposedChanges) && data.proposedChanges.length > 0;
-          if (!hasProposedChanges && (lower.includes("created") || lower.includes("updated") || lower.includes("deleted") || lower.includes("作成") || lower.includes("更新") || lower.includes("削除"))) {
-            onFileCreated?.();
-            const fileNameRegex = /`([^`]+\.[a-zA-Z]+)`/g;
-            const changedFiles: string[] = [];
-            let fileMatch;
-            while ((fileMatch = fileNameRegex.exec(assistantMsg)) !== null) {
-              changedFiles.push(fileMatch[1]);
-            }
-            if (changedFiles.length > 0) {
-              await createCheckpoint(finalAssistantMsgId, changedFiles);
-            }
-          }
         }
       }
     } catch (error: any) {
@@ -796,13 +844,24 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
         });
         return updated;
       });
+      setMessageHead(null);
+      setRedoSnapshot(null);
 
       // Continue and revert: このメッセージより前の最新チェックポイントに戻す
       if (opts.revert) {
-        const cp = findLatestCheckpointAtOrBeforeMessageIndex(Math.max(0, editingMessageIndex - 1));
-        if (cp) {
-          await applyCheckpointFiles(cp);
-        }
+        const targetIndex = findLatestCheckpointIndexAtOrBeforeMessageIndex(Math.max(-1, editingMessageIndex - 1));
+        const targetId = targetIndex >= 0 ? (checkpoints[targetIndex]?.id ?? null) : null;
+        const fromIndex = findCheckpointIndexById(headCheckpointId);
+        await applyCheckpointDelta(fromIndex, targetIndex);
+        setHeadCheckpointId(targetId);
+        setRedoSnapshot(null);
+
+        const keptMessageIds = new Set(messages.slice(0, keepCount).map((m) => m.id));
+        setCheckpoints((prev) => {
+          const idx = targetId ? prev.findIndex((cp) => cp.id === targetId) : -1;
+          const base = idx >= 0 ? prev.slice(0, idx + 1) : [];
+          return base.filter((cp) => keptMessageIds.has(cp.anchorMessageId));
+        });
       }
 
       // 編集状態を解除して送信
@@ -833,6 +892,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
           maxMode,
           useMultipleModels,
           selectedModels,
+          reviewMode: mode === "agent",
         }),
         headers: { "Content-Type": "application/json" },
         signal: abortControllerRef.current.signal,
@@ -890,23 +950,24 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
           setMessages(prev => prev.map(m => m.id === tempAssistantMsgId ? { ...m, id: savedAssistantMsgId } : m));
         }
 
+        // Review UI: 提案された変更がある場合はレビュー画面を開く（Cursor-like）
+        if (onRequestReview && Array.isArray(data.proposedChanges) && data.proposedChanges.length > 0) {
+          const changes = data.proposedChanges.map((c: any) => ({
+            id: String(c.id),
+            filePath: String(c.filePath || c.path || ""),
+            fileName: String(c.fileName || (c.filePath || "").split("/").pop() || ""),
+            oldContent: String(c.oldContent || ""),
+            newContent: String(c.newContent || ""),
+            action: c.action as "create" | "update" | "delete",
+            status: "pending" as const,
+          }));
+
+          onRequestReview(changes, { sessionId: activeSessionId, userMessageId: target.id, assistantMessageId: finalAssistantMsgId });
+        }
+
         // Planモード: 生成されたプランを仮想ファイルとして開く
         if (mode === "plan" && onOpenPlan) {
           onOpenPlan(data.content, promptToSend);
-        }
-
-        // toolCallsベースでチェックポイントを作成
-        const mutatingTools = new Set(["create_file", "update_file", "delete_file", "edit_file", "create_folder"]);
-        const changedFiles = (toolCalls || [])
-          .filter((tc: any) => mutatingTools.has(tc.tool))
-          .map((tc: any) => tc?.result?.fileName || tc?.args?.path)
-          .filter((v: any) => typeof v === "string" && v.length > 0)
-          .map((p: string) => p.split("/").pop() || p);
-
-        if (changedFiles.length > 0) {
-          onFileCreated?.();
-          const unique = Array.from(new Set(changedFiles)) as string[];
-          await createCheckpoint(finalAssistantMsgId, unique);
         }
       }
     } catch (error: any) {
@@ -1040,7 +1101,11 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
     onSubmit(prompts[action]);
   };
 
-  useImperativeHandle(ref, () => ({ triggerAction }));
+  const sendPrompt = (text: string, opts?: { mode?: "agent" | "plan" | "ask" }) => {
+    onSubmit(text, opts);
+  };
+
+  useImperativeHandle(ref, () => ({ triggerAction, sendPrompt, recordAgentCheckpoint }));
 
   const currentModelName = availableModels.find(m => m.id === selectedModel)?.name || selectedModel;
 
@@ -1289,246 +1354,291 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
     });
   };
 
-  // チェックポイントを作成
-  const createCheckpoint = useCallback(async (messageId: string, changedFiles: string[]): Promise<Checkpoint | null> => {
-    if (changedFiles.length === 0) return null;
-    
-    const fileSnapshots: FileSnapshot[] = [];
+  // --- Checkpoints (Cursor-like) ---
+  const messageIndexById = useMemo(() => new Map(messages.map((m, idx) => [m.id, idx])), [messages]);
 
-    // Cursor-like: 復元精度を上げるため、チェックポイント時点の全ファイルをスナップショット
-    const fileNodesToSnapshot = nodes.filter(n => n.type === "file");
-    for (const node of fileNodesToSnapshot) {
-      try {
-        const content = await onGetFileContent(node.id);
-        fileSnapshots.push({
-          nodeId: node.id,
-          fileName: node.name,
-          parentId: node.parent_id,
-          content,
-          action: "updated",
-        });
-      } catch (e) {
-        console.error(`Failed to snapshot file ${node.name}:`, e);
-      }
-    }
-    
-    if (fileSnapshots.length === 0) return null;
-    
-    const checkpoint: Checkpoint = {
-      id: `cp-${Date.now()}`,
-      messageId,
-      timestamp: new Date().toISOString(),
-      fileSnapshots,
-      description: `${changedFiles.length} file(s) changed`,
+  const pathByNodeId = useMemo(() => {
+    const nodeById = new Map(nodes.map((n) => [n.id, n]));
+    const cache = new Map<string, string>();
+
+    const build = (id: string, seen: Set<string>): string => {
+      if (cache.has(id)) return cache.get(id)!;
+      if (seen.has(id)) return "";
+      const node = nodeById.get(id);
+      if (!node) return "";
+      seen.add(id);
+      const parentPath = node.parent_id ? build(node.parent_id, seen) : "";
+      const full = parentPath ? `${parentPath}/${node.name}` : node.name;
+      cache.set(id, full);
+      return full;
     };
-    
-    setCheckpoints(prev => [...prev, checkpoint]);
-    return checkpoint;
-  }, [nodes, onGetFileContent]);
 
-  const applyCheckpointFiles = useCallback(async (checkpoint: Checkpoint) => {
-    if (!checkpoint.fileSnapshots || checkpoint.fileSnapshots.length === 0) return;
+    for (const n of nodes) build(n.id, new Set());
+    return cache;
+  }, [nodes]);
 
-    // チェックポイントに存在しない「後から作られたファイル」を削除（Cursorっぽい復元）
-    try {
-      const keepIds = new Set(checkpoint.fileSnapshots.map(s => s.nodeId));
-      const { data: currentFiles, error } = await supabase
-        .from("nodes")
-        .select("id")
-        .eq("project_id", projectId)
-        .eq("type", "file");
-      if (!error && currentFiles && currentFiles.length > 0) {
-        const toDelete = currentFiles.map(f => f.id).filter(id => !keepIds.has(id));
-        if (toDelete.length > 0) {
-          await supabase.from("nodes").delete().in("id", toDelete);
-        }
-      }
-    } catch (e) {
-      console.error("Failed to delete files not in checkpoint:", e);
+  const nodeIdByPath = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const n of nodes) {
+      if (n.type !== "file") continue;
+      const fullPath = pathByNodeId.get(n.id);
+      if (!fullPath) continue;
+      map.set(fullPath, n.id);
     }
-
-    // 既存のノードを取得（削除されたファイルの再作成用）
-    let existingIds = new Set<string>();
-    try {
-      const { data: existingNodes, error: existingError } = await supabase
-        .from("nodes")
-        .select("id")
-        .in("id", checkpoint.fileSnapshots.map(s => s.nodeId));
-      if (!existingError && existingNodes) {
-        existingIds = new Set(existingNodes.map(n => n.id));
-      }
-    } catch (e) {
-      console.error("Failed to fetch existing nodes for checkpoint restore:", e);
-    }
-
-    for (const snap of checkpoint.fileSnapshots) {
-      try {
-        if (snap.action === "deleted") {
-          // 簡易実装: deleteの復元は未対応
-          continue;
-        }
-
-        // ノードが消えている場合は再作成してから内容を戻す
-        if (!existingIds.has(snap.nodeId)) {
-          const baseInsert = {
-            id: snap.nodeId,
-            project_id: projectId,
-            parent_id: snap.parentId ?? null,
-            type: "file" as const,
-            name: snap.fileName,
-          };
-          let { error: insertError } = await supabase.from("nodes").insert(baseInsert);
-          if (insertError && snap.parentId) {
-            // 親フォルダが無い場合はルートにフォールバック
-            ({ error: insertError } = await supabase.from("nodes").insert({ ...baseInsert, parent_id: null }));
-          }
-          if (insertError) {
-            console.error("Failed to recreate node for checkpoint restore:", insertError);
-          } else {
-            existingIds.add(snap.nodeId);
-          }
-        } else {
-          // 既存ノードのメタ情報もチェックポイントに合わせる（リネーム/移動の簡易対応）
-          await supabase.from("nodes").update({
-            name: snap.fileName,
-            parent_id: snap.parentId ?? null,
-          }).eq("id", snap.nodeId);
-        }
-
-        await supabase
-          .from("file_contents")
-          .upsert({ node_id: snap.nodeId, text: snap.content }, { onConflict: "node_id" });
-      } catch (e) {
-        console.error("Failed to apply checkpoint file snapshot:", e);
-      }
-    }
-    onFileCreated?.();
-  }, [onFileCreated, projectId, supabase]);
+    return map;
+  }, [nodes, pathByNodeId]);
 
   const deleteMessagesByIds = useCallback(async (ids: string[]) => {
     if (!ids || ids.length === 0) return;
     if (!currentSessionId || currentSessionId.startsWith("new-")) return;
     const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    const validIds = ids.filter(id => uuidRegex.test(id));
+    const validIds = ids.filter((id) => uuidRegex.test(id));
     if (validIds.length === 0) return;
-    const { error } = await supabase
-      .from("chat_messages")
-      .delete()
-      .in("id", validIds);
+    const { error } = await supabase.from("chat_messages").delete().in("id", validIds);
     if (error) {
       console.error("Failed to delete chat messages:", error);
     }
   }, [currentSessionId, supabase]);
 
-  const findLatestCheckpointAtOrBeforeMessageIndex = useCallback((messageIndex: number): Checkpoint | null => {
-    let best: { cp: Checkpoint; idx: number } | null = null;
-    for (const cp of checkpoints) {
-      const idx = messages.findIndex(m => m.id === cp.messageId);
-      if (idx === -1) continue;
-      if (idx > messageIndex) continue;
-      if (!best || idx > best.idx) best = { cp, idx };
+  const reversePatchText = (patchText: string): string => {
+    try {
+      const parsed = parsePatch(patchText);
+      if (!parsed || parsed.length === 0) return patchText;
+      return formatPatch(reversePatch(parsed[0]));
+    } catch {
+      return patchText;
     }
-    return best?.cp || null;
-  }, [checkpoints, messages]);
-  
-  // チェックポイントを復元
-  const restoreCheckpoint = useCallback(async (checkpoint: Checkpoint) => {
-    // ファイルを復元（簡易: file_contents のみ）
-    await applyCheckpointFiles(checkpoint);
-
-    // メッセージをチェックポイント時点まで戻す
-    const checkpointMsgIndex = messages.findIndex(m => m.id === checkpoint.messageId);
-    if (checkpointMsgIndex >= 0) {
-      const keepCount = checkpointMsgIndex + 1;
-      const idsToDelete = messages.slice(keepCount).map(m => m.id);
-      await deleteMessagesByIds(idsToDelete);
-
-      // チェックポイント以降のメッセージを削除
-      setMessages(prev => prev.slice(0, keepCount));
-      
-      // チェックポイント以降のチェックポイントも削除
-      setCheckpoints(prev => {
-        const cpIndex = prev.findIndex(cp => cp.id === checkpoint.id);
-        return cpIndex >= 0 ? prev.slice(0, cpIndex + 1) : prev;
-      });
-    }
-    
-    // ダイアログを閉じる
-    setShowRestoreDialog(false);
-    setSelectedCheckpoint(null);
-    // 編集状態も解除
-    setEditingMessageIndex(null);
-    setEditingImageUrls([]);
-    setAttachedImages([]);
-    setPrompt("");
-  }, [applyCheckpointFiles, deleteMessagesByIds, messages]);
-  
-  // 復元の確認
-  const handleRestoreClick = (checkpoint: Checkpoint) => {
-    // "Don't ask again"が有効な場合は直接復元
-    const skipDialog = localStorage.getItem("checkpoint_dont_ask") === "true";
-    if (skipDialog) {
-      restoreCheckpoint(checkpoint);
-      return;
-    }
-    
-    setSelectedCheckpoint(checkpoint);
-    setShowRestoreDialog(true);
   };
-  
-  // メッセージインデックスを指定して復元（チェックポイント不要版）
-  const [restoreToIndex, setRestoreToIndex] = useState<number | null>(null);
-  
+
+  const upsertFileText = useCallback(async (nodeId: string, text: string) => {
+    const { error } = await supabase.from("file_contents").upsert({ node_id: nodeId, text });
+    if (error) throw new Error(error.message);
+  }, [supabase]);
+
+  const ensureFileAtPath = useCallback(async (path: string, text: string, pathToNodeId: Map<string, string>) => {
+    const existingId = pathToNodeId.get(path);
+    if (existingId) {
+      await upsertFileText(existingId, text);
+      return existingId;
+    }
+
+    const res = await fetch("/api/files", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "create_file", path, content: text, projectId }),
+    });
+    const json = await res.json();
+    if (!res.ok) throw new Error(json?.error || "Failed to create file");
+    const nodeId = String(json?.nodeId || "");
+    if (nodeId) {
+      pathToNodeId.set(path, nodeId);
+    }
+    return nodeId;
+  }, [projectId, upsertFileText]);
+
+  const deleteFileAtPath = useCallback(async (path: string, pathToNodeId: Map<string, string>) => {
+    const nodeId = pathToNodeId.get(path);
+    if (!nodeId) return;
+    const res = await fetch("/api/files", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "delete_node", id: nodeId }),
+    });
+    const json = await res.json();
+    if (!res.ok) throw new Error(json?.error || "Failed to delete");
+    pathToNodeId.delete(path);
+  }, []);
+
+  const findCheckpointIndexById = (checkpointId: string | null): number => {
+    if (!checkpointId) return -1;
+    const idx = checkpoints.findIndex((cp) => cp.id === checkpointId);
+    return idx >= 0 ? idx : -1;
+  };
+
+  const findLatestCheckpointIndexAtOrBeforeMessageIndex = useCallback((messageIndex: number): number => {
+    for (let i = checkpoints.length - 1; i >= 0; i--) {
+      const anchorIdx = messageIndexById.get(checkpoints[i].anchorMessageId);
+      if (anchorIdx === undefined) continue;
+      if (anchorIdx <= messageIndex) return i;
+    }
+    return -1;
+  }, [checkpoints, messageIndexById]);
+
+  const applyCheckpointDelta = useCallback(async (fromIndex: number, toIndex: number) => {
+    if (fromIndex === toIndex) return;
+
+    const pathToNodeId = new Map(nodeIdByPath);
+
+    const applyOp = async (op: StoredCheckpointOperation, direction: "forward" | "undo") => {
+      const patchText = direction === "forward" ? op.patch : reversePatchText(op.patch);
+
+      if (direction === "forward") {
+        if (op.kind === "create") {
+          await ensureFileAtPath(op.path, op.afterText, pathToNodeId);
+          return;
+        }
+        if (op.kind === "delete") {
+          await deleteFileAtPath(op.path, pathToNodeId);
+          return;
+        }
+
+        // update
+        let nodeId = pathToNodeId.get(op.path);
+        if (!nodeId) {
+          await ensureFileAtPath(op.path, op.afterText, pathToNodeId);
+          return;
+        }
+        const currentText = await onGetFileContent(nodeId);
+        const patched = applyPatch(currentText, patchText);
+        const nextText = typeof patched === "string" ? patched : op.afterText;
+        await upsertFileText(nodeId, nextText);
+        return;
+      }
+
+      // undo
+      if (op.kind === "create") {
+        await deleteFileAtPath(op.path, pathToNodeId);
+        return;
+      }
+      if (op.kind === "delete") {
+        await ensureFileAtPath(op.path, op.beforeText, pathToNodeId);
+        return;
+      }
+
+      // undo update
+      let nodeId = pathToNodeId.get(op.path);
+      if (!nodeId) {
+        await ensureFileAtPath(op.path, op.beforeText, pathToNodeId);
+        return;
+      }
+      const currentText = await onGetFileContent(nodeId);
+      const patched = applyPatch(currentText, patchText);
+      const nextText = typeof patched === "string" ? patched : op.beforeText;
+      await upsertFileText(nodeId, nextText);
+    };
+
+    const applyCheckpoint = async (checkpoint: StoredCheckpoint, direction: "forward" | "undo") => {
+      const ops = direction === "undo" ? [...checkpoint.ops].reverse() : checkpoint.ops;
+      for (const op of ops) {
+        await applyOp(op, direction);
+      }
+    };
+
+    if (toIndex > fromIndex) {
+      for (let i = fromIndex + 1; i <= toIndex; i++) {
+        const cp = checkpoints[i];
+        if (!cp) continue;
+        await applyCheckpoint(cp, "forward");
+      }
+    } else {
+      for (let i = fromIndex; i > toIndex; i--) {
+        const cp = checkpoints[i];
+        if (!cp) continue;
+        await applyCheckpoint(cp, "undo");
+      }
+    }
+
+    onFileCreated?.();
+  }, [checkpoints, deleteFileAtPath, ensureFileAtPath, nodeIdByPath, onFileCreated, onGetFileContent, upsertFileText]);
+
+  const recordAgentCheckpoint = useCallback((input: AgentCheckpointRecordInput) => {
+    if (!currentSessionId || currentSessionId.startsWith("new-")) return;
+    if (!input?.anchorMessageId) return;
+    const changes = input.changes || [];
+    if (changes.length === 0) return;
+
+    const id = (() => {
+      try {
+        return crypto.randomUUID();
+      } catch {
+        return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      }
+    })();
+
+    const checkpoint: StoredCheckpoint = {
+      id,
+      createdAt: new Date().toISOString(),
+      anchorMessageId: input.anchorMessageId,
+      description: input.description || `Edited ${changes.length} file(s)`,
+      ops: changes.map((c) => ({
+        ...c,
+        patch: createTwoFilesPatch(c.path, c.path, c.beforeText, c.afterText, "", ""),
+      })),
+    };
+
+    setCheckpoints((prev) => {
+      const headIdx = headCheckpointId ? prev.findIndex((cp) => cp.id === headCheckpointId) : -1;
+      const base = headIdx >= 0 ? prev.slice(0, headIdx + 1) : [];
+      return [...base, checkpoint];
+    });
+    setHeadCheckpointId(id);
+    setRedoSnapshot(null);
+  }, [currentSessionId, headCheckpointId]);
+
+  const performRestoreToMessage = async (messageIndex: number) => {
+    if (!currentSessionId || currentSessionId.startsWith("new-")) return;
+
+    const isUser = messages[messageIndex]?.role === "user";
+    const hasAssistantResponse = isUser && messages[messageIndex + 1]?.role === "assistant";
+    const cutIndex = hasAssistantResponse ? messageIndex + 2 : messageIndex + 1;
+    const lastKeptMessageIndex = Math.max(0, cutIndex - 1);
+
+    const targetCheckpointIndex = findLatestCheckpointIndexAtOrBeforeMessageIndex(lastKeptMessageIndex);
+    const targetCheckpointId = targetCheckpointIndex >= 0 ? (checkpoints[targetCheckpointIndex]?.id ?? null) : null;
+    const fromIndex = findCheckpointIndexById(headCheckpointId);
+    const toIndex = targetCheckpointIndex;
+    const nextMessageHead = cutIndex >= messages.length ? null : cutIndex;
+
+    try {
+      await applyCheckpointDelta(fromIndex, toIndex);
+      setRedoSnapshot({ messageHead, headCheckpointId });
+      setHeadCheckpointId(targetCheckpointId);
+      setMessageHead(nextMessageHead);
+
+      setEditingMessageIndex(null);
+      setEditingImageUrls([]);
+      setAttachedImages([]);
+      setDraftBeforeEdit("");
+      setPrompt("");
+    } catch (e: any) {
+      alert(`Error: ${e?.message || e}`);
+    } finally {
+      setShowRestoreDialog(false);
+      setRestoreToIndex(null);
+      setDontAskAgain(false);
+    }
+  };
+
   const handleRestoreToMessage = (messageIndex: number) => {
     const skipDialog = localStorage.getItem("checkpoint_dont_ask") === "true";
     if (skipDialog) {
-      performRestoreToMessage(messageIndex);
+      void performRestoreToMessage(messageIndex);
       return;
     }
-    
     setRestoreToIndex(messageIndex);
     setShowRestoreDialog(true);
   };
-  
-  const performRestoreToMessage = async (messageIndex: number) => {
-    // メッセージをその位置までトリミング（次のアシスタントメッセージまで含める）
-    const nextIndex = messageIndex + 1;
-    const hasAssistantResponse = messages[nextIndex]?.role === "assistant";
-    const cutIndex = hasAssistantResponse ? nextIndex + 1 : nextIndex;
-    const idsToDelete = messages.slice(cutIndex).map(m => m.id);
 
-    // その時点までの最新チェックポイントがあればファイルも戻す
-    const cp = findLatestCheckpointAtOrBeforeMessageIndex(Math.max(0, cutIndex - 1));
-    if (cp) {
-      await applyCheckpointFiles(cp);
+  const redoCheckpoint = async () => {
+    if (!redoSnapshot) return;
+    const fromIndex = findCheckpointIndexById(headCheckpointId);
+    const toIndex = findCheckpointIndexById(redoSnapshot.headCheckpointId);
+    try {
+      await applyCheckpointDelta(fromIndex, toIndex);
+      setHeadCheckpointId(redoSnapshot.headCheckpointId);
+      setMessageHead(redoSnapshot.messageHead);
+      setRedoSnapshot(null);
+    } catch (e: any) {
+      alert(`Error: ${e?.message || e}`);
     }
-
-    await deleteMessagesByIds(idsToDelete);
-    setMessages(prev => prev.slice(0, cutIndex));
-
-    // その時点以降のチェックポイントも削除
-    const keptMessageIds = new Set(messages.slice(0, cutIndex).map(m => m.id));
-    setCheckpoints(prev => prev.filter(cpItem => keptMessageIds.has(cpItem.messageId)));
-    
-    // ダイアログを閉じる
-    setShowRestoreDialog(false);
-    setRestoreToIndex(null);
-
-    // 編集状態も解除
-    setEditingMessageIndex(null);
-    setEditingImageUrls([]);
-    setAttachedImages([]);
-    setPrompt("");
   };
-  
+
   // 復元を確定
   const confirmRestore = async () => {
     if (dontAskAgain) {
       localStorage.setItem("checkpoint_dont_ask", "true");
     }
-    if (selectedCheckpoint) {
-      await restoreCheckpoint(selectedCheckpoint);
-    } else if (restoreToIndex !== null) {
+    if (restoreToIndex !== null) {
       await performRestoreToMessage(restoreToIndex);
     }
   };
@@ -2226,17 +2336,29 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
              <p>No messages yet.</p>
           </div>
         )}
+
+        {redoSnapshot && (
+          <button
+            onClick={() => void redoCheckpoint()}
+            className="flex items-center gap-2 px-1 text-xs text-zinc-400 hover:text-zinc-600 transition-colors w-fit"
+          >
+            <Icons.Restore className="w-3.5 h-3.5 text-zinc-400" />
+            <span>Redo checkpoint</span>
+          </button>
+        )}
         
         {messages.map((msg, idx) => {
+          const activeHead = messageHead ?? messages.length;
+          const isFuture = messageHead !== null && idx >= messageHead;
+          const canRestore = !isFuture && idx < activeHead - 1;
           const codeBlock = msg.role === "assistant" ? extractCodeBlock(msg.content) : null;
           const isThoughtExpanded = expandedThoughts[msg.id];
           
           if (msg.role === "user") {
-              // 後続のメッセージがある場合のみ復元ボタンを表示
-              const canRestore = idx < messages.length - 1;
+              const hasCheckpoint = checkpoints.some((cp) => cp.anchorMessageId === msg.id);
               
               return (
-                  <div key={msg.id} className="group flex items-start justify-between gap-2 px-1">
+                  <div key={msg.id} className={`group flex items-start justify-between gap-2 px-1 ${isFuture ? "opacity-50" : ""}`}>
                      <div className="flex flex-col gap-2 flex-1">
                        {/* ユーザーが送信した画像 */}
                        {msg.images && msg.images.length > 0 && (
@@ -2256,14 +2378,20 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
                          <div
                            role="button"
                            tabIndex={0}
-                           onClick={() => startEditingMessage(idx)}
+                           onClick={() => {
+                             if (isFuture) return;
+                             startEditingMessage(idx);
+                           }}
                            onKeyDown={(e) => {
+                             if (isFuture) return;
                              if (e.key === "Enter" || e.key === " ") {
                                e.preventDefault();
                                startEditingMessage(idx);
                              }
                            }}
-                           className="text-[14px] font-normal text-zinc-900 leading-relaxed whitespace-pre-wrap cursor-pointer hover:bg-zinc-50 rounded-md px-1 -mx-1 transition-colors outline-none focus:ring-2 focus:ring-green-200"
+                           className={`text-[14px] font-normal text-zinc-900 leading-relaxed whitespace-pre-wrap rounded-md px-1 -mx-1 transition-colors outline-none focus:ring-2 focus:ring-green-200 ${
+                             isFuture ? "cursor-default" : "cursor-pointer hover:bg-zinc-50"
+                           }`}
                            title="Click to edit"
                          >
                            {msg.content}
@@ -2271,22 +2399,47 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
                        )}
                      </div>
                      
-                     {/* Restore Button - ホバー時に表示（後続メッセージがある場合） */}
-                     {canRestore && (
-                       <button
-                         onClick={() => handleRestoreToMessage(idx)}
-                         className="flex-shrink-0 p-1.5 text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 rounded opacity-0 group-hover:opacity-100 transition-opacity"
-                         title="Restore to this point"
-                       >
-                         <Icons.Restore className="w-4 h-4" />
-                       </button>
-                     )}
+                     <div className="flex flex-col items-end gap-1 flex-shrink-0">
+                       {hasCheckpoint && (
+                         <button
+                           onClick={() => handleRestoreToMessage(idx)}
+                           disabled={isFuture}
+                           className={`px-2 py-1 text-[11px] rounded border transition-colors ${
+                             isFuture
+                               ? "border-zinc-200 bg-zinc-100 text-zinc-400 cursor-not-allowed"
+                               : "border-zinc-200 bg-zinc-100 text-zinc-500 hover:bg-zinc-200"
+                           }`}
+                         >
+                           Restore checkpoint
+                         </button>
+                       )}
+
+                       {/* + Button - hover restore */}
+                       {canRestore && (
+                         <button
+                           onClick={() => handleRestoreToMessage(idx)}
+                           className="p-1.5 text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 rounded opacity-0 group-hover:opacity-100 transition-opacity"
+                           title="Restore to this point"
+                         >
+                           <Icons.Plus className="w-4 h-4" />
+                         </button>
+                       )}
+                     </div>
                   </div>
               )
           }
 
           return (
-            <div key={msg.id} className="flex flex-col gap-1">
+            <div key={msg.id} className={`group relative flex flex-col gap-1 ${isFuture ? "opacity-50" : ""}`}>
+               {canRestore && (
+                 <button
+                   onClick={() => handleRestoreToMessage(idx)}
+                   className="absolute top-0 right-0 p-1.5 text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 rounded opacity-0 group-hover:opacity-100 transition-opacity"
+                   title="Restore to this point"
+                 >
+                   <Icons.Plus className="w-4 h-4" />
+                 </button>
+               )}
                {/* Thought Accordion (Mock) */}
                <div className="flex flex-col gap-1">
                    <button 
@@ -2426,7 +2579,26 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
       </div>
 
       {/* Floating Input Area */}
-      <div className="absolute bottom-4 left-4 right-4 z-30">
+      <div className="absolute bottom-4 left-4 right-4 z-30 flex flex-col gap-3">
+        {reviewChanges &&
+          reviewChanges.length > 0 &&
+          onReviewSelectFile &&
+          onReviewAcceptAll &&
+          onReviewRejectAll && (
+            <ReviewChangesCard
+              changes={reviewChanges}
+              onSelectFile={onReviewSelectFile}
+              onSelectIssue={onReviewSelectIssue}
+              onAcceptAll={onReviewAcceptAll}
+              onRejectAll={onReviewRejectAll}
+              onFindIssues={onReviewFindIssues}
+              isFindingIssues={isFindingReviewIssues}
+              issues={reviewIssues}
+              onFixIssue={onReviewFixIssueInChat}
+              onDismissIssue={onReviewDismissIssue}
+              onFixAllIssues={onReviewFixAllIssuesInChat}
+            />
+          )}
         <div 
           className={`relative flex flex-col bg-white border shadow-lg rounded-xl transition-all ${
             isDragging ? "border-blue-500 ring-4 ring-blue-500/10" : "border-zinc-200 focus-within:border-zinc-300 focus-within:shadow-xl"
@@ -2729,7 +2901,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
       )}
       
       {/* Restore Checkpoint Confirmation Dialog */}
-      {showRestoreDialog && (selectedCheckpoint || restoreToIndex !== null) && (
+      {showRestoreDialog && restoreToIndex !== null && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-[#1e2028] rounded-lg shadow-2xl w-[420px] overflow-hidden">
             <div className="p-5">
@@ -2765,7 +2937,6 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
               <button
                 onClick={() => {
                   setShowRestoreDialog(false);
-                  setSelectedCheckpoint(null);
                   setRestoreToIndex(null);
                 }}
                 className="px-3 py-1.5 text-xs text-zinc-400 hover:text-zinc-200 transition-colors"

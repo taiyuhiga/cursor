@@ -1,401 +1,722 @@
 "use client";
 
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { diffLines } from "diff";
+import type { PendingChange, ReviewIssue } from "@/lib/review/types";
 import { Icons } from "./Icons";
 
-export type PendingChange = {
-  id: string;
-  filePath: string;
-  fileName: string;
-  oldContent: string;
-  newContent: string;
-  action: "create" | "update" | "delete";
+type DiffLine = {
+  displayIndex: number;
+  diffIndex: number;
+  type: "added" | "removed" | "context";
+  content: string;
   status: "pending" | "accepted" | "rejected";
-  lineStatuses?: Record<number, "accepted" | "rejected" | "pending">;
+  oldLineNumber: number | null;
+  newLineNumber: number | null;
 };
 
 type Props = {
   changes: PendingChange[];
-  onAcceptAll: () => void;
-  onRejectAll: () => void;
-  onAcceptFile: (changeId: string) => void;
+  selectedChangeId: string | null;
+  onSelectChange: (changeId: string) => void;
+  onAcceptFile: (changeId: string) => Promise<void> | void;
   onRejectFile: (changeId: string) => void;
   onAcceptLine: (changeId: string, lineIndex: number) => void;
   onRejectLine: (changeId: string, lineIndex: number) => void;
   onClose: () => void;
-  onFindIssues?: () => void;
-  issues?: string | null;
+  focusIssue?: { id: string; nonce: number } | null;
+  issues?: ReviewIssue[] | null;
   isFindingIssues?: boolean;
+  onFindIssues?: () => void;
+  onDismissIssue?: (issueId: string) => void;
+  onFixIssueInChat?: (issueId: string) => void;
+  onFixAllIssuesInChat?: () => void;
 };
 
 export function ReviewPanel({
   changes,
-  onAcceptAll,
-  onRejectAll,
+  selectedChangeId,
+  onSelectChange,
   onAcceptFile,
   onRejectFile,
   onAcceptLine,
   onRejectLine,
   onClose,
-  onFindIssues,
+  focusIssue,
   issues,
   isFindingIssues,
+  onFindIssues,
+  onDismissIssue,
+  onFixIssueInChat,
+  onFixAllIssuesInChat,
 }: Props) {
-  const [selectedChangeId, setSelectedChangeId] = useState<string | null>(
-    changes[0]?.id || null
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [currentHunkIndex, setCurrentHunkIndex] = useState(0);
+  const [activeIssueId, setActiveIssueId] = useState<string | null>(null);
+  const [issueFeedback, setIssueFeedback] = useState<Record<string, "up" | "down" | null>>({});
+  const pendingIssueScrollRef = useRef<{ filePath: string; line: number | null } | null>(null);
+
+  const selectedChange = useMemo(
+    () => changes.find((c) => c.id === selectedChangeId) ?? null,
+    [changes, selectedChangeId]
   );
-  const [showLineActions, setShowLineActions] = useState(false);
 
-  // changes が更新された時に選択状態が壊れないようにする
-  useEffect(() => {
-    if (!changes || changes.length === 0) {
-      setSelectedChangeId(null);
-      return;
+  const openIssues = useMemo(
+    () => (issues || []).filter((i) => i.status === "open"),
+    [issues]
+  );
+
+  const orderedIssues = useMemo(() => {
+    return [...openIssues].sort((a, b) => {
+      const pathCmp = a.filePath.localeCompare(b.filePath);
+      if (pathCmp !== 0) return pathCmp;
+      const aLine = a.startLine ?? 0;
+      const bLine = b.startLine ?? 0;
+      if (aLine !== bLine) return aLine - bLine;
+      return a.title.localeCompare(b.title);
+    });
+  }, [openIssues]);
+
+  const activeIssueIndex = useMemo(() => {
+    if (!activeIssueId) return -1;
+    return orderedIssues.findIndex((i) => i.id === activeIssueId);
+  }, [activeIssueId, orderedIssues]);
+
+  const activeIssue = useMemo(() => {
+    if (activeIssueIndex < 0) return null;
+    return orderedIssues[activeIssueIndex] ?? null;
+  }, [activeIssueIndex, orderedIssues]);
+
+  const issuesForSelectedFile = useMemo(() => {
+    if (!selectedChange) return [] as ReviewIssue[];
+    return orderedIssues.filter((i) => i.filePath === selectedChange.filePath);
+  }, [orderedIssues, selectedChange]);
+
+  const changeIdByFilePath = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const c of changes) {
+      map.set(c.filePath, c.id);
     }
-    if (!selectedChangeId || !changes.find(c => c.id === selectedChangeId)) {
-      setSelectedChangeId(changes[0].id);
+    return map;
+  }, [changes]);
+
+  const { lines, hunkStarts } = useMemo(() => {
+    if (!selectedChange) return { lines: [] as DiffLine[], hunkStarts: [] as number[] };
+
+    const parts = diffLines(selectedChange.oldContent, selectedChange.newContent);
+    let diffIndex = 0;
+    let displayIndex = 0;
+    let oldLine = 1;
+    let newLine = 1;
+    const out: DiffLine[] = [];
+    const starts: number[] = [];
+
+    let prevWasContext = true;
+    for (const part of parts) {
+      const type = part.added ? "added" : part.removed ? "removed" : "context";
+      const partLines = part.value
+        .split("\n")
+        .filter((line, i, arr) => !(i === arr.length - 1 && line === ""));
+
+      for (const content of partLines) {
+        const status = selectedChange.lineStatuses?.[diffIndex] || "pending";
+
+        if (type !== "context" && prevWasContext) {
+          starts.push(displayIndex);
+        }
+
+        const oldLineNumber = type === "added" ? null : oldLine;
+        const newLineNumber = type === "removed" ? null : newLine;
+
+        out.push({ displayIndex, diffIndex, type, content, status, oldLineNumber, newLineNumber });
+        prevWasContext = type === "context";
+
+        if (type === "context") {
+          oldLine++;
+          newLine++;
+        } else if (type === "removed") {
+          oldLine++;
+        } else if (type === "added") {
+          newLine++;
+        }
+
+        diffIndex++;
+        displayIndex++;
+      }
     }
-  }, [changes, selectedChangeId]);
 
-  const selectedChange = changes.find((c) => c.id === selectedChangeId);
-
-  const diffResult = useMemo(() => {
-    if (!selectedChange) return [];
-    return diffLines(selectedChange.oldContent, selectedChange.newContent);
+    return { lines: out, hunkStarts: starts.length > 0 ? starts : [0] };
   }, [selectedChange]);
 
-  // 行インデックスを計算
-  const linesWithIndex = useMemo(() => {
-    let lineIndex = 0;
-    const lines: Array<{
-      index: number;
-      type: "added" | "removed" | "context";
-      content: string;
-      status: "pending" | "accepted" | "rejected";
-    }> = [];
-
-    diffResult.forEach((part) => {
-      const partLines = part.value.split("\n").filter((_, i, arr) => !(i === arr.length - 1 && _ === ""));
-      partLines.forEach((line) => {
-        const type = part.added ? "added" : part.removed ? "removed" : "context";
-        const status = selectedChange?.lineStatuses?.[lineIndex] || "pending";
-        lines.push({ index: lineIndex, type, content: line, status });
-        lineIndex++;
-      });
-    });
-
-    return lines;
-  }, [diffResult, selectedChange]);
-
-  const stats = useMemo(() => {
-    const added = linesWithIndex.filter((l) => l.type === "added").length;
-    const removed = linesWithIndex.filter((l) => l.type === "removed").length;
+  const fileStats = useMemo(() => {
+    let added = 0;
+    let removed = 0;
+    for (const l of lines) {
+      if (l.type === "added") added++;
+      else if (l.type === "removed") removed++;
+    }
     return { added, removed };
-  }, [linesWithIndex]);
+  }, [lines]);
 
-  const pendingCount = changes.filter((c) => c.status === "pending").length;
-  const currentIndex = changes.findIndex((c) => c.id === selectedChangeId) + 1;
-
-  const goToNextPending = () => {
-    const currentIdx = changes.findIndex((c) => c.id === selectedChangeId);
-    for (let i = currentIdx + 1; i < changes.length; i++) {
-      if (changes[i].status === "pending") {
-        setSelectedChangeId(changes[i].id);
-        return;
+  const newLineToDisplayIndex = useMemo(() => {
+    const map = new Map<number, number>();
+    for (const l of lines) {
+      if (l.newLineNumber !== null) {
+        map.set(l.newLineNumber, l.displayIndex);
       }
     }
-    // Wrap around
-    for (let i = 0; i < currentIdx; i++) {
-      if (changes[i].status === "pending") {
-        setSelectedChangeId(changes[i].id);
-        return;
-      }
+    return map;
+  }, [lines]);
+
+  const issueAnchors = useMemo(() => {
+    const map = new Map<number, ReviewIssue[]>();
+    if (!selectedChange || issuesForSelectedFile.length === 0) return map;
+
+    for (const issue of issuesForSelectedFile) {
+      const target = issue.startLine ?? null;
+      const displayIdx =
+        target !== null ? newLineToDisplayIndex.get(target) : undefined;
+      const anchor = displayIdx ?? 0;
+      const existing = map.get(anchor) ?? [];
+      existing.push(issue);
+      existing.sort((a, b) => (a.startLine ?? 0) - (b.startLine ?? 0));
+      map.set(anchor, existing);
     }
+    return map;
+  }, [issuesForSelectedFile, newLineToDisplayIndex, selectedChange]);
+
+  const currentFileIndex = useMemo(() => {
+    const idx = changes.findIndex((c) => c.id === selectedChangeId);
+    return idx >= 0 ? idx : 0;
+  }, [changes, selectedChangeId]);
+
+  const goToFile = (nextIndex: number) => {
+    if (changes.length === 0) return;
+    const idx = (nextIndex + changes.length) % changes.length;
+    onSelectChange(changes[idx].id);
   };
 
-  const goToPrevPending = () => {
-    const currentIdx = changes.findIndex((c) => c.id === selectedChangeId);
-    for (let i = currentIdx - 1; i >= 0; i--) {
-      if (changes[i].status === "pending") {
-        setSelectedChangeId(changes[i].id);
+  const goToNextPendingFile = () => {
+    if (changes.length === 0) return;
+    const start = currentFileIndex;
+    for (let i = 1; i <= changes.length; i++) {
+      const idx = (start + i) % changes.length;
+      if (changes[idx].status === "pending") {
+        onSelectChange(changes[idx].id);
         return;
       }
     }
-    // Wrap around
-    for (let i = changes.length - 1; i > currentIdx; i--) {
-      if (changes[i].status === "pending") {
-        setSelectedChangeId(changes[i].id);
-        return;
-      }
-    }
+    // no pending, just advance
+    goToFile(start + 1);
   };
 
-  if (changes.length === 0) {
-    return null;
-  }
+  const scrollToDisplayIndex = (displayIdx: number) => {
+    const el = scrollRef.current?.querySelector(`[data-review-line="${displayIdx}"]`) as HTMLElement | null;
+    el?.scrollIntoView({ block: "center" });
+  };
+
+  const scrollToNewLine = (lineNumber: number | null) => {
+    if (lineNumber === null) return;
+    const displayIdx = newLineToDisplayIndex.get(lineNumber);
+    if (displayIdx === undefined) return;
+    scrollToDisplayIndex(displayIdx);
+  };
+
+  const goToHunk = (next: number) => {
+    if (!hunkStarts || hunkStarts.length === 0) return;
+    const idx = (next + hunkStarts.length) % hunkStarts.length;
+    setCurrentHunkIndex(idx);
+    scrollToDisplayIndex(hunkStarts[idx] ?? 0);
+  };
+
+  useEffect(() => {
+    setCurrentHunkIndex(0);
+    if (hunkStarts && hunkStarts.length > 0) {
+      // scroll to first hunk on file change
+      requestAnimationFrame(() => scrollToDisplayIndex(hunkStarts[0] ?? 0));
+    }
+  }, [selectedChangeId, hunkStarts]);
+
+  // Maintain an active issue selection (Cursor-like)
+  useEffect(() => {
+    if (orderedIssues.length === 0) {
+      if (activeIssueId !== null) setActiveIssueId(null);
+      return;
+    }
+    if (activeIssueId && orderedIssues.some((i) => i.id === activeIssueId)) return;
+    setActiveIssueId(orderedIssues[0]?.id ?? null);
+  }, [activeIssueId, orderedIssues]);
+
+  useEffect(() => {
+    if (!selectedChange) return;
+    if (issuesForSelectedFile.length === 0) return;
+
+    const current = activeIssueId ? orderedIssues.find((i) => i.id === activeIssueId) : null;
+    if (current?.filePath === selectedChange.filePath) return;
+    setActiveIssueId(issuesForSelectedFile[0]?.id ?? null);
+  }, [activeIssueId, issuesForSelectedFile, orderedIssues, selectedChange]);
+
+  // If issue navigation triggers a file switch, scroll once the file is active.
+  useEffect(() => {
+    const pending = pendingIssueScrollRef.current;
+    if (!pending) return;
+    if (!selectedChange) return;
+    if (pending.filePath !== selectedChange.filePath) return;
+
+    pendingIssueScrollRef.current = null;
+    requestAnimationFrame(() => scrollToNewLine(pending.line));
+  }, [selectedChange, scrollToNewLine]);
+
+  const goToIssueIndex = (idx: number) => {
+    if (orderedIssues.length === 0) return;
+    const clamped = (idx + orderedIssues.length) % orderedIssues.length;
+    const issue = orderedIssues[clamped];
+    if (!issue) return;
+
+    setActiveIssueId(issue.id);
+    const changeId = changeIdByFilePath.get(issue.filePath);
+    pendingIssueScrollRef.current = { filePath: issue.filePath, line: issue.startLine ?? null };
+
+    if (changeId && changeId !== selectedChangeId) {
+      onSelectChange(changeId);
+      return;
+    }
+    scrollToNewLine(issue.startLine ?? null);
+  };
+
+  const goToIssueByOffset = (delta: number) => {
+    if (orderedIssues.length === 0) return;
+    const cur = activeIssueIndex >= 0 ? activeIssueIndex : 0;
+    goToIssueIndex(cur + delta);
+  };
+
+  useEffect(() => {
+    if (!focusIssue) return;
+    const issue = orderedIssues.find((i) => i.id === focusIssue.id) ?? null;
+    if (!issue) return;
+
+    setActiveIssueId(issue.id);
+    const changeId = changeIdByFilePath.get(issue.filePath);
+    pendingIssueScrollRef.current = { filePath: issue.filePath, line: issue.startLine ?? null };
+
+    if (changeId && changeId !== selectedChangeId) {
+      onSelectChange(changeId);
+      return;
+    }
+
+    const lineNumber = issue.startLine ?? null;
+    if (lineNumber === null) return;
+    const displayIdx = newLineToDisplayIndex.get(lineNumber);
+    if (displayIdx === undefined) return;
+    requestAnimationFrame(() => scrollToDisplayIndex(displayIdx));
+  }, [changeIdByFilePath, focusIssue, newLineToDisplayIndex, onSelectChange, orderedIssues, selectedChangeId]);
+
+  useEffect(() => {
+    if (!selectedChange) return;
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName?.toLowerCase();
+      const isTyping = tag === "input" || tag === "textarea" || target?.isContentEditable;
+      if (isTyping) return;
+
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+        return;
+      }
+
+      const cmd = e.metaKey || e.ctrlKey;
+      if (cmd && e.key === "Enter") {
+        e.preventDefault();
+        void onAcceptFile(selectedChange.id);
+        goToNextPendingFile();
+        return;
+      }
+      if (cmd && (e.key === "Backspace" || e.key === "Delete")) {
+        e.preventDefault();
+        onRejectFile(selectedChange.id);
+        goToNextPendingFile();
+        return;
+      }
+
+      if (e.altKey && e.key === "ArrowUp") {
+        e.preventDefault();
+        goToHunk(currentHunkIndex - 1);
+        return;
+      }
+      if (e.altKey && e.key === "ArrowDown") {
+        e.preventDefault();
+        goToHunk(currentHunkIndex + 1);
+        return;
+      }
+
+      if (cmd && e.key === "[") {
+        e.preventDefault();
+        goToIssueByOffset(-1);
+        return;
+      }
+      if (cmd && e.key === "]") {
+        e.preventDefault();
+        goToIssueByOffset(1);
+        return;
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [currentHunkIndex, goToNextPendingFile, onAcceptFile, onClose, onRejectFile, selectedChange, selectedChangeId, activeIssueIndex, orderedIssues.length]);
+
+  if (!selectedChange) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col bg-white">
-      {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-200 bg-zinc-50">
-        <div className="flex items-center gap-4">
-          <h2 className="text-lg font-semibold text-zinc-900">Review Changes</h2>
-          <div className="flex items-center gap-3 text-sm text-zinc-500">
-            <span className="flex items-center gap-1.5">
-              <span className="w-3 h-3 rounded bg-green-500"></span>
-              +{stats.added} lines
-            </span>
-            <span className="flex items-center gap-1.5">
-              <span className="w-3 h-3 rounded bg-red-500"></span>
-              -{stats.removed} lines
-            </span>
+    <div className="absolute inset-0 z-40 bg-[#0f1115] text-zinc-200">
+      {/* Top bar */}
+      <div className="h-10 px-3 flex items-center justify-between border-b border-white/5 bg-black/20">
+        <div className="flex items-center gap-2 min-w-0">
+          <Icons.File className="w-4 h-4 text-zinc-400 flex-shrink-0" />
+          <div className="text-xs text-zinc-200 truncate font-medium">
+            {selectedChange.fileName}
           </div>
-          <span className="text-sm text-zinc-400">
-            {pendingCount} file{pendingCount !== 1 ? "s" : ""} pending
-          </span>
+          <div className="text-xs text-zinc-500 truncate">
+            {selectedChange.filePath}
+          </div>
+          <div className="hidden sm:flex items-center gap-2 text-[11px] text-zinc-500">
+            <span className="text-green-400">+{fileStats.added}</span>
+            <span className="text-red-400">-{fileStats.removed}</span>
+          </div>
         </div>
+
         <div className="flex items-center gap-2">
+          {orderedIssues.length > 0 && (
+            <div className="hidden md:flex items-center gap-1.5 text-xs text-zinc-300">
+              <span className="text-zinc-500">{orderedIssues.length} Issues Found</span>
+              <div className="flex items-center gap-1 px-2 py-1 rounded-md border border-white/10 bg-white/5">
+                <button
+                  type="button"
+                  onClick={() => goToIssueByOffset(-1)}
+                  className="p-0.5 rounded hover:bg-white/5"
+                  title="Previous issue (Cmd+[)"
+                >
+                  <Icons.ChevronLeft className="w-3.5 h-3.5" />
+                </button>
+                <span className="tabular-nums text-zinc-300">
+                  Issue {(activeIssueIndex >= 0 ? activeIssueIndex : 0) + 1}/{orderedIssues.length}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => goToIssueByOffset(1)}
+                  className="p-0.5 rounded hover:bg-white/5"
+                  title="Next issue (Cmd+])"
+                >
+                  <Icons.ChevronRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+          )}
+
           {onFindIssues && (
             <button
+              type="button"
               onClick={onFindIssues}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-purple-600 bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded-md transition-colors"
+              className="px-2.5 py-1.5 text-xs font-medium rounded-md border border-white/10 bg-white/5 hover:bg-white/10 text-zinc-200 transition-colors"
+              title="Find Issues"
             >
-              <Icons.Search className="w-4 h-4" />
-              {isFindingIssues ? "Finding..." : "Find Issues"}
+              <div className="flex items-center gap-1.5">
+                <Icons.Search className="w-3.5 h-3.5" />
+                {isFindingIssues ? "Finding…" : "Find Issues"}
+              </div>
             </button>
           )}
+
+          {onFixAllIssuesInChat && orderedIssues.length > 0 && (
+            <button
+              type="button"
+              onClick={onFixAllIssuesInChat}
+              className="px-2.5 py-1.5 text-xs font-medium rounded-md bg-[#4b8cff] hover:bg-[#3c7af0] text-white transition-colors"
+              title="Fix All"
+            >
+              Fix All
+            </button>
+          )}
+
           <button
-            onClick={() => setShowLineActions(!showLineActions)}
-            className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
-              showLineActions
-                ? "bg-blue-100 text-blue-700 border border-blue-200"
-                : "text-zinc-600 hover:bg-zinc-100 border border-zinc-200"
-            }`}
-          >
-            Line-by-line
-          </button>
-          <button
-            onClick={onRejectAll}
-            className="px-3 py-1.5 text-sm font-medium text-red-600 hover:bg-red-50 border border-red-200 rounded-md transition-colors"
-          >
-            Reject All
-          </button>
-          <button
-            onClick={onAcceptAll}
-            className="px-3 py-1.5 text-sm font-medium text-white bg-green-600 hover:bg-green-700 rounded-md transition-colors"
-          >
-            Accept All
-          </button>
-          <button
+            type="button"
             onClick={onClose}
-            className="p-1.5 text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 rounded transition-colors"
+            className="p-1.5 rounded hover:bg-white/5 text-zinc-400 hover:text-zinc-200 transition-colors"
+            title="Close (Esc)"
           >
-            <Icons.X className="w-5 h-5" />
+            <Icons.X className="w-4 h-4" />
           </button>
         </div>
       </div>
 
-      {/* Issues panel */}
-      {(isFindingIssues || issues) && (
-        <div className="border-b border-zinc-200 bg-white px-4 py-3">
-          <div className="flex items-center justify-between">
-            <div className="text-sm font-semibold text-zinc-900">Agent Review</div>
-            <div className="text-xs text-zinc-500">
-              {isFindingIssues ? "Analyzing diffs..." : "Done"}
-            </div>
-          </div>
-          <div className="mt-2 text-sm text-zinc-700 whitespace-pre-wrap leading-relaxed max-h-40 overflow-auto">
-            {isFindingIssues ? "Please wait..." : issues}
-          </div>
-        </div>
-      )}
+      {/* Diff */}
+      <div
+        ref={scrollRef}
+        className="absolute inset-x-0 top-10 bottom-0 overflow-auto font-mono text-[13px] leading-6 pb-24"
+      >
+        {lines.map((line) => {
+          const isActiveIssueLine = (() => {
+            if (!activeIssue) return false;
+            if (activeIssue.filePath !== selectedChange.filePath) return false;
+            if (line.newLineNumber === null) return false;
+            if (typeof activeIssue.startLine !== "number") return false;
+            const end = typeof activeIssue.endLine === "number" ? activeIssue.endLine : activeIssue.startLine;
+            return line.newLineNumber >= activeIssue.startLine && line.newLineNumber <= end;
+          })();
 
-      <div className="flex flex-1 overflow-hidden">
-        {/* File List Sidebar */}
-        <div className="w-64 border-r border-zinc-200 bg-zinc-50 overflow-y-auto">
-          <div className="p-2">
-            <div className="text-xs font-medium text-zinc-400 uppercase tracking-wider px-2 py-1.5">
-              Changed Files ({changes.length})
-            </div>
-            {changes.map((change) => (
-              <button
-                key={change.id}
-                onClick={() => setSelectedChangeId(change.id)}
-                className={`w-full flex items-center gap-2 px-2 py-1.5 rounded text-left text-sm transition-colors ${
-                  selectedChangeId === change.id
-                    ? "bg-blue-100 text-blue-800"
-                    : "hover:bg-zinc-100 text-zinc-700"
-                }`}
+          const bg =
+            line.type === "added"
+              ? line.status === "rejected"
+                ? "bg-green-900/10 opacity-60 line-through"
+                : "bg-green-900/25"
+              : line.type === "removed"
+              ? line.status === "accepted"
+                ? "bg-red-900/10 opacity-60 line-through"
+                : "bg-red-900/25"
+              : "";
+
+          const text =
+            line.type === "added"
+              ? "text-green-200"
+              : line.type === "removed"
+              ? "text-red-200"
+              : "text-zinc-300";
+
+          const sign = line.type === "added" ? "+" : line.type === "removed" ? "-" : " ";
+          const lineNumberText =
+            line.newLineNumber !== null
+              ? String(line.newLineNumber)
+              : line.oldLineNumber !== null
+              ? String(line.oldLineNumber)
+              : "";
+
+          return (
+            <div key={line.displayIndex}>
+              <div
+                data-review-line={line.displayIndex}
+                className={`group flex min-w-full ${bg} ${isActiveIssueLine ? "ring-1 ring-amber-500/15" : ""}`}
               >
-                <span
-                  className={`w-2 h-2 rounded-full flex-shrink-0 ${
-                    change.status === "accepted"
-                      ? "bg-green-500"
-                      : change.status === "rejected"
-                      ? "bg-red-500"
-                      : "bg-amber-400"
-                  }`}
-                />
-                <Icons.File className="w-4 h-4 flex-shrink-0 text-zinc-400" />
-                <span className="truncate flex-1">{change.fileName}</span>
-                <span
-                  className={`text-xs px-1.5 py-0.5 rounded ${
-                    change.action === "create"
-                      ? "bg-green-100 text-green-700"
-                      : change.action === "delete"
-                      ? "bg-red-100 text-red-700"
-                      : "bg-blue-100 text-blue-700"
-                  }`}
-                >
-                  {change.action === "create" ? "A" : change.action === "delete" ? "D" : "M"}
-                </span>
-              </button>
-            ))}
-          </div>
-        </div>
+                <div className="w-14 flex-shrink-0 select-none text-right pr-3 text-zinc-600 bg-black/10 border-r border-white/5">
+                  {lineNumberText}
+                </div>
 
-        {/* Diff View */}
-        <div className="flex-1 overflow-auto bg-zinc-50 font-mono text-sm">
-          {selectedChange && (
-            <>
-              <div className="sticky top-0 z-10 bg-zinc-100 border-b border-zinc-200 px-4 py-2 flex items-center justify-between">
-                <span className="text-zinc-600">{selectedChange.filePath}</span>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => onRejectFile(selectedChange.id)}
-                    disabled={selectedChange.status === "rejected"}
-                    className={`px-2 py-1 text-xs font-medium rounded transition-colors ${
-                      selectedChange.status === "rejected"
-                        ? "bg-red-200 text-red-800 cursor-not-allowed"
-                        : "text-red-600 hover:bg-red-100 border border-red-200"
-                    }`}
-                  >
-                    Reject File
-                  </button>
-                  <button
-                    onClick={() => onAcceptFile(selectedChange.id)}
-                    disabled={selectedChange.status === "accepted"}
-                    className={`px-2 py-1 text-xs font-medium rounded transition-colors ${
-                      selectedChange.status === "accepted"
-                        ? "bg-green-200 text-green-800 cursor-not-allowed"
-                        : "text-green-600 hover:bg-green-100 border border-green-200"
-                    }`}
-                  >
-                    Accept File
-                  </button>
+                {line.type !== "context" && (
+                  <div className="w-14 flex-shrink-0 flex items-center justify-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <button
+                      type="button"
+                      onClick={() => onAcceptLine(selectedChange.id, line.diffIndex)}
+                      className="p-1 text-green-300 hover:bg-green-500/10 rounded"
+                      title="Accept this line"
+                    >
+                      <Icons.Check className="w-3 h-3" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onRejectLine(selectedChange.id, line.diffIndex)}
+                      className="p-1 text-red-300 hover:bg-red-500/10 rounded"
+                      title="Reject this line"
+                    >
+                      <Icons.X className="w-3 h-3" />
+                    </button>
+                  </div>
+                )}
+                {line.type === "context" && <div className="w-14 flex-shrink-0" />}
+
+                <div className={`w-6 flex-shrink-0 text-center select-none ${text}`}>{sign}</div>
+                <div className={`px-2 whitespace-pre-wrap break-all flex-1 ${text}`}>
+                  {line.content || " "}
                 </div>
               </div>
-              <div>
-                {linesWithIndex.map((line, idx) => {
-                  const bgColor =
-                    line.type === "added"
-                      ? line.status === "rejected"
-                        ? "bg-red-50/50 line-through opacity-50"
-                        : "bg-green-50"
-                      : line.type === "removed"
-                      ? line.status === "accepted"
-                        ? "bg-green-50/50 line-through opacity-50"
-                        : "bg-red-50"
-                      : "";
 
-                  const textColor =
-                    line.type === "added"
-                      ? "text-green-800"
-                      : line.type === "removed"
-                      ? "text-red-800"
-                      : "text-zinc-600";
+              {(issueAnchors.get(line.displayIndex) || []).map((issue) => {
+                const sev =
+                  issue.severity === "high"
+                    ? "bg-red-500/15 text-red-200 border-red-500/20"
+                    : issue.severity === "medium"
+                    ? "bg-amber-500/15 text-amber-200 border-amber-500/20"
+                    : "bg-blue-500/15 text-blue-200 border-blue-500/20";
+                const feedback = issueFeedback[issue.id] ?? null;
 
-                  return (
-                    <div
-                      key={idx}
-                      className={`flex group ${bgColor} hover:brightness-95 min-w-full`}
-                    >
-                      {/* Line Number */}
-                      <div className="w-12 flex-shrink-0 select-none text-right pr-3 text-zinc-400 bg-zinc-100/50 border-r border-zinc-200">
-                        {idx + 1}
-                      </div>
-
-                      {/* Line Actions (when enabled) */}
-                      {showLineActions && line.type !== "context" && (
-                        <div className="w-16 flex-shrink-0 flex items-center justify-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                return (
+                  <div
+                    key={`${line.displayIndex}-issue-${issue.id}`}
+                    className="flex min-w-full"
+                  >
+                    <div className="w-14 flex-shrink-0 bg-black/10 border-r border-white/5" />
+                    <div className="w-14 flex-shrink-0" />
+                    <div className="w-6 flex-shrink-0" />
+                    <div className="flex-1 px-2 py-2">
+                      <div
+                        className={`rounded-lg border border-white/10 bg-[#141820] shadow-xl overflow-hidden ${activeIssueId === issue.id ? "ring-1 ring-white/10" : ""}`}
+                      >
+                        <div className="px-3 py-2 flex items-start justify-between gap-3">
                           <button
-                            onClick={() => onAcceptLine(selectedChange.id, line.index)}
-                            className="p-0.5 text-green-600 hover:bg-green-100 rounded"
-                            title="Accept this line"
+                            type="button"
+                            onClick={() => {
+                              setActiveIssueId(issue.id);
+                              scrollToNewLine(issue.startLine ?? null);
+                            }}
+                            className="min-w-0 text-left"
+                            title="Jump to issue"
                           >
-                            <Icons.Check className="w-3 h-3" />
-                          </button>
-                          <button
-                            onClick={() => onRejectLine(selectedChange.id, line.index)}
-                            className="p-0.5 text-red-600 hover:bg-red-100 rounded"
-                            title="Reject this line"
-                          >
-                            <Icons.X className="w-3 h-3" />
+                            <div className="flex items-center gap-2 min-w-0">
+                              <span className="w-6 h-6 rounded-md bg-white/5 border border-white/10 flex items-center justify-center flex-shrink-0">
+                                <Icons.Review className="w-3.5 h-3.5 text-zinc-300" />
+                              </span>
+                              <span className={`text-[10px] px-1.5 py-0.5 rounded border ${sev}`}>
+                                {issue.severity.toUpperCase()}
+                              </span>
+                              <span className="text-sm font-medium text-zinc-200 truncate">
+                                {issue.title}
+                              </span>
+                            </div>
+                            <div className="mt-1 text-xs text-zinc-400">
+                              {issue.filePath}
+                              {issue.startLine ? `:${issue.startLine}` : ""}
+                            </div>
                           </button>
                         </div>
-                      )}
-
-                      {/* Sign */}
-                      <div className={`w-6 flex-shrink-0 text-center select-none ${textColor}`}>
-                        {line.type === "added" ? "+" : line.type === "removed" ? "-" : " "}
-                      </div>
-
-                      {/* Content */}
-                      <div className={`px-2 py-0.5 whitespace-pre-wrap break-all flex-1 ${textColor}`}>
-                        {line.content || " "}
+                        <div className="px-3 pb-3 text-[12px] text-zinc-300 whitespace-pre-wrap leading-relaxed">
+                          {issue.description}
+                        </div>
+                        <div className="px-3 py-2 border-t border-white/10 bg-black/20 flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => onFixIssueInChat?.(issue.id)}
+                              className="px-2.5 py-1.5 text-xs font-medium rounded-md border border-white/10 bg-white/5 hover:bg-white/10 text-zinc-200 transition-colors"
+                            >
+                              Fix in Chat
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => onDismissIssue?.(issue.id)}
+                              className="px-2.5 py-1.5 text-xs font-medium rounded-md border border-white/10 bg-white/5 hover:bg-white/10 text-zinc-200 transition-colors"
+                            >
+                              Dismiss
+                            </button>
+                          </div>
+                          <div className="flex items-center gap-2 flex-shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setIssueFeedback((prev) => ({
+                                  ...prev,
+                                  [issue.id]: prev[issue.id] === "up" ? null : "up",
+                                }));
+                              }}
+                              className={`p-1.5 rounded border border-white/10 hover:bg-white/10 ${
+                                feedback === "up" ? "text-white bg-white/10" : "text-zinc-400"
+                              }`}
+                              title="Helpful"
+                            >
+                              <Icons.ThumbUp className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setIssueFeedback((prev) => ({
+                                  ...prev,
+                                  [issue.id]: prev[issue.id] === "down" ? null : "down",
+                                }));
+                              }}
+                              className={`p-1.5 rounded border border-white/10 hover:bg-white/10 ${
+                                feedback === "down" ? "text-white bg-white/10" : "text-zinc-400"
+                              }`}
+                              title="Not helpful"
+                            >
+                              <Icons.ThumbDown className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
                       </div>
                     </div>
-                  );
-                })}
-              </div>
-            </>
-          )}
-        </div>
+                  </div>
+                );
+              })}
+            </div>
+          );
+        })}
       </div>
 
-      {/* Floating Review Bar */}
-      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-2 px-4 py-2 bg-zinc-900 text-white rounded-full shadow-xl">
-        <button
-          onClick={goToPrevPending}
-          className="p-1 hover:bg-zinc-700 rounded-full transition-colors"
-          title="Previous file"
-        >
-          <Icons.ChevronLeft className="w-5 h-5" />
-        </button>
-        <span className="text-sm px-2">
-          {currentIndex} / {changes.length}
-        </span>
-        <button
-          onClick={goToNextPending}
-          className="p-1 hover:bg-zinc-700 rounded-full transition-colors"
-          title="Next file"
-        >
-          <Icons.ChevronRight className="w-5 h-5" />
-        </button>
-        <div className="w-px h-5 bg-zinc-700 mx-1" />
-        {selectedChange && (
-          <>
+      {/* Floating review bar */}
+      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 w-[min(720px,calc(100%-2rem))]">
+        <div className="flex items-center justify-between gap-3 px-3 py-2 rounded-xl border border-white/10 bg-[#171a21] shadow-2xl">
+          {/* Hunks */}
+          <div className="flex items-center gap-2 text-xs text-zinc-300">
             <button
-              onClick={() => onRejectFile(selectedChange.id)}
-              className="px-3 py-1 text-sm font-medium text-red-400 hover:bg-zinc-700 rounded-full transition-colors"
+              type="button"
+              onClick={() => goToHunk(currentHunkIndex - 1)}
+              className="p-1.5 rounded-md hover:bg-white/5 text-zinc-300"
+              title="Previous hunk (Alt+↑)"
             >
-              Reject
+              <Icons.ArrowUp className="w-4 h-4" />
             </button>
+            <span className="tabular-nums text-zinc-400">
+              {hunkStarts.length > 0 ? currentHunkIndex + 1 : 0}/{hunkStarts.length}
+            </span>
             <button
+              type="button"
+              onClick={() => goToHunk(currentHunkIndex + 1)}
+              className="p-1.5 rounded-md hover:bg-white/5 text-zinc-300"
+              title="Next hunk (Alt+↓)"
+            >
+              <Icons.ArrowDown className="w-4 h-4" />
+            </button>
+          </div>
+
+          {/* Actions */}
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
               onClick={() => {
-                onAcceptFile(selectedChange.id);
-                goToNextPending();
+                onRejectFile(selectedChange.id);
+                goToNextPendingFile();
               }}
-              className="px-3 py-1 text-sm font-medium bg-green-600 hover:bg-green-500 rounded-full transition-colors"
+              className="px-3 py-1.5 text-xs font-medium rounded-md border border-white/10 bg-white/5 hover:bg-white/10 text-zinc-200 transition-colors"
+              title="Reject file (Cmd+Backspace)"
             >
-              Accept
+              Reject file
             </button>
-          </>
-        )}
+            <button
+              type="button"
+              onClick={() => {
+                void onAcceptFile(selectedChange.id);
+                goToNextPendingFile();
+              }}
+              className="px-3 py-1.5 text-xs font-medium rounded-md bg-[#4b8cff] hover:bg-[#3c7af0] text-white transition-colors"
+              title="Accept file (Cmd+Enter)"
+            >
+              Accept file
+            </button>
+          </div>
+
+          {/* Files */}
+          <div className="flex items-center gap-2 text-xs text-zinc-300">
+            <button
+              type="button"
+              onClick={() => goToFile(currentFileIndex - 1)}
+              className="p-1.5 rounded-md hover:bg-white/5 text-zinc-300"
+              title="Previous file"
+            >
+              <Icons.ChevronLeft className="w-4 h-4" />
+            </button>
+            <span className="tabular-nums text-zinc-400">
+              {currentFileIndex + 1}/{changes.length} files
+            </span>
+            <button
+              type="button"
+              onClick={() => goToFile(currentFileIndex + 1)}
+              className="p-1.5 rounded-md hover:bg-white/5 text-zinc-300"
+              title="Next file"
+            >
+              <Icons.ChevronRight className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );
 }
-
-

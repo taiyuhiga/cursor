@@ -84,18 +84,24 @@ export default async function AppContent({ searchParamsPromise }: Props) {
       role: "owner",
     });
 
-    currentWorkspace = {
+    const createdWorkspace: Workspace = {
       ...newWorkspace!,
       role: "owner",
     };
-    workspaces.push(currentWorkspace);
+    currentWorkspace = createdWorkspace;
+    workspaces.push(createdWorkspace);
   }
+
+  if (!currentWorkspace) {
+    return <div>Error: no workspace available</div>;
+  }
+  const ensuredWorkspace: Workspace = currentWorkspace;
 
   // 現在のワークスペースのプロジェクトを取得 or 作成
   const { data: project } = await supabase
     .from("projects")
     .select("*")
-    .eq("workspace_id", currentWorkspace.id)
+    .eq("workspace_id", ensuredWorkspace.id)
     .maybeSingle();
 
   let projectId = project?.id;
@@ -105,7 +111,7 @@ export default async function AppContent({ searchParamsPromise }: Props) {
       .from("projects")
       .insert({
         name: "Default Project",
-        workspace_id: currentWorkspace.id,
+        workspace_id: ensuredWorkspace.id,
       })
       .select("*")
       .single();
@@ -136,7 +142,7 @@ export default async function AppContent({ searchParamsPromise }: Props) {
 
     await supabase.from("file_contents").insert({
       node_id: node!.id,
-      text: `# Welcome to ${currentWorkspace.name}! 👋\n\nこれはサンプルファイルです。\n\n好きに編集してください！`,
+      text: `# Welcome to ${ensuredWorkspace.name}! 👋\n\nこれはサンプルファイルです。\n\n好きに編集してください！`,
     });
   }
 
@@ -144,7 +150,7 @@ export default async function AppContent({ searchParamsPromise }: Props) {
     <AppLayout
       projectId={projectId!}
       workspaces={workspaces}
-      currentWorkspace={currentWorkspace}
+      currentWorkspace={ensuredWorkspace}
       userEmail={user.email || ""}
     />
   );
