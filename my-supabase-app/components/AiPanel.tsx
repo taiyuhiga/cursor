@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect, useMemo, forwardRef, useImperativeHandle, useCallback } from "react";
 import { Icons } from "./Icons";
+import { ChatMarkdown } from "./ChatMarkdown";
 import { ReviewChangesCard } from "./ReviewChangesCard";
 import { createClient } from "@/lib/supabase/client";
 import { formatDistanceToNow } from "date-fns";
@@ -2514,8 +2515,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
                )}
 
                <div className="text-[14px] leading-relaxed text-zinc-800">
-                   <div className="whitespace-pre-wrap">
-                    {msg.content}
+                  <ChatMarkdown content={msg.content} />
                     {codeBlock && !msg.isError && (
                       <div className="flex gap-2 mt-3 mb-1">
                         <button 
@@ -2545,7 +2545,6 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
                         <button onClick={() => onAppend(codeBlock)} className="text-xs font-medium bg-zinc-50 hover:bg-zinc-100 text-zinc-600 border border-zinc-200 rounded px-2 py-1 transition-colors">Append</button>
                       </div>
                     )}
-                  </div>
                </div>
                
                {/* Message Actions - 右下に配置 */}
