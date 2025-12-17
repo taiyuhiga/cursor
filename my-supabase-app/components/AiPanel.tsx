@@ -34,6 +34,7 @@ type Checkpoint = {
 type FileSnapshot = {
   nodeId: string;
   fileName: string;
+  parentId?: string | null;
   content: string;
   action: "created" | "updated" | "deleted";
 };
@@ -136,12 +137,24 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
   const [showRestoreDialog, setShowRestoreDialog] = useState(false);
   const [selectedCheckpoint, setSelectedCheckpoint] = useState<Checkpoint | null>(null);
   const [dontAskAgain, setDontAskAgain] = useState(false);
+
+  // Submit-from-previous / message edit (Cursor-like)
+  const [editingMessageIndex, setEditingMessageIndex] = useState<number | null>(null);
+  const [editingImageUrls, setEditingImageUrls] = useState<string[]>([]);
+  const [draftBeforeEdit, setDraftBeforeEdit] = useState<string>("");
+  const [showSubmitPrevDialog, setShowSubmitPrevDialog] = useState(false);
+  const [submitPrevDontAskAgain, setSubmitPrevDontAskAgain] = useState(false);
   
   // Copy feedback state
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   
   // Message action menu state
   const [openMessageMenu, setOpenMessageMenu] = useState<string | null>(null);
+  
+  // History search and edit state
+  const [historySearchQuery, setHistorySearchQuery] = useState("");
+  const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
+  const [editingTitle, setEditingTitle] = useState("");
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messageMenuRef = useRef<HTMLDivElement>(null);
@@ -275,13 +288,22 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
     return data.id;
   };
 
-  const saveMessage = async (sessionId: string, role: "user" | "assistant", content: string, images?: string[]) => {
-    await supabase.from("chat_messages").insert({
-      session_id: sessionId,
-      role,
-      content,
-      images: images || null,
-    });
+  const saveMessage = async (sessionId: string, role: "user" | "assistant", content: string, images?: string[]): Promise<string | null> => {
+    const { data, error } = await supabase
+      .from("chat_messages")
+      .insert({
+        session_id: sessionId,
+        role,
+        content,
+        images: images || null,
+      })
+      .select("id")
+      .single();
+    if (error) {
+      console.error("Failed to save chat message:", error);
+      return null;
+    }
+    return data?.id ?? null;
   };
 
   // 画像をSupabase Storageにアップロード
@@ -369,6 +391,46 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
+  // ESC handlers (Cursor-like)
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+
+      if (showRestoreDialog) {
+        setShowRestoreDialog(false);
+        setSelectedCheckpoint(null);
+        setRestoreToIndex(null);
+        return;
+      }
+
+      if (showSubmitPrevDialog) {
+        setShowSubmitPrevDialog(false);
+        setSubmitPrevDontAskAgain(false);
+        return;
+      }
+
+      if (editingMessageIndex !== null) {
+        setEditingMessageIndex(null);
+        setEditingImageUrls([]);
+        setAttachedImages([]);
+        setPrompt(draftBeforeEdit || "");
+        setDraftBeforeEdit("");
+        setShowSubmitPrevDialog(false);
+        setSubmitPrevDontAskAgain(false);
+        return;
+      }
+
+      setIsModelDropdownOpen(false);
+      setIsAgentDropdownOpen(false);
+      setShowFilesPopup(false);
+      setShowHistoryDropdown(false);
+      setOpenMessageMenu(null);
+    };
+
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [draftBeforeEdit, editingMessageIndex, showRestoreDialog, showSubmitPrevDialog]);
+
   const extractCodeBlock = (text: string): string | null => {
     const match = text.match(/```[\w]*\n([\s\S]*?)```/);
     return match ? match[1] : null;
@@ -401,6 +463,34 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
         abortControllerRef.current = null;
     }
     setLoading(false);
+  };
+
+  const startEditingMessage = (messageIndex: number) => {
+    const msg = messages[messageIndex];
+    if (!msg || msg.role !== "user") return;
+    if (loading) return;
+    setDraftBeforeEdit(prompt);
+    setEditingMessageIndex(messageIndex);
+    setEditingImageUrls(msg.images || []);
+    setAttachedImages([]);
+    setPrompt(msg.content || "");
+    setTimeout(() => {
+      textareaRef.current?.focus();
+      if (textareaRef.current) {
+        textareaRef.current.style.height = "auto";
+        textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 200) + "px";
+      }
+    }, 0);
+  };
+
+  const cancelEditingMessage = () => {
+    setEditingMessageIndex(null);
+    setEditingImageUrls([]);
+    setAttachedImages([]);
+    setPrompt(draftBeforeEdit || "");
+    setDraftBeforeEdit("");
+    setShowSubmitPrevDialog(false);
+    setSubmitPrevDontAskAgain(false);
   };
 
   const onSubmit = async (customPrompt?: string) => {
@@ -450,12 +540,26 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
       }
     }
 
-    // Save user message with image URLs
-    await saveMessage(activeSessionId, "user", promptToSend || "", uploadedImageUrls.length > 0 ? uploadedImageUrls : undefined);
+    // Save user message with image URLs and sync id back to UI
+    const savedUserMsgId = await saveMessage(
+      activeSessionId,
+      "user",
+      promptToSend || "",
+      uploadedImageUrls.length > 0 ? uploadedImageUrls : undefined
+    );
 
-    // OptimisticメッセージをStorageの公開URLで上書き（リロードなしで反映）
-    if (uploadedImageUrls.length > 0) {
-      setMessages(prev => prev.map(m => m.id === tempId ? { ...m, images: uploadedImageUrls } : m));
+    if (savedUserMsgId || uploadedImageUrls.length > 0) {
+      setMessages(prev =>
+        prev.map(m =>
+          m.id === tempId
+            ? {
+                ...m,
+                id: savedUserMsgId ?? m.id,
+                images: uploadedImageUrls.length > 0 ? uploadedImageUrls : m.images,
+              }
+            : m
+        )
+      );
     }
 
     // Build context
@@ -511,12 +615,19 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
               isError: true 
             }]);
           } else {
-            setMessages(prev => [...prev, { 
-              id: Date.now().toString() + result.model, 
-              role: "assistant", 
-              content: `**[${modelName}]**\n\n${result.content}` 
-            }]);
-            await saveMessage(activeSessionId, "assistant", `**[${modelName}]**\n\n${result.content}`);
+            const tempAssistantId = Date.now().toString() + result.model;
+            setMessages(prev => [
+              ...prev,
+              { 
+                id: tempAssistantId, 
+                role: "assistant", 
+                content: `**[${modelName}]**\n\n${result.content}` 
+              }
+            ]);
+            const savedAssistantId = await saveMessage(activeSessionId, "assistant", `**[${modelName}]**\n\n${result.content}`);
+            if (savedAssistantId) {
+              setMessages(prev => prev.map(m => m.id === tempAssistantId ? { ...m, id: savedAssistantId } : m));
+            }
           }
         }
       } else {
@@ -526,14 +637,19 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
           : null;
         const prefix = autoMode && usedModelName ? `*[Auto: ${usedModelName}]*\n\n` : "";
         const assistantMsg = prefix + data.content;
-        const assistantMsgId = Date.now().toString();
+        const tempAssistantMsgId = Date.now().toString();
+        const toolCalls = Array.isArray(data.toolCalls) ? data.toolCalls : undefined;
         setMessages(prev => [...prev, { 
-          id: assistantMsgId, 
+          id: tempAssistantMsgId, 
           role: "assistant", 
           content: assistantMsg,
-          toolCalls: Array.isArray(data.toolCalls) ? data.toolCalls : undefined,
+          toolCalls,
         }]);
-        await saveMessage(activeSessionId, "assistant", assistantMsg);
+        const savedAssistantMsgId = await saveMessage(activeSessionId, "assistant", assistantMsg);
+        const finalAssistantMsgId = savedAssistantMsgId ?? tempAssistantMsgId;
+        if (savedAssistantMsgId) {
+          setMessages(prev => prev.map(m => m.id === tempAssistantMsgId ? { ...m, id: savedAssistantMsgId } : m));
+        }
 
         // Review UI: 提案された変更がある場合はレビュー画面を開く（Cursor-like）
         if (onRequestReview && Array.isArray(data.proposedChanges) && data.proposedChanges.length > 0) {
@@ -555,22 +671,34 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
           onOpenPlan(data.content, promptToSend);
         }
 
-        // Check for side effects and create checkpoint
-        const lower = assistantMsg.toLowerCase();
-        const hasProposedChanges = Array.isArray(data.proposedChanges) && data.proposedChanges.length > 0;
-        if (!hasProposedChanges && (lower.includes("created") || lower.includes("updated") || lower.includes("deleted") || lower.includes("作成") || lower.includes("更新") || lower.includes("削除"))) {
+        // Checkpoint: toolCallsベースで作成（ファイル変更ツールが動いたとき）
+        const toolCallsForCheckpoint = Array.isArray(data.toolCalls) ? data.toolCalls : [];
+        const mutatingTools = new Set(["create_file", "update_file", "delete_file", "edit_file", "create_folder"]);
+        const changedFilesFromTools = toolCallsForCheckpoint
+          .filter((tc: any) => mutatingTools.has(tc.tool))
+          .map((tc: any) => tc?.result?.fileName || tc?.args?.path)
+          .filter((v: any) => typeof v === "string" && v.length > 0)
+          .map((p: string) => p.split("/").pop() || p);
+
+        if (changedFilesFromTools.length > 0) {
           onFileCreated?.();
-          
-          // ファイル名を抽出してチェックポイントを作成
-          const fileNameRegex = /`([^`]+\.[a-zA-Z]+)`/g;
-          const changedFiles: string[] = [];
-          let fileMatch;
-          while ((fileMatch = fileNameRegex.exec(assistantMsg)) !== null) {
-            changedFiles.push(fileMatch[1]);
-          }
-          
-          if (changedFiles.length > 0) {
-            await createCheckpoint(assistantMsgId, changedFiles);
+          const unique = Array.from(new Set(changedFilesFromTools)) as string[];
+          await createCheckpoint(finalAssistantMsgId, unique);
+        } else {
+          // 互換: toolCallsが無い場合のみ、テキストから推測（提案のみの変更は除外）
+          const lower = assistantMsg.toLowerCase();
+          const hasProposedChanges = Array.isArray(data.proposedChanges) && data.proposedChanges.length > 0;
+          if (!hasProposedChanges && (lower.includes("created") || lower.includes("updated") || lower.includes("deleted") || lower.includes("作成") || lower.includes("更新") || lower.includes("削除"))) {
+            onFileCreated?.();
+            const fileNameRegex = /`([^`]+\.[a-zA-Z]+)`/g;
+            const changedFiles: string[] = [];
+            let fileMatch;
+            while ((fileMatch = fileNameRegex.exec(assistantMsg)) !== null) {
+              changedFiles.push(fileMatch[1]);
+            }
+            if (changedFiles.length > 0) {
+              await createCheckpoint(finalAssistantMsgId, changedFiles);
+            }
           }
         }
       }
@@ -585,6 +713,229 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
         abortControllerRef.current = null;
         isSubmittingRef.current = false; // 送信完了
     }
+  };
+
+  const submitFromPreviousMessage = async (opts: { revert: boolean }) => {
+    if (editingMessageIndex === null) return;
+    if (!currentSessionId || currentSessionId.startsWith("new-")) {
+      // New Chat状態では通常送信にフォールバック
+      cancelEditingMessage();
+      await onSubmit();
+      return;
+    }
+
+    const target = messages[editingMessageIndex];
+    if (!target || target.role !== "user") return;
+
+    const promptToSend = prompt;
+    const hasAnyImages = attachedImages.length > 0 || editingImageUrls.length > 0;
+    if ((!promptToSend.trim() && !hasAnyImages) || loading) return;
+
+    // 送信中フラグをセット（loadMessagesによる上書きを防ぐ）
+    isSubmittingRef.current = true;
+    setLoading(true);
+
+    const activeSessionId = currentSessionId;
+
+    // Initialize AbortController
+    abortControllerRef.current = new AbortController();
+
+    try {
+      // 既存URL画像をbase64に（AIへ渡す用）
+      const existingBase64List: string[] = [];
+      for (const url of editingImageUrls) {
+        try {
+          existingBase64List.push(await urlToBase64(url));
+        } catch (e) {
+          console.error("Failed to load existing image for resend:", e);
+        }
+      }
+
+      // 新規添付画像をbase64に
+      const newBase64List: string[] = [];
+      for (const img of attachedImages) {
+        const base64 = await fileToBase64(img.file);
+        newBase64List.push(base64);
+      }
+
+      const imageBase64List = [...existingBase64List, ...newBase64List];
+
+      // 新規画像のみStorageへアップロード（DB保存用）
+      const uploadedImageUrls: string[] = [];
+      for (let i = 0; i < newBase64List.length; i++) {
+        const url = await uploadImageToStorage(newBase64List[i], activeSessionId, i);
+        if (url) uploadedImageUrls.push(url);
+      }
+
+      const finalUserImageUrls = [...editingImageUrls, ...uploadedImageUrls];
+
+      // ユーザーメッセージを更新
+      await supabase
+        .from("chat_messages")
+        .update({
+          content: promptToSend || "",
+          images: finalUserImageUrls.length > 0 ? finalUserImageUrls : null,
+        })
+        .eq("id", target.id);
+
+      // このメッセージ以降を削除
+      const keepCount = editingMessageIndex + 1;
+      const idsToDelete = messages.slice(keepCount).map(m => m.id);
+      await deleteMessagesByIds(idsToDelete);
+
+      // UIも同じようにトリムして、編集内容を反映
+      setMessages(prev => {
+        const kept = prev.slice(0, keepCount);
+        const updated = kept.map((m, i) => {
+          if (i !== editingMessageIndex) return m;
+          return {
+            ...m,
+            content: promptToSend || "",
+            images: finalUserImageUrls.length > 0 ? finalUserImageUrls : undefined,
+          };
+        });
+        return updated;
+      });
+
+      // Continue and revert: このメッセージより前の最新チェックポイントに戻す
+      if (opts.revert) {
+        const cp = findLatestCheckpointAtOrBeforeMessageIndex(Math.max(0, editingMessageIndex - 1));
+        if (cp) {
+          await applyCheckpointFiles(cp);
+        }
+      }
+
+      // 編集状態を解除して送信
+      setEditingMessageIndex(null);
+      setEditingImageUrls([]);
+      setAttachedImages([]);
+      setDraftBeforeEdit("");
+      setShowSubmitPrevDialog(false);
+      setSubmitPrevDontAskAgain(false);
+      setPrompt("");
+
+      // Build context
+      const fileContext = await buildContextFromMentions(promptToSend);
+      const fullPrompt = fileContext + promptToSend;
+      const apiKeys = JSON.parse(localStorage.getItem("cursor_api_keys") || "{}");
+
+      const res = await fetch("/api/ai", {
+        method: "POST",
+        body: JSON.stringify({
+          projectId,
+          prompt: fullPrompt,
+          fileText: currentFileText,
+          model: selectedModel,
+          mode,
+          apiKeys,
+          images: imageBase64List,
+          autoMode,
+          maxMode,
+          useMultipleModels,
+          selectedModels,
+        }),
+        headers: { "Content-Type": "application/json" },
+        signal: abortControllerRef.current.signal,
+      });
+
+      const contentType = res.headers.get("content-type");
+      if (!res.ok || !contentType?.includes("application/json")) {
+        const errorText = await res.text();
+        throw new Error(errorText || `Server error: ${res.status}`);
+      }
+
+      const data = await res.json();
+
+      if (data.error) {
+        setMessages(prev => [...prev, { id: Date.now().toString(), role: "assistant", content: `Error: ${data.error}`, isError: true }]);
+      } else if (data.multipleResults) {
+        for (const result of data.multipleResults) {
+          const modelName = availableModels.find(m => m.id === result.model)?.name || result.model;
+          if (result.error) {
+            setMessages(prev => [...prev, { 
+              id: Date.now().toString() + result.model, 
+              role: "assistant", 
+              content: `**[${modelName}]** Error: ${result.error}`,
+              isError: true 
+            }]);
+          } else {
+            const tempAssistantId = Date.now().toString() + result.model;
+            setMessages(prev => [
+              ...prev,
+              { 
+                id: tempAssistantId, 
+                role: "assistant", 
+                content: `**[${modelName}]**\n\n${result.content}` 
+              }
+            ]);
+            const savedAssistantId = await saveMessage(activeSessionId, "assistant", `**[${modelName}]**\n\n${result.content}`);
+            if (savedAssistantId) {
+              setMessages(prev => prev.map(m => m.id === tempAssistantId ? { ...m, id: savedAssistantId } : m));
+            }
+          }
+        }
+      } else {
+        const usedModelName = data.usedModel 
+          ? (availableModels.find(m => m.id === data.usedModel)?.name || data.usedModel)
+          : null;
+        const prefix = autoMode && usedModelName ? `*[Auto: ${usedModelName}]*\n\n` : "";
+        const assistantMsg = prefix + data.content;
+        const tempAssistantMsgId = Date.now().toString();
+        const toolCalls = Array.isArray(data.toolCalls) ? data.toolCalls : undefined;
+
+        setMessages(prev => [...prev, { id: tempAssistantMsgId, role: "assistant", content: assistantMsg, toolCalls }]);
+        const savedAssistantMsgId = await saveMessage(activeSessionId, "assistant", assistantMsg);
+        const finalAssistantMsgId = savedAssistantMsgId ?? tempAssistantMsgId;
+        if (savedAssistantMsgId) {
+          setMessages(prev => prev.map(m => m.id === tempAssistantMsgId ? { ...m, id: savedAssistantMsgId } : m));
+        }
+
+        // Planモード: 生成されたプランを仮想ファイルとして開く
+        if (mode === "plan" && onOpenPlan) {
+          onOpenPlan(data.content, promptToSend);
+        }
+
+        // toolCallsベースでチェックポイントを作成
+        const mutatingTools = new Set(["create_file", "update_file", "delete_file", "edit_file", "create_folder"]);
+        const changedFiles = (toolCalls || [])
+          .filter((tc: any) => mutatingTools.has(tc.tool))
+          .map((tc: any) => tc?.result?.fileName || tc?.args?.path)
+          .filter((v: any) => typeof v === "string" && v.length > 0)
+          .map((p: string) => p.split("/").pop() || p);
+
+        if (changedFiles.length > 0) {
+          onFileCreated?.();
+          const unique = Array.from(new Set(changedFiles)) as string[];
+          await createCheckpoint(finalAssistantMsgId, unique);
+        }
+      }
+    } catch (error: any) {
+      if (error.name === "AbortError") {
+        // Stopped by user
+      } else {
+        setMessages(prev => [...prev, { id: Date.now().toString(), role: "assistant", content: `Error: ${error}`, isError: true }]);
+      }
+    } finally {
+      setLoading(false);
+      abortControllerRef.current = null;
+      isSubmittingRef.current = false;
+    }
+  };
+
+  const submitCurrent = () => {
+    if (editingMessageIndex !== null) {
+      const hasEditContent = prompt.trim().length > 0 || attachedImages.length > 0 || editingImageUrls.length > 0;
+      if (!hasEditContent || loading) return;
+      const skipDialog = localStorage.getItem("submit_prev_dont_ask") === "true";
+      if (skipDialog) {
+        const def = localStorage.getItem("submit_prev_default_action");
+        void submitFromPreviousMessage({ revert: def === "revert" });
+      } else {
+        setShowSubmitPrevDialog(true);
+      }
+      return;
+    }
+    onSubmit();
   };
 
   // --- Input Handlers ---
@@ -674,7 +1025,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
     // Enter単独で送信（Shift+Enterで改行、IME変換中は除外）
     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
         e.preventDefault();
-        onSubmit();
+        submitCurrent();
         return;
     }
   };
@@ -926,26 +1277,38 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
     });
   };
 
+  const urlToBase64 = async (url: string): Promise<string> => {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`Failed to fetch image: ${res.status}`);
+    const blob = await res.blob();
+    return await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = () => reject(new Error("Failed to read image blob"));
+      reader.readAsDataURL(blob);
+    });
+  };
+
   // チェックポイントを作成
   const createCheckpoint = useCallback(async (messageId: string, changedFiles: string[]): Promise<Checkpoint | null> => {
     if (changedFiles.length === 0) return null;
     
     const fileSnapshots: FileSnapshot[] = [];
-    
-    for (const fileName of changedFiles) {
-      const node = nodes.find(n => n.name === fileName);
-      if (node) {
-        try {
-          const content = await onGetFileContent(node.id);
-          fileSnapshots.push({
-            nodeId: node.id,
-            fileName: node.name,
-            content,
-            action: "updated", // 簡易実装: すべてupdatedとして扱う
-          });
-        } catch (e) {
-          console.error(`Failed to snapshot file ${fileName}:`, e);
-        }
+
+    // Cursor-like: 復元精度を上げるため、チェックポイント時点の全ファイルをスナップショット
+    const fileNodesToSnapshot = nodes.filter(n => n.type === "file");
+    for (const node of fileNodesToSnapshot) {
+      try {
+        const content = await onGetFileContent(node.id);
+        fileSnapshots.push({
+          nodeId: node.id,
+          fileName: node.name,
+          parentId: node.parent_id,
+          content,
+          action: "updated",
+        });
+      } catch (e) {
+        console.error(`Failed to snapshot file ${node.name}:`, e);
       }
     }
     
@@ -956,32 +1319,149 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
       messageId,
       timestamp: new Date().toISOString(),
       fileSnapshots,
-      description: `${fileSnapshots.length} file(s) changed`,
+      description: `${changedFiles.length} file(s) changed`,
     };
     
     setCheckpoints(prev => [...prev, checkpoint]);
     return checkpoint;
   }, [nodes, onGetFileContent]);
+
+  const applyCheckpointFiles = useCallback(async (checkpoint: Checkpoint) => {
+    if (!checkpoint.fileSnapshots || checkpoint.fileSnapshots.length === 0) return;
+
+    // チェックポイントに存在しない「後から作られたファイル」を削除（Cursorっぽい復元）
+    try {
+      const keepIds = new Set(checkpoint.fileSnapshots.map(s => s.nodeId));
+      const { data: currentFiles, error } = await supabase
+        .from("nodes")
+        .select("id")
+        .eq("project_id", projectId)
+        .eq("type", "file");
+      if (!error && currentFiles && currentFiles.length > 0) {
+        const toDelete = currentFiles.map(f => f.id).filter(id => !keepIds.has(id));
+        if (toDelete.length > 0) {
+          await supabase.from("nodes").delete().in("id", toDelete);
+        }
+      }
+    } catch (e) {
+      console.error("Failed to delete files not in checkpoint:", e);
+    }
+
+    // 既存のノードを取得（削除されたファイルの再作成用）
+    let existingIds = new Set<string>();
+    try {
+      const { data: existingNodes, error: existingError } = await supabase
+        .from("nodes")
+        .select("id")
+        .in("id", checkpoint.fileSnapshots.map(s => s.nodeId));
+      if (!existingError && existingNodes) {
+        existingIds = new Set(existingNodes.map(n => n.id));
+      }
+    } catch (e) {
+      console.error("Failed to fetch existing nodes for checkpoint restore:", e);
+    }
+
+    for (const snap of checkpoint.fileSnapshots) {
+      try {
+        if (snap.action === "deleted") {
+          // 簡易実装: deleteの復元は未対応
+          continue;
+        }
+
+        // ノードが消えている場合は再作成してから内容を戻す
+        if (!existingIds.has(snap.nodeId)) {
+          const baseInsert = {
+            id: snap.nodeId,
+            project_id: projectId,
+            parent_id: snap.parentId ?? null,
+            type: "file" as const,
+            name: snap.fileName,
+          };
+          let { error: insertError } = await supabase.from("nodes").insert(baseInsert);
+          if (insertError && snap.parentId) {
+            // 親フォルダが無い場合はルートにフォールバック
+            ({ error: insertError } = await supabase.from("nodes").insert({ ...baseInsert, parent_id: null }));
+          }
+          if (insertError) {
+            console.error("Failed to recreate node for checkpoint restore:", insertError);
+          } else {
+            existingIds.add(snap.nodeId);
+          }
+        } else {
+          // 既存ノードのメタ情報もチェックポイントに合わせる（リネーム/移動の簡易対応）
+          await supabase.from("nodes").update({
+            name: snap.fileName,
+            parent_id: snap.parentId ?? null,
+          }).eq("id", snap.nodeId);
+        }
+
+        await supabase
+          .from("file_contents")
+          .upsert({ node_id: snap.nodeId, text: snap.content }, { onConflict: "node_id" });
+      } catch (e) {
+        console.error("Failed to apply checkpoint file snapshot:", e);
+      }
+    }
+    onFileCreated?.();
+  }, [onFileCreated, projectId, supabase]);
+
+  const deleteMessagesByIds = useCallback(async (ids: string[]) => {
+    if (!ids || ids.length === 0) return;
+    if (!currentSessionId || currentSessionId.startsWith("new-")) return;
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const validIds = ids.filter(id => uuidRegex.test(id));
+    if (validIds.length === 0) return;
+    const { error } = await supabase
+      .from("chat_messages")
+      .delete()
+      .in("id", validIds);
+    if (error) {
+      console.error("Failed to delete chat messages:", error);
+    }
+  }, [currentSessionId, supabase]);
+
+  const findLatestCheckpointAtOrBeforeMessageIndex = useCallback((messageIndex: number): Checkpoint | null => {
+    let best: { cp: Checkpoint; idx: number } | null = null;
+    for (const cp of checkpoints) {
+      const idx = messages.findIndex(m => m.id === cp.messageId);
+      if (idx === -1) continue;
+      if (idx > messageIndex) continue;
+      if (!best || idx > best.idx) best = { cp, idx };
+    }
+    return best?.cp || null;
+  }, [checkpoints, messages]);
   
   // チェックポイントを復元
   const restoreCheckpoint = useCallback(async (checkpoint: Checkpoint) => {
+    // ファイルを復元（簡易: file_contents のみ）
+    await applyCheckpointFiles(checkpoint);
+
     // メッセージをチェックポイント時点まで戻す
     const checkpointMsgIndex = messages.findIndex(m => m.id === checkpoint.messageId);
     if (checkpointMsgIndex >= 0) {
+      const keepCount = checkpointMsgIndex + 1;
+      const idsToDelete = messages.slice(keepCount).map(m => m.id);
+      await deleteMessagesByIds(idsToDelete);
+
       // チェックポイント以降のメッセージを削除
-      setMessages(prev => prev.slice(0, checkpointMsgIndex));
+      setMessages(prev => prev.slice(0, keepCount));
       
       // チェックポイント以降のチェックポイントも削除
       setCheckpoints(prev => {
         const cpIndex = prev.findIndex(cp => cp.id === checkpoint.id);
-        return cpIndex >= 0 ? prev.slice(0, cpIndex) : prev;
+        return cpIndex >= 0 ? prev.slice(0, cpIndex + 1) : prev;
       });
     }
     
     // ダイアログを閉じる
     setShowRestoreDialog(false);
     setSelectedCheckpoint(null);
-  }, [messages]);
+    // 編集状態も解除
+    setEditingMessageIndex(null);
+    setEditingImageUrls([]);
+    setAttachedImages([]);
+    setPrompt("");
+  }, [applyCheckpointFiles, deleteMessagesByIds, messages]);
   
   // 復元の確認
   const handleRestoreClick = (checkpoint: Checkpoint) => {
@@ -1015,23 +1495,41 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
     const nextIndex = messageIndex + 1;
     const hasAssistantResponse = messages[nextIndex]?.role === "assistant";
     const cutIndex = hasAssistantResponse ? nextIndex + 1 : nextIndex;
-    
+    const idsToDelete = messages.slice(cutIndex).map(m => m.id);
+
+    // その時点までの最新チェックポイントがあればファイルも戻す
+    const cp = findLatestCheckpointAtOrBeforeMessageIndex(Math.max(0, cutIndex - 1));
+    if (cp) {
+      await applyCheckpointFiles(cp);
+    }
+
+    await deleteMessagesByIds(idsToDelete);
     setMessages(prev => prev.slice(0, cutIndex));
+
+    // その時点以降のチェックポイントも削除
+    const keptMessageIds = new Set(messages.slice(0, cutIndex).map(m => m.id));
+    setCheckpoints(prev => prev.filter(cpItem => keptMessageIds.has(cpItem.messageId)));
     
     // ダイアログを閉じる
     setShowRestoreDialog(false);
     setRestoreToIndex(null);
+
+    // 編集状態も解除
+    setEditingMessageIndex(null);
+    setEditingImageUrls([]);
+    setAttachedImages([]);
+    setPrompt("");
   };
   
   // 復元を確定
-  const confirmRestore = () => {
+  const confirmRestore = async () => {
     if (dontAskAgain) {
       localStorage.setItem("checkpoint_dont_ask", "true");
     }
     if (selectedCheckpoint) {
-      restoreCheckpoint(selectedCheckpoint);
+      await restoreCheckpoint(selectedCheckpoint);
     } else if (restoreToIndex !== null) {
-      performRestoreToMessage(restoreToIndex);
+      await performRestoreToMessage(restoreToIndex);
     }
   };
 
@@ -1077,6 +1575,91 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
       setCurrentSessionId(session.id);
       setShowHistoryDropdown(false);
   };
+
+  // セッションを削除
+  const deleteSession = async (e: React.MouseEvent, sessionId: string) => {
+    e.stopPropagation();
+    
+    // メッセージを先に削除
+    await supabase.from("chat_messages").delete().eq("session_id", sessionId);
+    // セッションを削除
+    await supabase.from("chat_sessions").delete().eq("id", sessionId);
+    
+    // ローカル状態を更新
+    setSessions(prev => prev.filter(s => s.id !== sessionId));
+    setOpenTabs(prev => prev.filter(t => t.id !== sessionId));
+    
+    // 現在のセッションが削除された場合
+    if (currentSessionId === sessionId) {
+      handleNewChat();
+    }
+  };
+
+  // セッション名を変更開始
+  const startEditSession = (e: React.MouseEvent, session: ChatSession) => {
+    e.stopPropagation();
+    setEditingSessionId(session.id);
+    setEditingTitle(session.title);
+  };
+
+  // セッション名を保存
+  const saveSessionTitle = async (sessionId: string) => {
+    if (!editingTitle.trim()) {
+      setEditingSessionId(null);
+      return;
+    }
+    
+    await supabase
+      .from("chat_sessions")
+      .update({ title: editingTitle.trim() })
+      .eq("id", sessionId);
+    
+    // ローカル状態を更新
+    setSessions(prev => prev.map(s => 
+      s.id === sessionId ? { ...s, title: editingTitle.trim() } : s
+    ));
+    setOpenTabs(prev => prev.map(t => 
+      t.id === sessionId ? { ...t, title: editingTitle.trim() } : t
+    ));
+    
+    setEditingSessionId(null);
+  };
+
+  // 日付でセッションをグループ化
+  const groupSessionsByDate = (sessions: ChatSession[]) => {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+    
+    const groups: { label: string; sessions: ChatSession[] }[] = [
+      { label: "Today", sessions: [] },
+      { label: "Yesterday", sessions: [] },
+      { label: "Previous", sessions: [] },
+    ];
+    
+    sessions.forEach(s => {
+      const date = new Date(s.created_at);
+      date.setHours(0, 0, 0, 0);
+      
+      if (date.getTime() >= today.getTime()) {
+        groups[0].sessions.push(s);
+      } else if (date.getTime() >= yesterday.getTime()) {
+        groups[1].sessions.push(s);
+      } else {
+        groups[2].sessions.push(s);
+      }
+    });
+    
+    return groups.filter(g => g.sessions.length > 0);
+  };
+
+  // フィルタリングされたセッション
+  const filteredSessions = historySearchQuery
+    ? sessions.filter(s => s.title.toLowerCase().includes(historySearchQuery.toLowerCase()))
+    : sessions;
+  
+  const groupedSessions = groupSessionsByDate(filteredSessions);
 
   const closeTab = (e: React.MouseEvent, sessionId: string) => {
       e.stopPropagation();
@@ -1200,29 +1783,104 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
                 </button>
                 {/* History Dropdown */}
                 {showHistoryDropdown && (
-                    <div className="absolute top-full right-0 mt-1 w-64 bg-white border border-zinc-200 rounded-lg shadow-lg z-50 max-h-80 overflow-y-auto">
-                        <div className="p-2">
-                            <h3 className="px-2 py-1 text-[10px] font-semibold text-zinc-400 uppercase">Recent Chats</h3>
-                            {sessions.map(s => (
-                                <button
+                    <div className="absolute top-full right-0 mt-1 w-80 bg-white border border-zinc-200 rounded-lg shadow-lg z-50 max-h-[500px] overflow-hidden flex flex-col">
+                        {/* Search Box */}
+                        <div className="p-2 border-b border-zinc-100">
+                          <input
+                            type="text"
+                            placeholder="Search..."
+                            value={historySearchQuery}
+                            onChange={(e) => setHistorySearchQuery(e.target.value)}
+                            className="w-full px-3 py-1.5 text-xs bg-zinc-50 border border-zinc-200 rounded-md focus:outline-none focus:border-zinc-300 placeholder:text-zinc-400"
+                            onClick={(e) => e.stopPropagation()}
+                          />
+                        </div>
+                        
+                        {/* Sessions List */}
+                        <div className="flex-1 overflow-y-auto">
+                          {groupedSessions.map(group => (
+                            <div key={group.label}>
+                              <div className="px-3 py-1.5 text-[10px] font-semibold text-zinc-400 uppercase bg-zinc-50 sticky top-0">
+                                {group.label}
+                              </div>
+                              {group.sessions.map(s => {
+                                const isCurrent = s.id === currentSessionId;
+                                const isEditing = editingSessionId === s.id;
+                                
+                                return (
+                                  <div
                                     key={s.id}
-                                    onClick={() => openSession(s)}
-                                    className="w-full text-left px-2 py-2 text-xs text-zinc-700 hover:bg-zinc-50 rounded flex flex-col"
-                                >
-                                    <span className="font-medium truncate w-full">{s.title}</span>
-                                    <span className="text-[10px] text-zinc-400">{formatDistanceToNow(new Date(s.created_at), { addSuffix: true })}</span>
-                                </button>
-                            ))}
+                                    onClick={() => !isEditing && openSession(s)}
+                                    className={`group flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-zinc-50 ${isCurrent ? "bg-zinc-50" : ""}`}
+                                  >
+                                    <div className="flex items-center gap-2 min-w-0 flex-1">
+                                      <Icons.Chat className="w-4 h-4 text-zinc-400 flex-shrink-0" />
+                                      {isEditing ? (
+                                        <input
+                                          type="text"
+                                          value={editingTitle}
+                                          onChange={(e) => setEditingTitle(e.target.value)}
+                                          onBlur={() => saveSessionTitle(s.id)}
+                                          onKeyDown={(e) => {
+                                            if (e.key === "Enter") saveSessionTitle(s.id);
+                                            if (e.key === "Escape") setEditingSessionId(null);
+                                          }}
+                                          onClick={(e) => e.stopPropagation()}
+                                          className="flex-1 px-1 py-0.5 text-xs bg-white border border-zinc-300 rounded focus:outline-none focus:border-blue-500"
+                                          autoFocus
+                                        />
+                                      ) : (
+                                        <span className="text-xs text-zinc-700 truncate">{s.title}</span>
+                                      )}
+                                    </div>
+                                    
+                                    <div className="flex items-center gap-1 flex-shrink-0">
+                                      {isCurrent && !isEditing && (
+                                        <span className="text-[10px] text-zinc-400 mr-1">Current</span>
+                                      )}
+                                      {!isEditing && (
+                                        <>
+                                          <button
+                                            onClick={(e) => startEditSession(e, s)}
+                                            className="p-1 hover:bg-zinc-200 rounded text-zinc-400 hover:text-zinc-600 opacity-0 group-hover:opacity-100 transition-opacity"
+                                            title="Rename"
+                                          >
+                                            <Icons.Pencil className="w-3 h-3" />
+                                          </button>
+                                          <button
+                                            onClick={(e) => deleteSession(e, s.id)}
+                                            className="p-1 hover:bg-zinc-200 rounded text-zinc-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
+                                            title="Delete"
+                                          >
+                                            <Icons.Trash className="w-3 h-3" />
+                                          </button>
+                                        </>
+                                      )}
+                                      {isEditing && (
+                                        <button
+                                          onClick={(e) => { e.stopPropagation(); saveSessionTitle(s.id); }}
+                                          className="p-1 hover:bg-zinc-200 rounded text-green-500"
+                                          title="Save"
+                                        >
+                                          <Icons.Check className="w-3 h-3" />
+                                        </button>
+                                      )}
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ))}
+                          {filteredSessions.length === 0 && (
+                            <div className="px-3 py-4 text-xs text-zinc-400 text-center">
+                              No chats found
+                            </div>
+                          )}
                         </div>
                     </div>
                 )}
             </div>
-            <button 
-                className="p-1.5 hover:bg-zinc-100 rounded text-zinc-500"
-                title="More options"
-            >
-                <Icons.MoreHorizontal className="w-4 h-4" />
-            </button>
+            {/* Removed: More options (three dots) */}
         </div>
       </div>
 
@@ -1256,14 +1914,45 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
                 </div>
               )}
 
+              {/* Editing Banner (Cursor-like) */}
+              {editingMessageIndex !== null && (
+                <div className="flex items-center justify-between px-4 pt-3 pb-1 text-[11px] text-zinc-500">
+                  <div className="flex items-center gap-2">
+                    <Icons.Restore className="w-3.5 h-3.5 text-zinc-400" />
+                    <span>Editing a previous message</span>
+                  </div>
+                  <button
+                    onClick={cancelEditingMessage}
+                    className="text-zinc-400 hover:text-zinc-700 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
+
               {/* Attached Images Preview - テキストエリアの上部 */}
-              {attachedImages.length > 0 && (
+              {(attachedImages.length > 0 || (editingMessageIndex !== null && editingImageUrls.length > 0)) && (
                 <div className="flex gap-2 px-3 pt-3 pb-1 overflow-x-auto no-scrollbar">
+                  {editingMessageIndex !== null && editingImageUrls.map((url, index) => (
+                    <div key={`edit-url-${index}`} className="relative flex-shrink-0">
+                      <img 
+                        src={url} 
+                        alt={`Attached ${index + 1}`}
+                        className="h-14 w-14 object-cover rounded-lg border border-zinc-200"
+                      />
+                      <button
+                        onClick={() => setEditingImageUrls(prev => prev.filter((_, i) => i !== index))}
+                        className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-zinc-700 hover:bg-zinc-600 text-white rounded-full flex items-center justify-center text-[10px]"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
                   {attachedImages.map((img, index) => (
-                    <div key={index} className="relative flex-shrink-0">
+                    <div key={`new-${index}`} className="relative flex-shrink-0">
                       <img 
                         src={img.preview} 
-                        alt={`Attached ${index + 1}`} 
+                        alt={`New ${index + 1}`} 
                         className="h-14 w-14 object-cover rounded-lg border border-zinc-200"
                       />
                       <button
@@ -1479,9 +2168,9 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
                     className="hidden"
                   />
                   <button
-                    onClick={() => onSubmit()}
-                    disabled={loading || (!prompt.trim() && attachedImages.length === 0)}
-                    className={`p-1.5 rounded-full transition-all flex-shrink-0 flex items-center justify-center ${getSubmitButtonStyles(mode, prompt.trim().length > 0 || attachedImages.length > 0)}`}
+                    onClick={() => submitCurrent()}
+                    disabled={loading || (!prompt.trim() && attachedImages.length === 0 && (editingMessageIndex === null || editingImageUrls.length === 0))}
+                    className={`p-1.5 rounded-full transition-all flex-shrink-0 flex items-center justify-center ${getSubmitButtonStyles(mode, prompt.trim().length > 0 || attachedImages.length > 0 || (editingMessageIndex !== null && editingImageUrls.length > 0))}`}
                   >
                     <Icons.ArrowUp className="w-3.5 h-3.5" />
                   </button>
@@ -1564,7 +2253,19 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
                          </div>
                        )}
                        {msg.content && (
-                         <div className="text-[14px] font-normal text-zinc-900 leading-relaxed whitespace-pre-wrap">
+                         <div
+                           role="button"
+                           tabIndex={0}
+                           onClick={() => startEditingMessage(idx)}
+                           onKeyDown={(e) => {
+                             if (e.key === "Enter" || e.key === " ") {
+                               e.preventDefault();
+                               startEditingMessage(idx);
+                             }
+                           }}
+                           className="text-[14px] font-normal text-zinc-900 leading-relaxed whitespace-pre-wrap cursor-pointer hover:bg-zinc-50 rounded-md px-1 -mx-1 transition-colors outline-none focus:ring-2 focus:ring-green-200"
+                           title="Click to edit"
+                         >
                            {msg.content}
                          </div>
                        )}
@@ -1751,14 +2452,45 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
             </div>
           )}
 
+          {/* Editing Banner (Cursor-like) */}
+          {editingMessageIndex !== null && (
+            <div className="flex items-center justify-between px-4 pt-3 pb-1 text-[11px] text-zinc-500">
+              <div className="flex items-center gap-2">
+                <Icons.Restore className="w-3.5 h-3.5 text-zinc-400" />
+                <span>Editing a previous message</span>
+              </div>
+              <button
+                onClick={cancelEditingMessage}
+                className="text-zinc-400 hover:text-zinc-700 transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          )}
+
           {/* Attached Images Preview - テキストエリアの上部 */}
-          {attachedImages.length > 0 && (
+          {(attachedImages.length > 0 || (editingMessageIndex !== null && editingImageUrls.length > 0)) && (
             <div className="flex gap-2 px-3 pt-3 pb-1 overflow-x-auto no-scrollbar">
+              {editingMessageIndex !== null && editingImageUrls.map((url, index) => (
+                <div key={`edit-url-${index}`} className="relative flex-shrink-0">
+                  <img 
+                    src={url} 
+                    alt={`Attached ${index + 1}`}
+                    className="h-14 w-14 object-cover rounded-lg border border-zinc-200"
+                  />
+                  <button
+                    onClick={() => setEditingImageUrls(prev => prev.filter((_, i) => i !== index))}
+                    className="absolute -top-1.5 -right-1.5 w-4 h-4 bg-zinc-700 hover:bg-zinc-600 text-white rounded-full flex items-center justify-center text-[10px]"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
               {attachedImages.map((img, index) => (
-                <div key={index} className="relative flex-shrink-0">
+                <div key={`new-${index}`} className="relative flex-shrink-0">
                   <img 
                     src={img.preview} 
-                    alt={`Attached ${index + 1}`} 
+                    alt={`New ${index + 1}`} 
                     className="h-14 w-14 object-cover rounded-lg border border-zinc-200"
                   />
                   <button
@@ -1774,7 +2506,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
 
           <textarea
             ref={textareaRef}
-            className={`w-full max-h-60 bg-transparent px-4 py-3 text-sm text-zinc-800 resize-none focus:outline-none placeholder:text-zinc-400 min-h-[44px] ${attachedImages.length > 0 ? "" : "rounded-t-xl"}`}
+            className={`w-full max-h-60 bg-transparent px-4 py-3 text-sm text-zinc-800 resize-none focus:outline-none placeholder:text-zinc-400 min-h-[44px] ${(attachedImages.length > 0 || (editingMessageIndex !== null && editingImageUrls.length > 0)) ? "" : "rounded-t-xl"}`}
             value={prompt}
             onChange={handlePromptChange}
             onKeyDown={handleKeyDown}
@@ -1982,9 +2714,9 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
                     </button>
                 ) : (
                     <button
-                      onClick={() => onSubmit()}
-                      disabled={loading || (!prompt.trim() && attachedImages.length === 0)}
-                      className={`p-1.5 rounded-full transition-all flex-shrink-0 flex items-center justify-center ${getSubmitButtonStyles(mode, prompt.trim().length > 0 || attachedImages.length > 0)}`}
+                      onClick={() => submitCurrent()}
+                      disabled={loading || (!prompt.trim() && attachedImages.length === 0 && (editingMessageIndex === null || editingImageUrls.length === 0))}
+                      className={`p-1.5 rounded-full transition-all flex-shrink-0 flex items-center justify-center ${getSubmitButtonStyles(mode, prompt.trim().length > 0 || attachedImages.length > 0 || (editingMessageIndex !== null && editingImageUrls.length > 0))}`}
                     >
                       <Icons.ArrowUp className="w-3.5 h-3.5" />
                     </button>
@@ -2045,6 +2777,76 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({ projectId, currentFil
                 className="px-3 py-1.5 text-xs bg-zinc-700 hover:bg-zinc-600 text-white rounded transition-colors flex items-center gap-1.5"
               >
                 Continue
+                <Icons.Restore className="w-3 h-3" />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Submit from Previous Message Dialog (Cursor-like) */}
+      {showSubmitPrevDialog && editingMessageIndex !== null && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-[#1e2028] rounded-lg shadow-2xl w-[520px] overflow-hidden">
+            <div className="p-5">
+              <h3 className="text-white font-medium text-sm">
+                Submit from a previous message?
+              </h3>
+              <p className="text-zinc-400 text-xs mt-2 leading-relaxed">
+                Submitting from a previous message will revert file changes to before this message and clear the messages after this one.
+              </p>
+
+              <div className="mt-4 flex items-center gap-2">
+                <input 
+                  type="checkbox" 
+                  id="submitPrevDontAskAgain"
+                  checked={submitPrevDontAskAgain}
+                  onChange={(e) => setSubmitPrevDontAskAgain(e.target.checked)}
+                  className="w-3.5 h-3.5 rounded border-zinc-600 bg-zinc-700 text-blue-500 focus:ring-0 focus:ring-offset-0"
+                />
+                <label htmlFor="submitPrevDontAskAgain" className="text-zinc-400 text-xs">
+                  Don't ask again
+                </label>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 px-5 py-3 bg-[#16181d] border-t border-zinc-800">
+              <button
+                onClick={() => {
+                  setShowSubmitPrevDialog(false);
+                  setSubmitPrevDontAskAgain(false);
+                }}
+                className="px-3 py-1.5 text-xs text-zinc-400 hover:text-zinc-200 transition-colors"
+              >
+                Cancel (esc)
+              </button>
+
+              <button
+                onClick={() => {
+                  if (submitPrevDontAskAgain) {
+                    localStorage.setItem("submit_prev_dont_ask", "true");
+                    localStorage.setItem("submit_prev_default_action", "no_revert");
+                  }
+                  setShowSubmitPrevDialog(false);
+                  void submitFromPreviousMessage({ revert: false });
+                }}
+                className="px-3 py-1.5 text-xs bg-zinc-700 hover:bg-zinc-600 text-white rounded transition-colors"
+              >
+                Continue without reverting
+              </button>
+
+              <button
+                onClick={() => {
+                  if (submitPrevDontAskAgain) {
+                    localStorage.setItem("submit_prev_dont_ask", "true");
+                    localStorage.setItem("submit_prev_default_action", "revert");
+                  }
+                  setShowSubmitPrevDialog(false);
+                  void submitFromPreviousMessage({ revert: true });
+                }}
+                className="px-3 py-1.5 text-xs bg-purple-600 hover:bg-purple-500 text-white rounded transition-colors flex items-center gap-1.5"
+              >
+                Continue and revert
                 <Icons.Restore className="w-3 h-3" />
               </button>
             </div>
