@@ -555,15 +555,36 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
     }
 
     const promptToSend = customPrompt || prompt;
+    const imagesToSend = [...attachedImages];
     // テキストまたは画像がある場合に送信可能
-    if ((!promptToSend.trim() && attachedImages.length === 0) || loading) return;
+    if ((!promptToSend.trim() && imagesToSend.length === 0) || loading) return;
 
     // If time-traveled, committing a new message clears the "future"
-    if (messageHead !== null && currentSessionId && !currentSessionId.startsWith("new-")) {
-      const cutIndex = messageHead;
-      const idsToDelete = messages.slice(cutIndex).map((m) => m.id);
-      await deleteMessagesByIds(idsToDelete);
-      setMessages((prev) => prev.slice(0, cutIndex));
+    const cutIndex =
+      messageHead !== null && currentSessionId && !currentSessionId.startsWith("new-")
+        ? messageHead
+        : null;
+    const idsToDelete = cutIndex !== null ? messages.slice(cutIndex).map((m) => m.id) : [];
+
+    // 送信中フラグをセット（loadMessagesによる上書きを防ぐ）
+    isSubmittingRef.current = true;
+
+    // Optimistic update - 画像も含める（まずは即時表示）
+    const tempId = Date.now().toString();
+    setMessages((prev) => {
+      const base = cutIndex !== null ? prev.slice(0, cutIndex) : prev;
+      return [
+        ...base,
+        {
+          id: tempId,
+          role: "user",
+          content: promptToSend || "",
+          images: imagesToSend.length > 0 ? imagesToSend.map((img) => img.preview) : undefined,
+        },
+      ];
+    });
+
+    if (cutIndex !== null) {
       setMessageHead(null);
       setRedoSnapshot(null);
       setCheckpoints((prev) => {
@@ -572,79 +593,78 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
       });
     }
 
-    // 送信中フラグをセット（loadMessagesによる上書きを防ぐ）
-    isSubmittingRef.current = true;
-
-    let activeSessionId = currentSessionId;
-    
-    // 一時的なタブID（new-で始まる）の場合は新しいセッションを作成
-    if (!activeSessionId || activeSessionId.startsWith("new-")) {
-      const tempTabId = activeSessionId; // 一時的なタブIDを保存
-      activeSessionId = await createNewSession(promptToSend || "Image", tempTabId || undefined);
-      if (!activeSessionId) return; // Error handling
-    }
-
-    // 画像をBase64に変換
-    const imageBase64List: string[] = [];
-    for (const img of attachedImages) {
-      const base64 = await fileToBase64(img.file);
-      imageBase64List.push(base64);
-    }
-
-    // Optimistic update - 画像も含める（まずはBase64で即時表示）
-    const tempId = Date.now().toString();
-    setMessages(prev => [...prev, { 
-      id: tempId, 
-      role: "user", 
-      content: promptToSend || "",
-      images: imageBase64List.length > 0 ? imageBase64List : undefined,
-    }]);
     if (!customPrompt) setPrompt("");
     
     // 画像をクリア
     setAttachedImages([]);
     setLoading(true);
 
-    // 画像をSupabase Storageにアップロード
-    const uploadedImageUrls: string[] = [];
-    for (let i = 0; i < imageBase64List.length; i++) {
-      const url = await uploadImageToStorage(imageBase64List[i], activeSessionId, i);
-      if (url) {
-        uploadedImageUrls.push(url);
-      }
-    }
-
-    // Save user message with image URLs and sync id back to UI
-    const savedUserMsgId = await saveMessage(
-      activeSessionId,
-      "user",
-      promptToSend || "",
-      uploadedImageUrls.length > 0 ? uploadedImageUrls : undefined
-    );
-
-    if (savedUserMsgId || uploadedImageUrls.length > 0) {
-      setMessages(prev =>
-        prev.map(m =>
-          m.id === tempId
-            ? {
-                ...m,
-                id: savedUserMsgId ?? m.id,
-                images: uploadedImageUrls.length > 0 ? uploadedImageUrls : m.images,
-              }
-            : m
-        )
-      );
-    }
-
-    // Build context
-    const fileContext = await buildContextFromMentions(promptToSend);
-    const fullPrompt = fileContext + promptToSend;
-    const apiKeys = JSON.parse(localStorage.getItem("cursor_api_keys") || "{}");
-
-    // Initialize AbortController
-    abortControllerRef.current = new AbortController();
-
     try {
+      if (cutIndex !== null) {
+        await deleteMessagesByIds(idsToDelete);
+      }
+
+      let activeSessionId = currentSessionId;
+      
+      // 一時的なタブID（new-で始まる）の場合は新しいセッションを作成
+      if (!activeSessionId || activeSessionId.startsWith("new-")) {
+        const tempTabId = activeSessionId; // 一時的なタブIDを保存
+        activeSessionId = await createNewSession(promptToSend || "Image", tempTabId || undefined);
+        if (!activeSessionId) {
+          // セッション作成に失敗した場合はUIをロールバック
+          setMessages((prev) => prev.filter((m) => m.id !== tempId));
+          if (!customPrompt) setPrompt(promptToSend);
+          setAttachedImages(imagesToSend);
+          return;
+        }
+      }
+
+      // 画像をBase64に変換
+      const imageBase64List: string[] = [];
+      for (const img of imagesToSend) {
+        const base64 = await fileToBase64(img.file);
+        imageBase64List.push(base64);
+      }
+
+      // 画像をSupabase Storageにアップロード
+      const uploadedImageUrls: string[] = [];
+      for (let i = 0; i < imageBase64List.length; i++) {
+        const url = await uploadImageToStorage(imageBase64List[i], activeSessionId, i);
+        if (url) {
+          uploadedImageUrls.push(url);
+        }
+      }
+
+      // Save user message with image URLs and sync id back to UI
+      const savedUserMsgId = await saveMessage(
+        activeSessionId,
+        "user",
+        promptToSend || "",
+        uploadedImageUrls.length > 0 ? uploadedImageUrls : undefined
+      );
+
+      if (savedUserMsgId || uploadedImageUrls.length > 0) {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === tempId
+              ? {
+                  ...m,
+                  id: savedUserMsgId ?? m.id,
+                  images: uploadedImageUrls.length > 0 ? uploadedImageUrls : m.images,
+                }
+              : m
+          )
+        );
+      }
+
+      // Build context
+      const fileContext = await buildContextFromMentions(promptToSend);
+      const fullPrompt = fileContext + promptToSend;
+      const apiKeys = JSON.parse(localStorage.getItem("cursor_api_keys") || "{}");
+
+      // Initialize AbortController
+      abortControllerRef.current = new AbortController();
+
       const res = await fetch("/api/ai", {
         method: "POST",
         body: JSON.stringify({
