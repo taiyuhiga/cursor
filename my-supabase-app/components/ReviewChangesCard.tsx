@@ -83,14 +83,14 @@ export function ReviewChangesCard({
   if (!changes || changes.length === 0) return null;
 
   return (
-    <div className="rounded-xl border border-white/10 bg-[#171a21] shadow-2xl overflow-hidden">
+    <div className="rounded-xl border border-zinc-200 bg-white shadow-xl overflow-hidden">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="w-full flex items-center justify-between px-3 py-2 text-xs text-zinc-300 hover:bg-white/5 transition-colors"
+        className="w-full flex items-center justify-between px-3 py-2 text-xs text-zinc-700 hover:bg-zinc-50 transition-colors"
       >
         <div className="flex items-center gap-2">
-          <Icons.Review className="w-3.5 h-3.5 text-zinc-400" />
+          <Icons.Review className="w-3.5 h-3.5 text-zinc-500" />
           <span className="font-medium">Review changes</span>
           <span className="text-[11px] text-zinc-500">
             {changes.length} file{changes.length === 1 ? "" : "s"} · {pendingCount} pending
@@ -106,19 +106,19 @@ export function ReviewChangesCard({
       {open && (
         <div className="px-3 pb-3">
           <div className="flex items-center justify-between gap-3 pt-2">
-            <div className="text-xs text-zinc-300 flex items-center gap-2">
+            <div className="text-xs text-zinc-700 flex items-center gap-2">
               <span className="font-medium">
                 Edited {changes.length} file{changes.length === 1 ? "" : "s"}
               </span>
-              <span className="text-green-400 font-medium">+{totals.added}</span>
-              <span className="text-red-400 font-medium">-{totals.removed}</span>
+              <span className="text-green-600 font-medium">+{totals.added}</span>
+              <span className="text-red-600 font-medium">-{totals.removed}</span>
             </div>
             <div className="flex items-center gap-2">
               {onFindIssues && (
                 <button
                   type="button"
                   onClick={onFindIssues}
-                  className="px-2.5 py-1.5 text-xs font-medium rounded-md border border-white/10 bg-white/5 hover:bg-white/10 text-zinc-200 transition-colors flex items-center gap-1.5"
+                  className="px-2.5 py-1.5 text-xs font-medium rounded-md border border-zinc-200 bg-white hover:bg-zinc-50 text-zinc-700 transition-colors flex items-center gap-1.5"
                 >
                   <Icons.Search className="w-3.5 h-3.5" />
                   {isFindingIssues ? "Finding..." : "Find Issues"}
@@ -127,7 +127,7 @@ export function ReviewChangesCard({
               <button
                 type="button"
                 onClick={onRejectAll}
-                className="px-2.5 py-1.5 text-xs font-medium rounded-md border border-red-500/30 bg-red-500/10 hover:bg-red-500/15 text-red-200 transition-colors"
+                className="px-2.5 py-1.5 text-xs font-medium rounded-md border border-red-200 bg-red-50 hover:bg-red-100 text-red-700 transition-colors"
               >
                 Reject all
               </button>
@@ -141,7 +141,7 @@ export function ReviewChangesCard({
             </div>
           </div>
 
-          <div className="mt-2 rounded-lg border border-white/10 overflow-hidden">
+          <div className="mt-2 rounded-lg border border-zinc-200 overflow-hidden">
             {changes.map((change) => {
               const stats = perFileStats.find((s) => s.id === change.id) || {
                 added: 0,
@@ -158,7 +158,7 @@ export function ReviewChangesCard({
                   key={change.id}
                   type="button"
                   onClick={() => onSelectFile(change.id)}
-                  className="w-full flex items-center gap-2 px-2.5 py-2 text-left text-sm text-zinc-200 hover:bg-white/5 transition-colors"
+                  className="w-full flex items-center gap-2 px-2.5 py-2 text-left text-sm text-zinc-800 hover:bg-zinc-50 transition-colors"
                 >
                   <div className="w-6 flex-shrink-0 flex items-center justify-center">
                     <span className="text-[10px] font-semibold text-zinc-400">
@@ -169,8 +169,8 @@ export function ReviewChangesCard({
                     <div className="flex items-center justify-between gap-2">
                       <span className="truncate font-medium">{change.fileName}</span>
                       <div className="flex items-center gap-2 flex-shrink-0">
-                        <span className="text-xs text-green-400">+{stats.added}</span>
-                        <span className="text-xs text-red-400">-{stats.removed}</span>
+                        <span className="text-xs text-green-600">+{stats.added}</span>
+                        <span className="text-xs text-red-600">-{stats.removed}</span>
                         <span className={`w-2 h-2 rounded-full ${dot}`} />
                       </div>
                     </div>
@@ -184,10 +184,10 @@ export function ReviewChangesCard({
           </div>
 
           {(isFindingIssues || (issues && issues.length > 0)) && (
-            <div className="mt-3 rounded-lg border border-white/10 bg-black/20 px-3 py-2">
-              <div className="flex items-center justify-between gap-2 text-[11px] text-zinc-400">
+            <div className="mt-3 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2">
+              <div className="flex items-center justify-between gap-2 text-[11px] text-zinc-600">
                 <div className="flex items-center gap-2 min-w-0">
-                  <span className="font-semibold text-zinc-300">Agent Review</span>
+                  <span className="font-semibold text-zinc-800">Agent Review</span>
                   {!isFindingIssues && (
                     <span className="text-zinc-500">
                       Found {openIssues.length} potential issue{openIssues.length === 1 ? "" : "s"}
@@ -199,7 +199,7 @@ export function ReviewChangesCard({
                     <button
                       type="button"
                       onClick={onFindIssues}
-                      className="px-2 py-1 rounded-md border border-white/10 bg-white/5 hover:bg-white/10 text-zinc-200 transition-colors"
+                      className="px-2 py-1 rounded-md border border-zinc-200 bg-white hover:bg-zinc-100 text-zinc-700 transition-colors"
                     >
                       Review Again
                     </button>
@@ -217,7 +217,7 @@ export function ReviewChangesCard({
               </div>
 
               {isFindingIssues ? (
-                <div className="mt-2 text-xs text-zinc-300">Analyzing…</div>
+                <div className="mt-2 text-xs text-zinc-700">Analyzing…</div>
               ) : (
                 <div className="mt-2 space-y-2 max-h-44 overflow-auto">
                   {openIssues.length === 0 ? (
@@ -226,15 +226,15 @@ export function ReviewChangesCard({
                     openIssues.map((issue) => {
                       const sev =
                         issue.severity === "high"
-                          ? "bg-red-500/15 text-red-200 border-red-500/20"
+                          ? "bg-red-50 text-red-700 border-red-200"
                           : issue.severity === "medium"
-                          ? "bg-amber-500/15 text-amber-200 border-amber-500/20"
-                          : "bg-blue-500/15 text-blue-200 border-blue-500/20";
+                          ? "bg-amber-50 text-amber-700 border-amber-200"
+                          : "bg-blue-50 text-blue-700 border-blue-200";
                       const changeForFile = changes.find((c) => c.filePath === issue.filePath);
                       return (
                         <div
                           key={issue.id}
-                          className="rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 transition-colors px-2.5 py-2"
+                          className="rounded-lg border border-zinc-200 bg-white hover:bg-zinc-100 transition-colors px-2.5 py-2"
                         >
                           <button
                             type="button"
@@ -253,7 +253,7 @@ export function ReviewChangesCard({
                                   <span className={`text-[10px] px-1.5 py-0.5 rounded border ${sev}`}>
                                     {issue.severity.toUpperCase()}
                                   </span>
-                                  <span className="text-xs font-medium text-zinc-200 truncate">
+                                  <span className="text-xs font-medium text-zinc-900 truncate">
                                     {issue.title}
                                   </span>
                                 </div>
@@ -270,7 +270,7 @@ export function ReviewChangesCard({
                                       e.stopPropagation();
                                       onFixIssue(issue.id);
                                     }}
-                                    className="px-2 py-1 text-[11px] rounded-md border border-white/10 bg-white/5 hover:bg-white/10 text-zinc-200"
+                                    className="px-2 py-1 text-[11px] rounded-md border border-zinc-200 bg-white hover:bg-zinc-100 text-zinc-700"
                                   >
                                     Fix
                                   </button>
@@ -282,7 +282,7 @@ export function ReviewChangesCard({
                                       e.stopPropagation();
                                       onDismissIssue(issue.id);
                                     }}
-                                    className="p-1.5 rounded-md hover:bg-white/10 text-zinc-400 hover:text-zinc-200"
+                                    className="p-1.5 rounded-md hover:bg-zinc-100 text-zinc-500 hover:text-zinc-700"
                                     title="Dismiss"
                                   >
                                     <Icons.X className="w-3.5 h-3.5" />
@@ -290,7 +290,7 @@ export function ReviewChangesCard({
                                 )}
                               </div>
                             </div>
-                            <div className="mt-1 text-xs text-zinc-300 whitespace-pre-wrap leading-relaxed">
+                            <div className="mt-1 text-xs text-zinc-700 whitespace-pre-wrap leading-relaxed">
                               {issue.description}
                             </div>
                           </button>

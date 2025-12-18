@@ -1013,45 +1013,67 @@ ${diffs}`;
     setScIssues((prev) => (prev ? prev.map((i) => (i.status === "open" ? { ...i, status: "fixed" as const } : i)) : prev));
   }, [scIssues]);
 
-  const buildAppliedContentFromLineSelections = useCallback((change: PendingChange): string => {
-    // 行単位の拒否が無ければそのまま
-    if (!change.lineStatuses || Object.keys(change.lineStatuses).length === 0) {
-      return change.newContent;
-    }
-
-    const parts = diffLines(change.oldContent, change.newContent);
-    let lineIndex = 0;
-    const out: string[] = [];
-
-    for (const part of parts) {
-      const type = part.added ? "added" : part.removed ? "removed" : "context";
-      const lines = part.value
-        .split("\n")
-        .filter((line, i, arr) => !(i === arr.length - 1 && line === ""));
-
-      for (const line of lines) {
-        const status = change.lineStatuses?.[lineIndex] || "pending";
-        if (type === "context") {
-          out.push(line);
-        } else if (type === "added") {
-          // 追加行: rejected のみスキップ
-          if (status !== "rejected") out.push(line);
-        } else {
-          // 削除行: rejected は「削除しない」= 残す
-          if (status === "rejected") out.push(line);
-        }
-        lineIndex++;
+  const buildAppliedContentFromLineSelections = useCallback(
+    (change: PendingChange, mode: "accept" | "reject" = "accept"): string => {
+      const hasLineDecisions = change.lineStatuses && Object.keys(change.lineStatuses).length > 0;
+      if (!hasLineDecisions) {
+        return mode === "accept" ? change.newContent : change.oldContent;
       }
-    }
 
-    return out.join("\n");
-  }, []);
+      const parts = diffLines(change.oldContent, change.newContent);
+      let lineIndex = 0;
+      const out: string[] = [];
 
-  const applyOneChange = useCallback(async (change: PendingChange): Promise<AgentCheckpointChange | null> => {
+      for (const part of parts) {
+        const type = part.added ? "added" : part.removed ? "removed" : "context";
+        const lines = part.value
+          .split("\n")
+          .filter((line, i, arr) => !(i === arr.length - 1 && line === ""));
+
+        for (const line of lines) {
+          const status = change.lineStatuses?.[lineIndex] || "pending";
+          if (type === "context") {
+            out.push(line);
+          } else if (type === "added") {
+            // accept: keep unless rejected
+            // reject: keep only accepted
+            if (mode === "accept") {
+              if (status !== "rejected") out.push(line);
+            } else {
+              if (status === "accepted") out.push(line);
+            }
+          } else {
+            // removed lines are from the old content
+            // accept: remove unless rejected (i.e. keep only rejected)
+            // reject: keep unless accepted (i.e. remove only accepted)
+            if (mode === "accept") {
+              if (status === "rejected") out.push(line);
+            } else {
+              if (status !== "accepted") out.push(line);
+            }
+          }
+          lineIndex++;
+        }
+      }
+
+      return out.join("\n");
+    },
+    []
+  );
+
+  const applyOneChange = useCallback(async (change: PendingChange, mode: "accept" | "reject" = "accept"): Promise<AgentCheckpointChange | null> => {
     if (change.status === "rejected") return null;
 
+    // Reject-all selective apply: only apply explicitly accepted lines.
+    if (mode === "reject") {
+      const hasAnyAcceptedLine = Object.values(change.lineStatuses ?? {}).some((s) => s === "accepted");
+      if (!hasAnyAcceptedLine) return null;
+      // File-level deletes are treated as all-or-nothing (accept file).
+      if (change.action === "delete") return null;
+    }
+
     if (change.action === "create") {
-      const contentToWrite = buildAppliedContentFromLineSelections(change);
+      const contentToWrite = buildAppliedContentFromLineSelections(change, mode);
       const applied: AgentCheckpointChange = {
         path: change.filePath,
         kind: "create",
@@ -1077,7 +1099,7 @@ ${diffs}`;
       if (!nodeId || nodeId.startsWith("create:")) {
         throw new Error("Missing nodeId for update");
       }
-      const contentToWrite = buildAppliedContentFromLineSelections(change);
+      const contentToWrite = buildAppliedContentFromLineSelections(change, mode);
       const { data: beforeRow, error: beforeError } = await supabase
         .from("file_contents")
         .select("text")
@@ -1085,6 +1107,7 @@ ${diffs}`;
         .single();
       if (beforeError) throw new Error(beforeError.message);
       const beforeText = String(beforeRow?.text || "");
+      if (beforeText === contentToWrite) return null;
       const { error } = await supabase
         .from("file_contents")
         .upsert({ node_id: nodeId, text: contentToWrite });
@@ -1159,13 +1182,34 @@ ${diffs}`;
   }, [applyOneChange, pendingChanges, reviewOrigin]);
 
   const handleRejectAll = useCallback(() => {
-    setPendingChanges([]);
-    setReviewOrigin(null);
-    setReviewIssues(null);
-    setReviewOverlayOpen(false);
-    setReviewSelectedChangeId(null);
-    setReviewFocusIssue(null);
-  }, []);
+    (async () => {
+      try {
+        const applied: AgentCheckpointChange[] = [];
+        for (const change of pendingChanges) {
+          if (change.status === "rejected" || change.status === "accepted") continue;
+          const r = await applyOneChange(change, "reject");
+          if (r) applied.push(r);
+        }
+        if (applied.length > 0 && reviewOrigin?.userMessageId) {
+          const payload: AgentCheckpointRecordInput = {
+            anchorMessageId: reviewOrigin.userMessageId,
+            changes: applied,
+            description: `Edited ${applied.length} file(s)`,
+          };
+          aiPanelRef.current?.recordAgentCheckpoint?.(payload);
+        }
+      } catch (e: any) {
+        alert(`Error: ${e.message || e}`);
+      } finally {
+        setPendingChanges([]);
+        setReviewOrigin(null);
+        setReviewIssues(null);
+        setReviewOverlayOpen(false);
+        setReviewSelectedChangeId(null);
+        setReviewFocusIssue(null);
+      }
+    })();
+  }, [applyOneChange, pendingChanges, reviewOrigin]);
 
   const handleAcceptFile = useCallback(async (changeId: string) => {
     const change = pendingChanges.find(c => c.id === changeId);

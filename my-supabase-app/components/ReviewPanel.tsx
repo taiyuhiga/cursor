@@ -370,43 +370,43 @@ export function ReviewPanel({
   if (!selectedChange) return null;
 
   return (
-    <div className="absolute inset-0 z-40 bg-[#0f1115] text-zinc-200">
+    <div className="absolute inset-0 z-40 bg-white text-zinc-900">
       {/* Top bar */}
-      <div className="h-10 px-3 flex items-center justify-between border-b border-white/5 bg-black/20">
+      <div className="h-10 px-3 flex items-center justify-between border-b border-zinc-200 bg-white">
         <div className="flex items-center gap-2 min-w-0">
-          <Icons.File className="w-4 h-4 text-zinc-400 flex-shrink-0" />
-          <div className="text-xs text-zinc-200 truncate font-medium">
+          <Icons.File className="w-4 h-4 text-zinc-500 flex-shrink-0" />
+          <div className="text-xs text-zinc-900 truncate font-medium">
             {selectedChange.fileName}
           </div>
           <div className="text-xs text-zinc-500 truncate">
             {selectedChange.filePath}
           </div>
           <div className="hidden sm:flex items-center gap-2 text-[11px] text-zinc-500">
-            <span className="text-green-400">+{fileStats.added}</span>
-            <span className="text-red-400">-{fileStats.removed}</span>
+            <span className="text-green-600">+{fileStats.added}</span>
+            <span className="text-red-600">-{fileStats.removed}</span>
           </div>
         </div>
 
         <div className="flex items-center gap-2">
           {orderedIssues.length > 0 && (
-            <div className="hidden md:flex items-center gap-1.5 text-xs text-zinc-300">
-              <span className="text-zinc-500">{orderedIssues.length} Issues Found</span>
-              <div className="flex items-center gap-1 px-2 py-1 rounded-md border border-white/10 bg-white/5">
+            <div className="hidden md:flex items-center gap-1.5 text-xs text-zinc-700">
+              <span className="text-zinc-600">{orderedIssues.length} Issues Found</span>
+              <div className="flex items-center gap-1 px-2 py-1 rounded-md border border-zinc-200 bg-zinc-50">
                 <button
                   type="button"
                   onClick={() => goToIssueByOffset(-1)}
-                  className="p-0.5 rounded hover:bg-white/5"
+                  className="p-0.5 rounded hover:bg-zinc-200/60"
                   title="Previous issue (Cmd+[)"
                 >
                   <Icons.ChevronLeft className="w-3.5 h-3.5" />
                 </button>
-                <span className="tabular-nums text-zinc-300">
+                <span className="tabular-nums text-zinc-700">
                   Issue {(activeIssueIndex >= 0 ? activeIssueIndex : 0) + 1}/{orderedIssues.length}
                 </span>
                 <button
                   type="button"
                   onClick={() => goToIssueByOffset(1)}
-                  className="p-0.5 rounded hover:bg-white/5"
+                  className="p-0.5 rounded hover:bg-zinc-200/60"
                   title="Next issue (Cmd+])"
                 >
                   <Icons.ChevronRight className="w-3.5 h-3.5" />
@@ -419,7 +419,7 @@ export function ReviewPanel({
             <button
               type="button"
               onClick={onFindIssues}
-              className="px-2.5 py-1.5 text-xs font-medium rounded-md border border-white/10 bg-white/5 hover:bg-white/10 text-zinc-200 transition-colors"
+              className="px-2.5 py-1.5 text-xs font-medium rounded-md border border-zinc-200 bg-white hover:bg-zinc-50 text-zinc-700 transition-colors"
               title="Find Issues"
             >
               <div className="flex items-center gap-1.5">
@@ -443,7 +443,7 @@ export function ReviewPanel({
           <button
             type="button"
             onClick={onClose}
-            className="p-1.5 rounded hover:bg-white/5 text-zinc-400 hover:text-zinc-200 transition-colors"
+            className="p-1.5 rounded hover:bg-zinc-100 text-zinc-500 hover:text-zinc-700 transition-colors"
             title="Close (Esc)"
           >
             <Icons.X className="w-4 h-4" />
@@ -469,20 +469,22 @@ export function ReviewPanel({
           const bg =
             line.type === "added"
               ? line.status === "rejected"
-                ? "bg-green-900/10 opacity-60 line-through"
-                : "bg-green-900/25"
+                ? "bg-green-50 opacity-60 line-through"
+                : line.status === "accepted"
+                ? "bg-green-100"
+                : "bg-green-50"
               : line.type === "removed"
               ? line.status === "accepted"
-                ? "bg-red-900/10 opacity-60 line-through"
-                : "bg-red-900/25"
+                ? "bg-red-100 opacity-60 line-through"
+                : "bg-red-50"
               : "";
 
           const text =
             line.type === "added"
-              ? "text-green-200"
+              ? "text-green-800"
               : line.type === "removed"
-              ? "text-red-200"
-              : "text-zinc-300";
+              ? "text-red-800"
+              : "text-zinc-800";
 
           const sign = line.type === "added" ? "+" : line.type === "removed" ? "-" : " ";
           const lineNumberText =
@@ -498,7 +500,7 @@ export function ReviewPanel({
                 data-review-line={line.displayIndex}
                 className={`group flex min-w-full ${bg} ${isActiveIssueLine ? "ring-1 ring-amber-500/15" : ""}`}
               >
-                <div className="w-14 flex-shrink-0 select-none text-right pr-3 text-zinc-600 bg-black/10 border-r border-white/5">
+                <div className="w-14 flex-shrink-0 select-none text-right pr-3 text-zinc-500 bg-zinc-50 border-r border-zinc-200">
                   {lineNumberText}
                 </div>
 
@@ -507,7 +509,7 @@ export function ReviewPanel({
                     <button
                       type="button"
                       onClick={() => onAcceptLine(selectedChange.id, line.diffIndex)}
-                      className="p-1 text-green-300 hover:bg-green-500/10 rounded"
+                      className="p-1 text-green-700 hover:bg-green-100 rounded"
                       title="Accept this line"
                     >
                       <Icons.Check className="w-3 h-3" />
@@ -515,7 +517,7 @@ export function ReviewPanel({
                     <button
                       type="button"
                       onClick={() => onRejectLine(selectedChange.id, line.diffIndex)}
-                      className="p-1 text-red-300 hover:bg-red-500/10 rounded"
+                      className="p-1 text-red-700 hover:bg-red-100 rounded"
                       title="Reject this line"
                     >
                       <Icons.X className="w-3 h-3" />
@@ -533,10 +535,10 @@ export function ReviewPanel({
               {(issueAnchors.get(line.displayIndex) || []).map((issue) => {
                 const sev =
                   issue.severity === "high"
-                    ? "bg-red-500/15 text-red-200 border-red-500/20"
+                    ? "bg-red-50 text-red-700 border-red-200"
                     : issue.severity === "medium"
-                    ? "bg-amber-500/15 text-amber-200 border-amber-500/20"
-                    : "bg-blue-500/15 text-blue-200 border-blue-500/20";
+                    ? "bg-amber-50 text-amber-700 border-amber-200"
+                    : "bg-blue-50 text-blue-700 border-blue-200";
                 const feedback = issueFeedback[issue.id] ?? null;
 
                 return (
@@ -544,12 +546,12 @@ export function ReviewPanel({
                     key={`${line.displayIndex}-issue-${issue.id}`}
                     className="flex min-w-full"
                   >
-                    <div className="w-14 flex-shrink-0 bg-black/10 border-r border-white/5" />
+                    <div className="w-14 flex-shrink-0 bg-zinc-50 border-r border-zinc-200" />
                     <div className="w-14 flex-shrink-0" />
                     <div className="w-6 flex-shrink-0" />
                     <div className="flex-1 px-2 py-2">
                       <div
-                        className={`rounded-lg border border-white/10 bg-[#141820] shadow-xl overflow-hidden ${activeIssueId === issue.id ? "ring-1 ring-white/10" : ""}`}
+                        className={`rounded-lg border border-zinc-200 bg-white shadow-md overflow-hidden ${activeIssueId === issue.id ? "ring-1 ring-blue-500/20" : ""}`}
                       >
                         <div className="px-3 py-2 flex items-start justify-between gap-3">
                           <button
@@ -562,38 +564,38 @@ export function ReviewPanel({
                             title="Jump to issue"
                           >
                             <div className="flex items-center gap-2 min-w-0">
-                              <span className="w-6 h-6 rounded-md bg-white/5 border border-white/10 flex items-center justify-center flex-shrink-0">
-                                <Icons.Review className="w-3.5 h-3.5 text-zinc-300" />
+                              <span className="w-6 h-6 rounded-md bg-zinc-50 border border-zinc-200 flex items-center justify-center flex-shrink-0">
+                                <Icons.Review className="w-3.5 h-3.5 text-zinc-600" />
                               </span>
                               <span className={`text-[10px] px-1.5 py-0.5 rounded border ${sev}`}>
                                 {issue.severity.toUpperCase()}
                               </span>
-                              <span className="text-sm font-medium text-zinc-200 truncate">
+                              <span className="text-sm font-medium text-zinc-900 truncate">
                                 {issue.title}
                               </span>
                             </div>
-                            <div className="mt-1 text-xs text-zinc-400">
+                            <div className="mt-1 text-xs text-zinc-600">
                               {issue.filePath}
                               {issue.startLine ? `:${issue.startLine}` : ""}
                             </div>
                           </button>
                         </div>
-                        <div className="px-3 pb-3 text-[12px] text-zinc-300 whitespace-pre-wrap leading-relaxed">
+                        <div className="px-3 pb-3 text-[12px] text-zinc-700 whitespace-pre-wrap leading-relaxed">
                           {issue.description}
                         </div>
-                        <div className="px-3 py-2 border-t border-white/10 bg-black/20 flex items-center justify-between">
+                        <div className="px-3 py-2 border-t border-zinc-200 bg-zinc-50 flex items-center justify-between">
                           <div className="flex items-center gap-2">
                             <button
                               type="button"
                               onClick={() => onFixIssueInChat?.(issue.id)}
-                              className="px-2.5 py-1.5 text-xs font-medium rounded-md border border-white/10 bg-white/5 hover:bg-white/10 text-zinc-200 transition-colors"
+                              className="px-2.5 py-1.5 text-xs font-medium rounded-md border border-zinc-200 bg-white hover:bg-zinc-100 text-zinc-700 transition-colors"
                             >
                               Fix in Chat
                             </button>
                             <button
                               type="button"
                               onClick={() => onDismissIssue?.(issue.id)}
-                              className="px-2.5 py-1.5 text-xs font-medium rounded-md border border-white/10 bg-white/5 hover:bg-white/10 text-zinc-200 transition-colors"
+                              className="px-2.5 py-1.5 text-xs font-medium rounded-md border border-zinc-200 bg-white hover:bg-zinc-100 text-zinc-700 transition-colors"
                             >
                               Dismiss
                             </button>
@@ -607,8 +609,8 @@ export function ReviewPanel({
                                   [issue.id]: prev[issue.id] === "up" ? null : "up",
                                 }));
                               }}
-                              className={`p-1.5 rounded border border-white/10 hover:bg-white/10 ${
-                                feedback === "up" ? "text-white bg-white/10" : "text-zinc-400"
+                              className={`p-1.5 rounded border border-zinc-200 hover:bg-zinc-100 ${
+                                feedback === "up" ? "text-zinc-900 bg-zinc-100" : "text-zinc-500"
                               }`}
                               title="Helpful"
                             >
@@ -622,8 +624,8 @@ export function ReviewPanel({
                                   [issue.id]: prev[issue.id] === "down" ? null : "down",
                                 }));
                               }}
-                              className={`p-1.5 rounded border border-white/10 hover:bg-white/10 ${
-                                feedback === "down" ? "text-white bg-white/10" : "text-zinc-400"
+                              className={`p-1.5 rounded border border-zinc-200 hover:bg-zinc-100 ${
+                                feedback === "down" ? "text-zinc-900 bg-zinc-100" : "text-zinc-500"
                               }`}
                               title="Not helpful"
                             >
@@ -643,24 +645,24 @@ export function ReviewPanel({
 
       {/* Floating review bar */}
       <div className="absolute bottom-4 left-1/2 -translate-x-1/2 w-[min(720px,calc(100%-2rem))]">
-        <div className="flex items-center justify-between gap-3 px-3 py-2 rounded-xl border border-white/10 bg-[#171a21] shadow-2xl">
+        <div className="flex items-center justify-between gap-3 px-3 py-2 rounded-xl border border-zinc-200 bg-white shadow-xl">
           {/* Hunks */}
-          <div className="flex items-center gap-2 text-xs text-zinc-300">
+          <div className="flex items-center gap-2 text-xs text-zinc-700">
             <button
               type="button"
               onClick={() => goToHunk(currentHunkIndex - 1)}
-              className="p-1.5 rounded-md hover:bg-white/5 text-zinc-300"
+              className="p-1.5 rounded-md hover:bg-zinc-100 text-zinc-700"
               title="Previous hunk (Alt+↑)"
             >
               <Icons.ArrowUp className="w-4 h-4" />
             </button>
-            <span className="tabular-nums text-zinc-400">
+            <span className="tabular-nums text-zinc-600">
               {hunkStarts.length > 0 ? currentHunkIndex + 1 : 0}/{hunkStarts.length}
             </span>
             <button
               type="button"
               onClick={() => goToHunk(currentHunkIndex + 1)}
-              className="p-1.5 rounded-md hover:bg-white/5 text-zinc-300"
+              className="p-1.5 rounded-md hover:bg-zinc-100 text-zinc-700"
               title="Next hunk (Alt+↓)"
             >
               <Icons.ArrowDown className="w-4 h-4" />
@@ -675,7 +677,7 @@ export function ReviewPanel({
                 onRejectFile(selectedChange.id);
                 goToNextPendingFile();
               }}
-              className="px-3 py-1.5 text-xs font-medium rounded-md border border-white/10 bg-white/5 hover:bg-white/10 text-zinc-200 transition-colors"
+              className="px-3 py-1.5 text-xs font-medium rounded-md border border-zinc-200 bg-white hover:bg-zinc-100 text-zinc-700 transition-colors"
               title="Reject file (Cmd+Backspace)"
             >
               Reject file
@@ -694,22 +696,22 @@ export function ReviewPanel({
           </div>
 
           {/* Files */}
-          <div className="flex items-center gap-2 text-xs text-zinc-300">
+          <div className="flex items-center gap-2 text-xs text-zinc-700">
             <button
               type="button"
               onClick={() => goToFile(currentFileIndex - 1)}
-              className="p-1.5 rounded-md hover:bg-white/5 text-zinc-300"
+              className="p-1.5 rounded-md hover:bg-zinc-100 text-zinc-700"
               title="Previous file"
             >
               <Icons.ChevronLeft className="w-4 h-4" />
             </button>
-            <span className="tabular-nums text-zinc-400">
+            <span className="tabular-nums text-zinc-600">
               {currentFileIndex + 1}/{changes.length} files
             </span>
             <button
               type="button"
               onClick={() => goToFile(currentFileIndex + 1)}
-              className="p-1.5 rounded-md hover:bg-white/5 text-zinc-300"
+              className="p-1.5 rounded-md hover:bg-zinc-100 text-zinc-700"
               title="Next file"
             >
               <Icons.ChevronRight className="w-4 h-4" />

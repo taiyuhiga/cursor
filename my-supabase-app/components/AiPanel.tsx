@@ -258,6 +258,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
         setRedoSnapshot(null);
         setShowRestoreDialog(false);
         setRestoreToIndex(null);
+        setDontAskAgain(false);
         return;
       }
 
@@ -267,6 +268,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
       setRedoSnapshot(null);
       setShowRestoreDialog(false);
       setRestoreToIndex(null);
+      setDontAskAgain(false);
 
       const { data, error } = await supabase
         .from("chat_messages")
@@ -453,6 +455,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
       if (showRestoreDialog) {
         setShowRestoreDialog(false);
         setRestoreToIndex(null);
+        setDontAskAgain(false);
         return;
       }
 
@@ -2431,7 +2434,10 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
                                : "border-zinc-200 bg-zinc-100 text-zinc-500 hover:bg-zinc-200"
                            }`}
                          >
-                           Restore checkpoint
+                           <span className="flex items-center gap-1.5">
+                             <Icons.Restore className="w-3 h-3" />
+                             <span>Restore checkpoint</span>
+                           </span>
                          </button>
                        )}
 
@@ -2878,47 +2884,59 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
                 </div>
              </div>
 
-            <div className="flex items-center gap-1">
-                <button className="p-1.5 hover:bg-zinc-200 rounded text-zinc-400 hover:text-zinc-600 transition-colors">
-                    <span className="text-xs">@</span>
-                </button>
-                <button 
-                    onClick={handleImageClick}
-                    className={`p-1.5 hover:bg-zinc-200 rounded transition-colors ${attachedImages.length > 0 ? "text-blue-500" : "text-zinc-400 hover:text-zinc-600"}`}
-                >
-                    <Icons.Image className="w-3.5 h-3.5" />
-                </button>
-                <input
-                  ref={imageInputRef}
-                  type="file"
-                  accept="image/*"
-                  multiple
-                  onChange={handleImageChange}
-                  className="hidden"
-                />
-                {loading ? (
-                    <button
-                        onClick={handleStop}
-                        className="ml-1 p-1.5 rounded-full transition-all flex items-center justify-center bg-zinc-100 hover:bg-zinc-200 text-zinc-600 border border-zinc-200"
-                    >
-                        <Icons.Stop className="w-3.5 h-3.5" />
-                    </button>
-                ) : (
-                    <button
-                      onClick={() => submitCurrent()}
-                      disabled={loading || (!prompt.trim() && attachedImages.length === 0 && (editingMessageIndex === null || editingImageUrls.length === 0))}
-                      className={`p-1.5 rounded-full transition-all flex-shrink-0 flex items-center justify-center ${getSubmitButtonStyles(mode, prompt.trim().length > 0 || attachedImages.length > 0 || (editingMessageIndex !== null && editingImageUrls.length > 0))}`}
-                    >
-                      <Icons.ArrowUp className="w-3.5 h-3.5" />
-                    </button>
-                )}
-            </div>
+             <div className="flex items-center gap-1">
+               <button className="p-1.5 hover:bg-zinc-200 rounded text-zinc-400 hover:text-zinc-600 transition-colors">
+                 <span className="text-xs">@</span>
+               </button>
+               <button
+                 onClick={handleImageClick}
+                 className={`p-1.5 hover:bg-zinc-200 rounded transition-colors ${
+                   attachedImages.length > 0 ? "text-blue-500" : "text-zinc-400 hover:text-zinc-600"
+                 }`}
+               >
+                 <Icons.Image className="w-3.5 h-3.5" />
+               </button>
+               <input
+                 ref={imageInputRef}
+                 type="file"
+                 accept="image/*"
+                 multiple
+                 onChange={handleImageChange}
+                 className="hidden"
+               />
+               {loading ? (
+                 <button
+                   onClick={handleStop}
+                   className="ml-1 p-1.5 rounded-full transition-all flex items-center justify-center bg-zinc-100 hover:bg-zinc-200 text-zinc-600 border border-zinc-200"
+                 >
+                   <Icons.Stop className="w-3.5 h-3.5" />
+                 </button>
+               ) : (
+                 <button
+                   onClick={() => submitCurrent()}
+                   disabled={
+                     loading ||
+                     (!prompt.trim() &&
+                       attachedImages.length === 0 &&
+                       (editingMessageIndex === null || editingImageUrls.length === 0))
+                   }
+                   className={`p-1.5 rounded-full transition-all flex-shrink-0 flex items-center justify-center ${getSubmitButtonStyles(
+                     mode,
+                     prompt.trim().length > 0 ||
+                       attachedImages.length > 0 ||
+                       (editingMessageIndex !== null && editingImageUrls.length > 0)
+                   )}`}
+                 >
+                   <Icons.ArrowUp className="w-3.5 h-3.5" />
+                 </button>
+               )}
+             </div>
           </div>
         </div>
       </div>
         </>
       )}
-      
+
       {/* Restore Checkpoint Confirmation Dialog */}
       {showRestoreDialog && restoreToIndex !== null && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
@@ -2957,6 +2975,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
                 onClick={() => {
                   setShowRestoreDialog(false);
                   setRestoreToIndex(null);
+                  setDontAskAgain(false);
                 }}
                 className="px-3 py-1.5 text-xs text-zinc-400 hover:text-zinc-200 transition-colors"
               >
@@ -2964,10 +2983,10 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
               </button>
               <button
                 onClick={confirmRestore}
-                className="px-3 py-1.5 text-xs bg-zinc-700 hover:bg-zinc-600 text-white rounded transition-colors flex items-center gap-1.5"
+                className="px-3 py-1.5 text-xs bg-sky-300 hover:bg-sky-200 text-zinc-900 rounded transition-colors flex items-center gap-1.5"
               >
                 Continue
-                <Icons.Restore className="w-3 h-3" />
+                <Icons.ChevronRight className="w-3 h-3" />
               </button>
             </div>
           </div>
