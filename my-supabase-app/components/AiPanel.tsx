@@ -2186,11 +2186,11 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
                   </div>
 
                   {/* Model Dropdown */}
-                  <div className="relative flex-1 min-w-0" ref={dropdownRef}>
+                  <div className="relative min-w-0" ref={dropdownRef}>
                     <button
                       onClick={() => setIsModelDropdownOpen(!isModelDropdownOpen)}
                       title={getModelDisplay()}
-                      className="flex items-center gap-1.5 text-[11px] font-medium text-zinc-500 hover:text-zinc-800 hover:bg-zinc-100 rounded px-2 py-1 transition-colors w-full min-w-0 text-left overflow-hidden"
+                      className="inline-flex w-full items-center gap-1.5 text-[11px] font-medium text-zinc-500 hover:text-zinc-800 hover:bg-zinc-100 rounded px-2 py-1 transition-colors min-w-0 max-w-[200px] text-left overflow-hidden"
                     >
                       <span className="truncate min-w-0">{getModelDisplay()}</span>
                       <Icons.ChevronDown className="w-3 h-3 opacity-50 flex-shrink-0" />
@@ -2789,11 +2789,11 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
                 </div>
 
                 {/* Model Dropdown */}
-                <div className="relative flex-1 min-w-0" ref={dropdownRef}>
+                <div className="relative min-w-0" ref={dropdownRef}>
                   <button
                     onClick={() => setIsModelDropdownOpen(!isModelDropdownOpen)}
                     title={getModelDisplay()}
-                    className="flex items-center gap-1.5 text-[11px] font-medium text-zinc-500 hover:text-zinc-800 hover:bg-zinc-100 rounded px-2 py-1 transition-colors w-full min-w-0 text-left overflow-hidden"
+                    className="inline-flex w-full items-center gap-1.5 text-[11px] font-medium text-zinc-500 hover:text-zinc-800 hover:bg-zinc-100 rounded px-2 py-1 transition-colors min-w-0 max-w-[200px] text-left overflow-hidden"
                   >
                     <span className="truncate min-w-0">{getModelDisplay()}</span>
                     <Icons.ChevronDown className="w-3 h-3 opacity-50 flex-shrink-0" />
