@@ -110,6 +110,8 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
   onReviewFixAllIssuesInChat,
 }, ref) => {
   const supabase = createClient();
+  const panelRef = useRef<HTMLDivElement>(null);
+  const [panelWidth, setPanelWidth] = useState(0);
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   
@@ -1698,6 +1700,28 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
     return modelName;
   };
 
+  useEffect(() => {
+    const ResizeObserverCtor = globalThis.ResizeObserver;
+    if (!ResizeObserverCtor) return;
+    const el = panelRef.current;
+    if (!el) return;
+    const ro = new ResizeObserverCtor((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      setPanelWidth(entry.contentRect.width);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const compactControls = panelWidth > 0 && panelWidth < 300;
+  const inputPlaceholder =
+    panelWidth > 0 && panelWidth < 320
+      ? "Plan, @, /"
+      : panelWidth > 0 && panelWidth < 380
+        ? "Plan, @, / commands"
+        : "Plan, @ for context, / for commands";
+
   const toggleThought = (msgId: string) => {
     setExpandedThoughts(prev => ({ ...prev, [msgId]: !prev[msgId] }));
   };
@@ -1875,7 +1899,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
   };
 
   return (
-    <div className="flex flex-col h-full bg-[#f9fafb] text-zinc-900 relative">
+    <div ref={panelRef} className="flex flex-col h-full bg-[#f9fafb] text-zinc-900 relative">
       {/* Header Tabs */}
       <div className="flex items-center gap-1 px-2 pt-2 pb-0 border-b border-zinc-200 bg-white select-none">
         <div ref={tabsContainerRef} className="flex items-center overflow-x-auto no-scrollbar gap-1 flex-1">
@@ -2022,7 +2046,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
       {(!currentSessionId || currentSessionId?.startsWith("new-")) && messages.length === 0 ? (
         <div className="flex-1 flex flex-col justify-between">
           {/* Top Input Area */}
-          <div className="px-3 pt-4">
+          <div className="px-4 pt-4">
             <div 
               className={`relative flex flex-col bg-white border shadow-lg rounded-xl transition-all ${
                 isDragging ? "border-blue-500 ring-4 ring-blue-500/10" : "border-zinc-200 focus-within:border-zinc-300 focus-within:shadow-xl"
@@ -2102,27 +2126,28 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
 
               <textarea
                 ref={textareaRef}
-                className={`w-full max-h-60 bg-transparent px-4 py-3 text-sm text-zinc-800 resize-none focus:outline-none placeholder:text-zinc-400 min-h-[44px] ${attachedImages.length > 0 ? "" : "rounded-t-xl"}`}
+                className={`w-full max-h-60 bg-transparent px-4 py-3 text-sm text-zinc-800 resize-none focus:outline-none placeholder:text-zinc-300 min-h-[44px] ${attachedImages.length > 0 ? "" : "rounded-t-xl"}`}
                 value={prompt}
                 onChange={handlePromptChange}
                 onKeyDown={handleKeyDown}
                 onPaste={handlePaste}
-                placeholder="Plan, @ for context, / for commands"
+                placeholder={inputPlaceholder}
                 rows={1}
                 disabled={loading}
               />
               
-              <div className="flex items-center justify-between px-2 pr-3 py-1.5 border-t border-zinc-100 bg-zinc-50/30 rounded-b-xl">
-                <div className="flex items-center gap-1">
+              <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 gap-y-1 px-2 pr-3 py-1.5 border-t border-zinc-100 bg-zinc-50/30 rounded-b-xl">
+                <div className="flex items-center gap-1 min-w-0">
                   {/* Agent Dropdown */}
-                  <div className="relative" ref={agentDropdownRef}>
+                  <div className="relative flex-shrink-0" ref={agentDropdownRef}>
                     <button
                       onClick={() => setIsAgentDropdownOpen(!isAgentDropdownOpen)}
-                      className={`flex items-center gap-1.5 text-[11px] font-medium rounded px-2 py-1 transition-colors ${getModeStyles(mode)}`}
+                      title={mode}
+                      className={`flex items-center gap-1.5 text-[11px] font-medium rounded px-2 py-1 transition-colors min-w-0 max-w-[120px] overflow-hidden flex-shrink-0 ${getModeStyles(mode)}`}
                     >
                       {getModeIcon(mode, "w-3.5 h-3.5")}
-                      <span className="capitalize">{mode}</span>
-                      <Icons.ChevronDown className="w-3 h-3 opacity-50" />
+                      {!compactControls && <span className="truncate capitalize">{mode}</span>}
+                      <Icons.ChevronDown className="w-3 h-3 opacity-50 flex-shrink-0" />
                     </button>
                     {isAgentDropdownOpen && (
                       <div className="absolute top-full left-0 mt-2 w-32 bg-white border border-zinc-200 rounded-lg shadow-xl z-50 py-1 overflow-hidden">
@@ -2161,17 +2186,18 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
                   </div>
 
                   {/* Model Dropdown */}
-                  <div className="relative" ref={dropdownRef}>
+                  <div className="relative flex-1 min-w-0" ref={dropdownRef}>
                     <button
                       onClick={() => setIsModelDropdownOpen(!isModelDropdownOpen)}
-                      className="flex items-center gap-1.5 text-[11px] font-medium text-zinc-500 hover:text-zinc-800 hover:bg-zinc-100 rounded px-2 py-1 transition-colors min-w-[100px]"
+                      title={getModelDisplay()}
+                      className="flex items-center gap-1.5 text-[11px] font-medium text-zinc-500 hover:text-zinc-800 hover:bg-zinc-100 rounded px-2 py-1 transition-colors w-full min-w-0 text-left overflow-hidden"
                     >
-                      <span>{getModelDisplay()}</span>
-                      <Icons.ChevronDown className="w-3 h-3 opacity-50" />
+                      <span className="truncate min-w-0">{getModelDisplay()}</span>
+                      <Icons.ChevronDown className="w-3 h-3 opacity-50 flex-shrink-0" />
                     </button>
                     
                     {isModelDropdownOpen && (
-                      <div className="absolute top-full left-0 mt-2 w-72 bg-white border border-zinc-200 rounded-lg shadow-xl z-50 overflow-hidden max-h-[500px] overflow-y-auto">
+                      <div className="absolute top-full right-0 mt-2 w-72 max-w-[calc(100vw-24px)] bg-white border border-zinc-200 rounded-lg shadow-xl z-50 overflow-hidden max-h-[500px] overflow-y-auto">
                         {/* Search Box */}
                         <div className="p-2 border-b border-zinc-200">
                           <input
@@ -2428,10 +2454,10 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
                          <button
                            onClick={() => handleRestoreToMessage(idx)}
                            disabled={isFuture}
-                           className={`px-2 py-1 text-[11px] rounded border transition-colors ${
+                           className={`px-2.5 py-1 text-[11px] font-medium rounded-full border transition-colors shadow-sm ${
                              isFuture
-                               ? "border-zinc-200 bg-zinc-100 text-zinc-400 cursor-not-allowed"
-                               : "border-zinc-200 bg-zinc-100 text-zinc-500 hover:bg-zinc-200"
+                               ? "border-zinc-200 bg-zinc-50 text-zinc-400 cursor-not-allowed shadow-none"
+                               : "border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50"
                            }`}
                          >
                            <span className="flex items-center gap-1.5">
@@ -2703,7 +2729,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
 
           <textarea
             ref={textareaRef}
-            className={`w-full max-h-60 bg-transparent px-4 py-3 text-sm text-zinc-800 resize-none focus:outline-none placeholder:text-zinc-400 min-h-[44px] ${(attachedImages.length > 0 || (editingMessageIndex !== null && editingImageUrls.length > 0)) ? "" : "rounded-t-xl"}`}
+            className={`w-full max-h-60 bg-transparent px-4 py-3 text-sm text-zinc-800 resize-none focus:outline-none placeholder:text-zinc-300 min-h-[44px] ${(attachedImages.length > 0 || (editingMessageIndex !== null && editingImageUrls.length > 0)) ? "" : "rounded-t-xl"}`}
             value={prompt}
             onChange={handlePromptChange}
             onKeyDown={handleKeyDown}
@@ -2713,17 +2739,18 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
             disabled={loading}
           />
           
-          <div className="flex items-center justify-between px-2 pr-3 py-1.5 border-t border-zinc-100 bg-zinc-50/30 rounded-b-xl">
-             <div className="flex items-center gap-1">
+          <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 gap-y-1 px-2 pr-3 py-1.5 border-t border-zinc-100 bg-zinc-50/30 rounded-b-xl">
+             <div className="flex items-center gap-1 min-w-0">
                 {/* Agent Dropdown */}
-                <div className="relative" ref={agentDropdownRef}>
+                <div className="relative flex-shrink-0" ref={agentDropdownRef}>
                     <button
                         onClick={() => setIsAgentDropdownOpen(!isAgentDropdownOpen)}
-                        className={`flex items-center gap-1.5 text-[11px] font-medium rounded px-2 py-1 transition-colors ${getModeStyles(mode)}`}
+                        title={mode}
+                        className={`flex items-center gap-1.5 text-[11px] font-medium rounded px-2 py-1 transition-colors min-w-0 max-w-[120px] overflow-hidden flex-shrink-0 ${getModeStyles(mode)}`}
                     >
                         {getModeIcon(mode, "w-3.5 h-3.5")}
-                        <span className="capitalize">{mode}</span>
-                        <Icons.ChevronDown className="w-3 h-3 opacity-50" />
+                        {!compactControls && <span className="truncate capitalize">{mode}</span>}
+                        <Icons.ChevronDown className="w-3 h-3 opacity-50 flex-shrink-0" />
                     </button>
                      {isAgentDropdownOpen && (
                         <div className="absolute bottom-full left-0 mb-2 w-32 bg-white border border-zinc-200 rounded-lg shadow-xl z-50 py-1 overflow-hidden">
@@ -2762,17 +2789,18 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
                 </div>
 
                 {/* Model Dropdown */}
-                <div className="relative" ref={dropdownRef}>
+                <div className="relative flex-1 min-w-0" ref={dropdownRef}>
                   <button
                     onClick={() => setIsModelDropdownOpen(!isModelDropdownOpen)}
-                    className="flex items-center gap-1.5 text-[11px] font-medium text-zinc-500 hover:text-zinc-800 hover:bg-zinc-100 rounded px-2 py-1 transition-colors min-w-[100px]"
+                    title={getModelDisplay()}
+                    className="flex items-center gap-1.5 text-[11px] font-medium text-zinc-500 hover:text-zinc-800 hover:bg-zinc-100 rounded px-2 py-1 transition-colors w-full min-w-0 text-left overflow-hidden"
                   >
-                    <span>{getModelDisplay()}</span>
-                    <Icons.ChevronDown className="w-3 h-3 opacity-50" />
+                    <span className="truncate min-w-0">{getModelDisplay()}</span>
+                    <Icons.ChevronDown className="w-3 h-3 opacity-50 flex-shrink-0" />
                   </button>
                   
                   {isModelDropdownOpen && (
-                    <div className="absolute bottom-full left-0 mb-2 w-72 bg-white border border-zinc-200 rounded-lg shadow-xl z-50 overflow-hidden max-h-[500px] overflow-y-auto">
+                    <div className="absolute bottom-full right-0 mb-2 w-72 max-w-[calc(100vw-24px)] bg-white border border-zinc-200 rounded-lg shadow-xl z-50 overflow-hidden max-h-[500px] overflow-y-auto">
                       {/* Search Box */}
                       <div className="p-2 border-b border-zinc-200">
                         <input
@@ -2884,7 +2912,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
                 </div>
              </div>
 
-             <div className="flex items-center gap-1">
+             <div className="flex items-center gap-1 flex-shrink-0">
                <button className="p-1.5 hover:bg-zinc-200 rounded text-zinc-400 hover:text-zinc-600 transition-colors">
                  <span className="text-xs">@</span>
                </button>
@@ -2939,18 +2967,18 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
 
       {/* Restore Checkpoint Confirmation Dialog */}
       {showRestoreDialog && restoreToIndex !== null && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-[#1e2028] rounded-lg shadow-2xl w-[420px] overflow-hidden">
+        <div className="fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white border border-zinc-200 rounded-xl shadow-2xl w-[420px] overflow-hidden">
             <div className="p-5">
               <div className="flex items-start gap-3">
-                <div className="flex-shrink-0 w-8 h-8 bg-amber-500/20 rounded-lg flex items-center justify-center">
-                  <Icons.Warning className="w-5 h-5 text-amber-500" />
+                <div className="flex-shrink-0 w-9 h-9 bg-amber-100 rounded-lg flex items-center justify-center">
+                  <Icons.Warning className="w-5 h-5 text-amber-600" />
                 </div>
                 <div className="flex-1">
-                  <h3 className="text-white font-medium text-sm">
+                  <h3 className="text-zinc-900 font-medium text-sm">
                     Discard all changes up to this checkpoint?
                   </h3>
-                  <p className="text-zinc-400 text-xs mt-1">
+                  <p className="text-zinc-500 text-xs mt-1">
                     You can always undo this later.
                   </p>
                 </div>
@@ -2962,28 +2990,28 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
                   id="dontAskAgain"
                   checked={dontAskAgain}
                   onChange={(e) => setDontAskAgain(e.target.checked)}
-                  className="w-3.5 h-3.5 rounded border-zinc-600 bg-zinc-700 text-blue-500 focus:ring-0 focus:ring-offset-0"
+                  className="w-3.5 h-3.5 rounded border-zinc-300 bg-white text-blue-600 focus:ring-2 focus:ring-blue-200 focus:ring-offset-0"
                 />
-                <label htmlFor="dontAskAgain" className="text-zinc-400 text-xs">
+                <label htmlFor="dontAskAgain" className="text-zinc-500 text-xs">
                   Don't ask again
                 </label>
               </div>
             </div>
             
-            <div className="flex items-center justify-end gap-2 px-5 py-3 bg-[#16181d] border-t border-zinc-800">
+            <div className="flex items-center justify-end gap-2 px-5 py-3 bg-zinc-50 border-t border-zinc-200">
               <button
                 onClick={() => {
                   setShowRestoreDialog(false);
                   setRestoreToIndex(null);
                   setDontAskAgain(false);
                 }}
-                className="px-3 py-1.5 text-xs text-zinc-400 hover:text-zinc-200 transition-colors"
+                className="px-3 py-1.5 text-xs text-zinc-500 hover:text-zinc-700 transition-colors"
               >
                 Cancel (esc)
               </button>
               <button
                 onClick={confirmRestore}
-                className="px-3 py-1.5 text-xs bg-sky-300 hover:bg-sky-200 text-zinc-900 rounded transition-colors flex items-center gap-1.5"
+                className="px-3.5 py-1.5 text-xs bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition-colors flex items-center gap-1.5"
               >
                 Continue
                 <Icons.ChevronRight className="w-3 h-3" />

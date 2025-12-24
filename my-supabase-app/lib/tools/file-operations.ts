@@ -134,6 +134,146 @@ async function findNodeByPath(supabase: any, projectId: string, path: string) {
   return null;
 }
 
+const IMAGE_MIME_TYPES: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  svg: "image/svg+xml",
+};
+
+const BOUNDARY_CHARS = "/-_. ";
+
+function getImageMimeType(path: string): string | null {
+  const dotIndex = path.lastIndexOf(".");
+  if (dotIndex === -1) return null;
+  const ext = path.slice(dotIndex + 1).toLowerCase();
+  return IMAGE_MIME_TYPES[ext] || null;
+}
+
+function sanitizeBase64(value: string): string | null {
+  const cleaned = value.replace(/\s+/g, "");
+  if (cleaned.length < 24) return null;
+  if (!/^[A-Za-z0-9+/=]+$/.test(cleaned)) return null;
+  return cleaned;
+}
+
+export function formatReadFileResult(path: string, content: string) {
+  const mimeType = getImageMimeType(path);
+  if (!mimeType) {
+    return { path, content };
+  }
+
+  const trimmed = content.trim();
+  if (!trimmed) {
+    return {
+      path,
+      content: "",
+      isImage: true,
+      mimeType,
+      warning: "Image content is empty. Expected data URL or base64 text.",
+    };
+  }
+
+  if (trimmed.startsWith("data:")) {
+    return {
+      path,
+      content: trimmed,
+      isImage: true,
+      mimeType,
+      encoding: "data-url",
+    };
+  }
+
+  if (/^https?:\/\//i.test(trimmed)) {
+    return {
+      path,
+      content: trimmed,
+      isImage: true,
+      mimeType,
+      encoding: "url",
+    };
+  }
+
+  if (mimeType === "image/svg+xml" && trimmed.startsWith("<")) {
+    const encoded = encodeURIComponent(trimmed);
+    return {
+      path,
+      content: `data:${mimeType};utf8,${encoded}`,
+      isImage: true,
+      mimeType,
+      encoding: "utf8-data-url",
+    };
+  }
+
+  const base64 = sanitizeBase64(trimmed);
+  if (base64) {
+    return {
+      path,
+      content: `data:${mimeType};base64,${base64}`,
+      isImage: true,
+      mimeType,
+      encoding: "base64",
+    };
+  }
+
+  return {
+    path,
+    content: trimmed,
+    isImage: true,
+    mimeType,
+    warning: "Image content is not a data URL or base64 string.",
+  };
+}
+
+function splitTerms(query: string): string[] {
+  const trimmed = query.trim().toLowerCase();
+  if (!trimmed) return [];
+  const parts = trimmed.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  return parts.length > 0 ? parts : [trimmed];
+}
+
+function countOccurrences(haystack: string, needle: string): number {
+  if (!needle) return 0;
+  let count = 0;
+  let index = haystack.indexOf(needle);
+  while (index !== -1) {
+    count += 1;
+    index = haystack.indexOf(needle, index + needle.length);
+  }
+  return count;
+}
+
+function fuzzyScore(query: string, target: string): number {
+  if (!query || !target) return 0;
+  if (target === query) return query.length * 6 + 20;
+  if (target.startsWith(query)) return query.length * 5 + 12;
+  if (target.includes(query)) return query.length * 4 + 8;
+
+  let score = 0;
+  let queryIndex = 0;
+  let lastMatch = -1;
+
+  for (let i = 0; i < target.length && queryIndex < query.length; i++) {
+    if (target[i] !== query[queryIndex]) continue;
+    const isBoundary = i === 0 || BOUNDARY_CHARS.includes(target[i - 1]);
+    const isConsecutive = lastMatch === i - 1;
+    score += 1;
+    if (isBoundary) score += 2;
+    if (isConsecutive) score += 2;
+    lastMatch = i;
+    queryIndex += 1;
+  }
+
+  return queryIndex === query.length ? score : 0;
+}
+
+function matchScore(query: string, target: string): number {
+  if (!query || !target) return 0;
+  return fuzzyScore(query, target);
+}
+
 // ファイル作成（パス対応）
 export async function createFile(path: string, content: string = "", projectId?: string) {
   const supabase = await createClient();
@@ -287,10 +427,7 @@ export async function readFile(path: string, projectId?: string) {
     .eq("node_id", node.id)
     .single();
 
-  return {
-    path,
-    content: content?.text || "",
-  };
+  return formatReadFileResult(path, content?.text || "");
 }
 
 // ディレクトリ一覧
@@ -336,7 +473,7 @@ export async function listDirectory(path: string, projectId?: string) {
 }
 
 // Grep検索（ファイル内容検索）
-export async function grep(pattern: string, searchPath?: string, projectId?: string) {
+export async function grep(pattern: string, searchPath?: string, projectId?: string, caseSensitive?: boolean) {
   const supabase = await createClient();
   const project = await getProject(supabase, projectId);
 
@@ -366,7 +503,8 @@ export async function grep(pattern: string, searchPath?: string, projectId?: str
     if (!content?.text) continue;
 
     const lines = content.text.split("\n");
-    const regex = new RegExp(pattern, "gi");
+    const flags = caseSensitive ? "g" : "gi";
+    const regex = new RegExp(pattern, flags);
 
     lines.forEach((line: string, index: number) => {
       if (regex.test(line)) {
@@ -391,18 +529,32 @@ export async function grep(pattern: string, searchPath?: string, projectId?: str
 export async function fileSearch(query: string, projectId?: string) {
   const allFiles = await listFiles(projectId);
   
-  const queryLower = query.toLowerCase();
-  const matches = allFiles.filter(f => 
-    f.name.toLowerCase().includes(queryLower) ||
-    f.path.toLowerCase().includes(queryLower)
-  );
+  const queryLower = query.trim().toLowerCase();
+  if (!queryLower) {
+    return { query, results: [] };
+  }
+
+  const scored = allFiles
+    .map((f: any) => {
+      const name = String(f.name || "");
+      const path = String(f.path || name);
+      const nameScore = matchScore(queryLower, name.toLowerCase());
+      const pathScore = matchScore(queryLower, path.toLowerCase());
+      const score = Math.max(nameScore, pathScore);
+      return { node: f, score };
+    })
+    .filter(item => item.score > 0)
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return String(a.node.path).localeCompare(String(b.node.path));
+    });
 
   return {
     query,
-    results: matches.map(f => ({
-      path: f.path,
-      type: f.type,
-    })).slice(0, 20), // 最大20件
+    results: scored.slice(0, 20).map(item => ({
+      path: item.node.path,
+      type: item.node.type,
+    })),
   };
 }
 
@@ -464,13 +616,17 @@ export async function codebaseSearch(query: string, filePattern?: string, projec
     fileNodes = fileNodes.filter(f => regex.test(f.path));
   }
 
+  const queryLower = query.trim().toLowerCase();
+  const queryTerms = splitTerms(queryLower);
+  if (!queryLower) {
+    return { query, resultCount: 0, results: [] };
+  }
+
   const results: Array<{
     path: string;
     relevantSnippet: string;
     score: number;
   }> = [];
-
-  const queryTerms = query.toLowerCase().split(/\s+/);
 
   for (const file of fileNodes) {
     const { data: content } = await supabase
@@ -481,36 +637,61 @@ export async function codebaseSearch(query: string, filePattern?: string, projec
 
     if (!content?.text) continue;
 
-    const contentLower = content.text.toLowerCase();
-    
-    // スコア計算（単純なキーワードマッチング）
-    let score = 0;
+    const contentText = content.text;
+    const contentLower = contentText.toLowerCase();
+
+    let totalMatches = 0;
+    let matchedTerms = 0;
     for (const term of queryTerms) {
-      const matches = (contentLower.match(new RegExp(term, "g")) || []).length;
-      score += matches;
+      const termCount = countOccurrences(contentLower, term);
+      totalMatches += termCount;
+      if (termCount > 0) matchedTerms += 1;
     }
 
-    if (score > 0) {
-      // 関連するスニペットを抽出
-      const lines = content.text.split("\n");
-      let bestSnippet = "";
-      let bestLineScore = 0;
+    const phraseMatches = countOccurrences(contentLower, queryLower);
+    const lines = contentText.split("\n");
+    let bestSnippet = "";
+    let bestLineScore = 0;
+    let bestLineIndex = -1;
 
-      for (let i = 0; i < lines.length; i++) {
-        const lineLower = lines[i].toLowerCase();
-        let lineScore = 0;
-        for (const term of queryTerms) {
-          if (lineLower.includes(term)) lineScore++;
-        }
-        if (lineScore > bestLineScore) {
-          bestLineScore = lineScore;
-          // 前後2行を含める
-          const start = Math.max(0, i - 2);
-          const end = Math.min(lines.length, i + 3);
-          bestSnippet = lines.slice(start, end).join("\n");
+    for (let i = 0; i < lines.length; i++) {
+      const lineLower = lines[i].toLowerCase();
+      let lineScore = 0;
+      if (lineLower.includes(queryLower)) lineScore += 6;
+      for (const term of queryTerms) {
+        if (!term) continue;
+        if (lineLower.includes(term)) {
+          lineScore += 3;
+        } else if (fuzzyScore(term, lineLower) > 0) {
+          lineScore += 1;
         }
       }
+      if (lineScore > bestLineScore) {
+        bestLineScore = lineScore;
+        bestLineIndex = i;
+      }
+    }
 
+    if (bestLineIndex >= 0 && bestLineScore > 0) {
+      const start = Math.max(0, bestLineIndex - 2);
+      const end = Math.min(lines.length, bestLineIndex + 3);
+      bestSnippet = lines.slice(start, end).join("\n");
+    } else if (matchedTerms > 0 || phraseMatches > 0) {
+      bestSnippet = lines.slice(0, Math.min(lines.length, 3)).join("\n");
+    }
+
+    const pathLower = String(file.path || "").toLowerCase();
+    let pathScore = 0;
+    if (pathLower.includes(queryLower)) pathScore += 10;
+    for (const term of queryTerms) {
+      if (term && pathLower.includes(term)) pathScore += 3;
+    }
+    pathScore += Math.min(10, fuzzyScore(queryLower, pathLower));
+
+    const contentScore = matchedTerms * 5 + totalMatches * 2 + phraseMatches * 4 + bestLineScore;
+    const score = contentScore + pathScore;
+
+    if (score > 0) {
       results.push({
         path: file.path,
         relevantSnippet: bestSnippet.slice(0, 500),

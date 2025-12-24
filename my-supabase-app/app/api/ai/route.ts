@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { 
   createFile, updateFile, deleteFile, createFolder, listFiles,
-  readFile, listDirectory, grep, fileSearch, editFile, codebaseSearch 
+  readFile, listDirectory, grep, fileSearch, editFile, codebaseSearch, formatReadFileResult
 } from "@/lib/tools/file-operations";
 import { 
   getToolsForMode, 
@@ -177,7 +177,7 @@ async function executeToolCall(
         if (context.reviewMode && context.reviewState) {
           const f = await ensureLoadedFile(context.reviewState, args.path, context.projectId);
           if (f.status === "deleted") return { error: `File '${args.path}' not found.` };
-          return { path: args.path, content: f.content ?? "" };
+          return formatReadFileResult(args.path, f.content ?? "");
         }
         return await readFile(args.path, context.projectId);
       case "list_directory":
@@ -204,7 +204,7 @@ async function executeToolCall(
         }
         return await listFiles(context.projectId);
       case "grep":
-        return await grep(args.pattern, args.path, context.projectId);
+        return await grep(args.pattern, args.path, context.projectId, args.caseSensitive);
       case "file_search":
         return await fileSearch(args.query, context.projectId);
       case "codebase_search":
