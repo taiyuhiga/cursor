@@ -291,6 +291,182 @@ async function executeToolCall(
   }
 }
 
+function summarizeToolArgs(name: string, args: any) {
+  if (!args || typeof args !== "object") return undefined;
+  switch (name) {
+    case "read_file":
+    case "update_file":
+    case "delete_file":
+    case "edit_file":
+    case "create_file":
+    case "create_folder":
+    case "list_directory":
+      return { path: args.path };
+    case "list_files":
+      return undefined;
+    case "grep":
+      return { pattern: args.pattern, path: args.path };
+    case "codebase_search":
+      return { query: args.query, filePattern: args.filePattern };
+    case "file_search":
+      return { query: args.query };
+    case "web_search":
+      return { query: args.query };
+    default:
+      return args;
+  }
+}
+
+const MAX_TOOL_OUTPUT_CHARS = 2000;
+
+function truncateToolOutput(value: string) {
+  if (value.length <= MAX_TOOL_OUTPUT_CHARS) return value;
+  return `${value.slice(0, MAX_TOOL_OUTPUT_CHARS)}\n... (truncated)`;
+}
+
+function formatToolCommand(name: string, args: any) {
+  const safeArgs = args && typeof args === "object" ? args : {};
+  const path = safeArgs.path ? String(safeArgs.path) : "";
+  const query = safeArgs.query ? String(safeArgs.query) : "";
+  const pattern = safeArgs.pattern ? String(safeArgs.pattern) : "";
+  const filePattern = safeArgs.filePattern ? String(safeArgs.filePattern) : "";
+  const caseSensitive = Boolean(safeArgs.caseSensitive);
+
+  switch (name) {
+    case "read_file":
+      return path ? `cat ${path}` : "cat";
+    case "list_directory":
+      return path ? `ls ${path}` : "ls";
+    case "list_files":
+      return "ls";
+    case "grep": {
+      const flag = caseSensitive ? "" : "-i ";
+      const scope = path ? ` ${path}` : "";
+      return `rg ${flag}"${pattern}"${scope}`.trim();
+    }
+    case "file_search":
+      return query ? `fd "${query}"` : "fd";
+    case "codebase_search": {
+      const glob = filePattern ? ` -g "${filePattern}"` : "";
+      return query ? `rg "${query}"${glob}` : "rg";
+    }
+    case "web_search":
+      return query ? `web_search "${query}"` : "web_search";
+    default:
+      return undefined;
+  }
+}
+
+function formatToolOutput(name: string, result: any) {
+  if (!result) return undefined;
+  if (result.error) return truncateToolOutput(`Error: ${result.error}`);
+
+  let output = "";
+  switch (name) {
+    case "read_file": {
+      const isImage = Boolean(result.isImage);
+      if (isImage) {
+        const mimeType = result.mimeType ? String(result.mimeType) : "binary";
+        return `[image file: ${mimeType}]`;
+      }
+      if (typeof result.content === "string") {
+        output = result.content;
+      }
+      break;
+    }
+    case "list_directory": {
+      const entries = Array.isArray(result.entries) ? result.entries : [];
+      output = entries
+        .map((entry) => {
+          if (!entry?.name) return "";
+          return entry.type === "folder" ? `${entry.name}/` : String(entry.name);
+        })
+        .filter(Boolean)
+        .join("\n");
+      break;
+    }
+    case "list_files": {
+      const list = Array.isArray(result) ? result : [];
+      output = list
+        .map((item) => item?.path || item?.name || "")
+        .filter(Boolean)
+        .join("\n");
+      break;
+    }
+    case "grep": {
+      const results = Array.isArray(result.results) ? result.results : [];
+      const lines = results.map((item) => `${item.path}:${item.lineNumber}:${item.line}`);
+      output = lines.join("\n");
+      if (result.matchCount && result.matchCount > results.length) {
+        output = `${output}\n... and ${result.matchCount - results.length} more`;
+      }
+      break;
+    }
+    case "file_search": {
+      const results = Array.isArray(result.results) ? result.results : [];
+      output = results.map((item) => item.path).filter(Boolean).join("\n");
+      break;
+    }
+    case "codebase_search": {
+      const results = Array.isArray(result.results) ? result.results : [];
+      output = results
+        .map((item) => {
+          if (!item?.path) return "";
+          const snippet = String(item.relevantSnippet || "").trim();
+          if (!snippet) return String(item.path);
+          const indented = snippet
+            .split("\n")
+            .map((line) => `  ${line}`)
+            .join("\n");
+          return `${item.path}\n${indented}`;
+        })
+        .filter(Boolean)
+        .join("\n\n");
+      break;
+    }
+    case "web_search": {
+      const results = Array.isArray(result.results) ? result.results : [];
+      output = results
+        .map((item) => {
+          const title = item?.title ? String(item.title) : "Result";
+          const url = item?.url ? String(item.url) : "";
+          const snippet = item?.snippet ? String(item.snippet) : "";
+          return [title, url, snippet].filter(Boolean).join("\n");
+        })
+        .filter(Boolean)
+        .join("\n\n");
+      break;
+    }
+    default:
+      output = "";
+  }
+
+  if (!output) {
+    switch (name) {
+      case "read_file":
+        output = "(empty file)";
+        break;
+      case "list_directory":
+      case "list_files":
+        output = "(empty)";
+        break;
+      case "grep":
+      case "file_search":
+      case "codebase_search":
+        output = "No matches";
+        break;
+      case "web_search":
+        output = "No results";
+        break;
+      default:
+        output = "";
+    }
+  }
+
+  if (!output) return undefined;
+  return truncateToolOutput(output);
+}
+
 // Auto Mode: モデルの自動選択ロジック
 function selectAutoModel(apiKeys: any): { model: string; provider: string } {
   // 優先順位: Claude Opus > GPT-5.2 > Gemini 3 Pro
@@ -319,7 +495,17 @@ const MAX_MODE_TOKENS: Record<string, number> = {
 const DEFAULT_MAX_TOKENS = 4096;
 const MAX_MODE_OUTPUT_TOKENS = 8192;
 
-type ToolCallHistoryItem = { tool: string; args: any; result: any };
+type ToolCallHistoryItem = { tool: string; args: any; result: any; durationMs?: number };
+
+type ThoughtTraceStep = {
+  type: "thought" | "tool";
+  durationMs?: number;
+  tool?: string;
+  args?: any;
+  status?: "success" | "error";
+  command?: string;
+  output?: string;
+};
 
 async function callOpenAI(apiKey: string, model: string, prompt: string, systemPrompt: string, images?: string[], maxMode?: boolean) {
   const userContent: any[] = [{ type: "text", text: prompt }];
@@ -369,9 +555,10 @@ async function callOpenAIWithTools(params: {
   tools: any[];
   allowedToolNames: Set<string>;
   context: { projectId?: string; reviewMode?: boolean; reviewState?: ReviewState; mode?: AgentMode };
-}): Promise<{ content: string; toolCalls: ToolCallHistoryItem[] }> {
+}): Promise<{ content: string; toolCalls: ToolCallHistoryItem[]; thoughtTrace: ThoughtTraceStep[] }> {
   const { apiKey, model, prompt, systemPrompt, images, maxMode, tools, allowedToolNames, context } = params;
   const toolCallHistory: ToolCallHistoryItem[] = [];
+  const thoughtTrace: ThoughtTraceStep[] = [];
 
   const userContent: any[] = [{ type: "text", text: prompt }];
   if (images && images.length > 0) {
@@ -387,6 +574,7 @@ async function callOpenAIWithTools(params: {
 
   let maxIterations = 25;
   while (maxIterations > 0) {
+    const thoughtStart = Date.now();
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -408,12 +596,14 @@ async function callOpenAIWithTools(params: {
     }
 
     const data = await res.json();
+    const thoughtMs = Date.now() - thoughtStart;
+    thoughtTrace.push({ type: "thought", durationMs: thoughtMs });
     const msg = data.choices?.[0]?.message;
     if (!msg) throw new Error("OpenAI API Error: missing message");
 
     const toolCalls = msg.tool_calls as Array<any> | undefined;
     if (!toolCalls || toolCalls.length === 0) {
-      return { content: msg.content || "", toolCalls: toolCallHistory };
+      return { content: msg.content || "", toolCalls: toolCallHistory, thoughtTrace };
     }
 
     // assistant message with tool_calls
@@ -441,20 +631,31 @@ async function callOpenAIWithTools(params: {
 
       if (!allowedToolNames.has(name)) {
         const err = { error: "This tool is not allowed in the current mode." };
+        const summaryArgs = summarizeToolArgs(name, args);
+        const command = formatToolCommand(name, args);
+        const output = formatToolOutput(name, err);
         toolCallHistory.push({ tool: name, args, result: err });
+        thoughtTrace.push({ type: "tool", tool: name, args: summaryArgs, status: "error", command, output });
         messages.push({ role: "tool", tool_call_id: toolCallId, content: JSON.stringify(err) });
         continue;
       }
 
+      const toolStart = Date.now();
       const toolResult = await executeToolCall(name, args, context);
-      toolCallHistory.push({ tool: name, args, result: toolResult });
+      const toolMs = Date.now() - toolStart;
+      const toolStatus = toolResult?.error ? "error" : "success";
+      const summaryArgs = summarizeToolArgs(name, args);
+      const command = formatToolCommand(name, args);
+      const output = formatToolOutput(name, toolResult);
+      toolCallHistory.push({ tool: name, args, result: toolResult, durationMs: toolMs });
+      thoughtTrace.push({ type: "tool", tool: name, args: summaryArgs, durationMs: toolMs, status: toolStatus, command, output });
       messages.push({ role: "tool", tool_call_id: toolCallId, content: JSON.stringify(toolResult) });
     }
 
     maxIterations--;
   }
 
-  return { content: "Tool call loop exceeded maximum iterations.", toolCalls: toolCallHistory };
+  return { content: "Tool call loop exceeded maximum iterations.", toolCalls: toolCallHistory, thoughtTrace };
 }
 
 async function callAnthropic(apiKey: string, model: string, prompt: string, systemPrompt: string, images?: string[], maxMode?: boolean) {
@@ -514,9 +715,10 @@ async function callAnthropicWithTools(params: {
   tools: any[];
   allowedToolNames: Set<string>;
   context: { projectId?: string; reviewMode?: boolean; reviewState?: ReviewState; mode?: AgentMode };
-}): Promise<{ content: string; toolCalls: ToolCallHistoryItem[] }> {
+}): Promise<{ content: string; toolCalls: ToolCallHistoryItem[]; thoughtTrace: ThoughtTraceStep[] }> {
   const { apiKey, model, prompt, systemPrompt, images, maxMode, tools, allowedToolNames, context } = params;
   const toolCallHistory: ToolCallHistoryItem[] = [];
+  const thoughtTrace: ThoughtTraceStep[] = [];
 
   const baseUserContent: any[] = [];
   if (images && images.length > 0) {
@@ -536,6 +738,7 @@ async function callAnthropicWithTools(params: {
 
   let maxIterations = 25;
   while (maxIterations > 0) {
+    const thoughtStart = Date.now();
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
@@ -559,6 +762,8 @@ async function callAnthropicWithTools(params: {
     }
 
     const data = await res.json();
+    const thoughtMs = Date.now() - thoughtStart;
+    thoughtTrace.push({ type: "thought", durationMs: thoughtMs });
     const contentBlocks: any[] = data.content || [];
     const toolUses = contentBlocks.filter((b) => b.type === "tool_use");
 
@@ -570,7 +775,7 @@ async function callAnthropicWithTools(params: {
         .filter((b) => b.type === "text")
         .map((b) => b.text)
         .join("");
-      return { content: text, toolCalls: toolCallHistory };
+      return { content: text, toolCalls: toolCallHistory, thoughtTrace };
     }
 
     const toolResults: any[] = [];
@@ -581,13 +786,24 @@ async function callAnthropicWithTools(params: {
 
       if (!allowedToolNames.has(name)) {
         const err = { error: "This tool is not allowed in the current mode." };
+        const summaryArgs = summarizeToolArgs(name, input);
+        const command = formatToolCommand(name, input);
+        const output = formatToolOutput(name, err);
         toolCallHistory.push({ tool: name, args: input, result: err });
+        thoughtTrace.push({ type: "tool", tool: name, args: summaryArgs, status: "error", command, output });
         toolResults.push({ type: "tool_result", tool_use_id: toolUseId, content: JSON.stringify(err) });
         continue;
       }
 
+      const toolStart = Date.now();
       const toolResult = await executeToolCall(name, input, context);
-      toolCallHistory.push({ tool: name, args: input, result: toolResult });
+      const toolMs = Date.now() - toolStart;
+      const toolStatus = toolResult?.error ? "error" : "success";
+      const summaryArgs = summarizeToolArgs(name, input);
+      const command = formatToolCommand(name, input);
+      const output = formatToolOutput(name, toolResult);
+      toolCallHistory.push({ tool: name, args: input, result: toolResult, durationMs: toolMs });
+      thoughtTrace.push({ type: "tool", tool: name, args: summaryArgs, durationMs: toolMs, status: toolStatus, command, output });
       toolResults.push({ type: "tool_result", tool_use_id: toolUseId, content: JSON.stringify(toolResult) });
     }
 
@@ -595,7 +811,7 @@ async function callAnthropicWithTools(params: {
     maxIterations--;
   }
 
-  return { content: "Tool call loop exceeded maximum iterations.", toolCalls: toolCallHistory };
+  return { content: "Tool call loop exceeded maximum iterations.", toolCalls: toolCallHistory, thoughtTrace };
 }
 
 // Helper function for calling a single model (used by Multiple Models mode)
@@ -688,11 +904,14 @@ export async function POST(req: NextRequest) {
     // Use Multiple Models: 複数モデルに並列リクエスト
     if (useMultipleModels && selectedModels.length > 0) {
       const modelPromises = selectedModels.map(async (modelId: string) => {
+        const startedAt = Date.now();
         try {
           const result = await callSingleModel(modelId, prompt, fileText, apiKeys, mode, images, maxMode);
-          return { model: modelId, content: result, error: null };
+          const durationMs = Date.now() - startedAt;
+          return { model: modelId, content: result, error: null, thoughtTrace: [{ type: "thought", durationMs }] };
         } catch (error: any) {
-          return { model: modelId, content: null, error: error.message };
+          const durationMs = Date.now() - startedAt;
+          return { model: modelId, content: null, error: error.message, thoughtTrace: [{ type: "thought", durationMs }] };
         }
       });
 
@@ -758,7 +977,7 @@ When generating code:
         return NextResponse.json({ error: "OpenAI API Key is missing. Please set it in Settings or .env.local." }, { status: 400 });
       }
       const openaiTools = toOpenAITools(enabledTools);
-      const { content, toolCalls } = await callOpenAIWithTools({
+      const { content, toolCalls, thoughtTrace } = await callOpenAIWithTools({
         apiKey: openaiKey,
         model: effectiveModel,
         prompt,
@@ -774,6 +993,7 @@ When generating code:
         content, 
         usedModel: effectiveModel,
         toolCalls,
+        thoughtTrace,
         proposedChanges,
       });
     } 
@@ -783,7 +1003,7 @@ When generating code:
         return NextResponse.json({ error: "Anthropic API Key is missing. Please set it in Settings or .env.local." }, { status: 400 });
       }
       const anthropicTools = toAnthropicTools(enabledTools);
-      const { content, toolCalls } = await callAnthropicWithTools({
+      const { content, toolCalls, thoughtTrace } = await callAnthropicWithTools({
         apiKey: anthropicKey,
         model: effectiveModel,
         prompt,
@@ -799,6 +1019,7 @@ When generating code:
         content, 
         usedModel: effectiveModel,
         toolCalls,
+        thoughtTrace,
         proposedChanges,
       });
     } 
@@ -851,7 +1072,10 @@ When generating code:
         }
       }
 
+      const thoughtTrace: ThoughtTraceStep[] = [];
+      const thoughtStart = Date.now();
       const result = await chat.sendMessage(messageParts);
+      thoughtTrace.push({ type: "thought", durationMs: Date.now() - thoughtStart });
       const response = result.response;
       
       // Function Callingの処理（複数回のツール呼び出しをサポート）
@@ -874,6 +1098,9 @@ When generating code:
 
           if (!allowedToolNames.has(name)) {
             const err = { error: "This tool is not allowed in the current mode." };
+            const summaryArgs = summarizeToolArgs(name, args);
+            const command = formatToolCommand(name, args);
+            const output = formatToolOutput(name, err);
             functionResponses.push({
               functionResponse: {
                 name,
@@ -881,12 +1108,20 @@ When generating code:
               },
             });
             toolCallHistory.push({ tool: name, args, result: err });
+            thoughtTrace.push({ type: "tool", tool: name, args: summaryArgs, status: "error", command, output });
             continue;
           }
           
           // ツール実行
+          const toolStart = Date.now();
           const toolResult = await executeToolCall(name, args, { projectId, reviewMode: effectiveReviewMode, reviewState, mode });
-          toolCallHistory.push({ tool: name, args, result: toolResult });
+          const toolMs = Date.now() - toolStart;
+          const toolStatus = toolResult?.error ? "error" : "success";
+          const summaryArgs = summarizeToolArgs(name, args);
+          const command = formatToolCommand(name, args);
+          const output = formatToolOutput(name, toolResult);
+          toolCallHistory.push({ tool: name, args, result: toolResult, durationMs: toolMs });
+          thoughtTrace.push({ type: "tool", tool: name, args: summaryArgs, durationMs: toolMs, status: toolStatus, command, output });
           
           functionResponses.push({
             functionResponse: {
@@ -897,7 +1132,9 @@ When generating code:
         }
         
         // ツール実行結果をAIに返す
+        const nextThoughtStart = Date.now();
         const nextResult = await chat.sendMessage(functionResponses);
+        thoughtTrace.push({ type: "thought", durationMs: Date.now() - nextThoughtStart });
         currentResponse = nextResult.response;
         maxIterations--;
       }
@@ -910,6 +1147,7 @@ When generating code:
         content: finalContent, 
         usedModel: effectiveModel,
         toolCalls: toolCallHistory,
+        thoughtTrace,
         proposedChanges,
       });
     }

@@ -15,6 +15,17 @@ type ToolCall = {
   tool: string;
   args: any;
   result: any;
+  durationMs?: number;
+};
+
+type ThoughtTraceStep = {
+  type: "thought" | "tool";
+  durationMs?: number;
+  tool?: string;
+  args?: any;
+  status?: "success" | "error";
+  command?: string;
+  output?: string;
 };
 
 type Message = {
@@ -22,9 +33,11 @@ type Message = {
   role: "user" | "assistant";
   content: string;
   isError?: boolean;
+  isPending?: boolean;
   created_at?: string;
   images?: string[]; // Base64 画像の配列
   toolCalls?: ToolCall[]; // AIが使用したツール呼び出し
+  thoughtTrace?: ThoughtTraceStep[];
 };
 
 type ChatSession = {
@@ -87,6 +100,8 @@ const DEFAULT_MODELS: ModelConfig[] = [
   { id: "gpt-5.2-extra-high", name: "GPT-5.2 Extra High", provider: "openai", enabled: true },
 ];
 
+const THOUGHT_TRACE_STORAGE_PREFIX = "cursor_thought_trace:";
+
 export const AiPanel = forwardRef<AiPanelHandle, Props>(({
   projectId,
   currentFileText,
@@ -121,6 +136,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
   const [messages, setMessages] = useState<Message[]>([]);
   const [prompt, setPrompt] = useState("");
   const [loading, setLoading] = useState(false);
+  const [pendingAssistantId, setPendingAssistantId] = useState<string | null>(null);
   const [selectedModel, setSelectedModel] = useState<string>("gemini-3-pro-preview");
   const [availableModels, setAvailableModels] = useState<ModelConfig[]>(DEFAULT_MODELS);
   const [mode, setMode] = useState<"agent" | "plan" | "ask">("agent");
@@ -243,6 +259,31 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const getThoughtTraceKey = (messageId: string) => `${THOUGHT_TRACE_STORAGE_PREFIX}${messageId}`;
+
+  const loadStoredThoughtTrace = (messageId: string): ThoughtTraceStep[] | undefined => {
+    if (typeof window === "undefined") return undefined;
+    const raw = localStorage.getItem(getThoughtTraceKey(messageId));
+    if (!raw) return undefined;
+    try {
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return undefined;
+      return parsed as ThoughtTraceStep[];
+    } catch {
+      return undefined;
+    }
+  };
+
+  const storeThoughtTrace = (messageId: string, trace?: ThoughtTraceStep[]) => {
+    if (typeof window === "undefined") return;
+    if (!trace || trace.length === 0) return;
+    try {
+      localStorage.setItem(getThoughtTraceKey(messageId), JSON.stringify(trace));
+    } catch {
+      // Ignore storage quota errors.
+    }
+  };
+
   // Load messages for current session
   useEffect(() => {
     async function loadMessages() {
@@ -250,6 +291,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
       if (isSubmittingRef.current) {
         return;
       }
+      setPendingAssistantId(null);
       
       // 一時的なタブID（new-で始まる）またはnullの場合はメッセージをクリア
       if (!currentSessionId || currentSessionId.startsWith("new-")) {
@@ -279,14 +321,45 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
         .order("created_at", { ascending: true });
 
       if (!error && data) {
-        const loaded = data.map(m => ({
-          id: m.id,
-          role: m.role as "user" | "assistant",
-          content: m.content,
-          created_at: m.created_at,
-          images: m.images || undefined,
-        }));
+        const updates: Array<{ id: string; trace: ThoughtTraceStep[] }> = [];
+        const loaded: Message[] = [];
+
+        for (let i = 0; i < data.length; i++) {
+          const m = data[i];
+          const dbTrace = Array.isArray(m.thought_trace) ? (m.thought_trace as ThoughtTraceStep[]) : undefined;
+          const storedTrace = dbTrace ?? loadStoredThoughtTrace(m.id);
+          let thoughtTrace = storedTrace;
+
+          const message: Message = {
+            id: m.id,
+            role: m.role as "user" | "assistant",
+            content: m.content,
+            created_at: m.created_at,
+            images: m.images || undefined,
+          };
+
+          if (message.role === "assistant") {
+            const previousMessage = loaded[i - 1];
+            if (!thoughtTrace || thoughtTrace.length === 0) {
+              thoughtTrace = [{ type: "thought", durationMs: estimateThoughtMs(message, previousMessage) }];
+            }
+            if (!dbTrace && thoughtTrace && thoughtTrace.length > 0) {
+              updates.push({ id: message.id, trace: thoughtTrace });
+            }
+          }
+
+          loaded.push({ ...message, thoughtTrace });
+        }
+
         setMessages(loaded);
+
+        if (updates.length > 0) {
+          void Promise.all(
+            updates.map((update) =>
+              supabase.from("chat_messages").update({ thought_trace: update.trace }).eq("id", update.id)
+            )
+          );
+        }
 
         if (!persisted.headMessageId) {
           setMessageHead(null);
@@ -346,7 +419,13 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
     return data.id;
   };
 
-  const saveMessage = async (sessionId: string, role: "user" | "assistant", content: string, images?: string[]): Promise<string | null> => {
+  const saveMessage = async (
+    sessionId: string,
+    role: "user" | "assistant",
+    content: string,
+    images?: string[],
+    thoughtTrace?: ThoughtTraceStep[]
+  ): Promise<string | null> => {
     const { data, error } = await supabase
       .from("chat_messages")
       .insert({
@@ -354,6 +433,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
         role,
         content,
         images: images || null,
+        thought_trace: thoughtTrace ?? null,
       })
       .select("id")
       .single();
@@ -521,6 +601,10 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
         abortControllerRef.current = null;
     }
     setLoading(false);
+    if (pendingAssistantId) {
+      setMessages(prev => prev.filter(m => m.id !== pendingAssistantId));
+      setPendingAssistantId(null);
+    }
   };
 
   const startEditingMessage = (messageIndex: number) => {
@@ -577,6 +661,8 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
 
     // Optimistic update - 画像も含める（まずは即時表示）
     const tempId = Date.now().toString();
+    const pendingId = `pending-${Date.now().toString(36)}`;
+    setPendingAssistantId(pendingId);
     setMessages((prev) => {
       const base = cutIndex !== null ? prev.slice(0, cutIndex) : prev;
       return [
@@ -586,6 +672,12 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
           role: "user",
           content: promptToSend || "",
           images: imagesToSend.length > 0 ? imagesToSend.map((img) => img.preview) : undefined,
+        },
+        {
+          id: pendingId,
+          role: "assistant",
+          content: "",
+          isPending: true,
         },
       ];
     });
@@ -618,7 +710,8 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
         activeSessionId = await createNewSession(promptToSend || "Image", tempTabId || undefined);
         if (!activeSessionId) {
           // セッション作成に失敗した場合はUIをロールバック
-          setMessages((prev) => prev.filter((m) => m.id !== tempId));
+          setMessages((prev) => prev.filter((m) => m.id !== tempId && m.id !== pendingId));
+          setPendingAssistantId(null);
           if (!customPrompt) setPrompt(promptToSend);
           setAttachedImages(imagesToSend);
           return;
@@ -670,6 +763,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
 
       // Initialize AbortController
       abortControllerRef.current = new AbortController();
+      const requestStartedAt = Date.now();
 
       const res = await fetch("/api/ai", {
         method: "POST",
@@ -700,10 +794,20 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
       }
 
       const data = await res.json();
+      const responseDurationMs = Date.now() - requestStartedAt;
       
       if (data.error) {
-        setMessages(prev => [...prev, { id: Date.now().toString(), role: "assistant", content: `Error: ${data.error}`, isError: true }]);
+        setMessages(prev =>
+          prev.map(m =>
+            m.id === pendingId
+              ? { ...m, content: `Error: ${data.error}`, isError: true, isPending: false }
+              : m
+          )
+        );
+        setPendingAssistantId(null);
       } else if (data.multipleResults) {
+        setMessages(prev => prev.filter(m => m.id !== pendingId));
+        setPendingAssistantId(null);
         // Multiple Models mode: 複数の結果を表示
         for (const result of data.multipleResults) {
           const modelName = availableModels.find(m => m.id === result.model)?.name || result.model;
@@ -712,7 +816,8 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
               id: Date.now().toString() + result.model, 
               role: "assistant", 
               content: `**[${modelName}]** Error: ${result.error}`,
-              isError: true 
+              isError: true,
+              thoughtTrace: Array.isArray(result.thoughtTrace) ? result.thoughtTrace : undefined,
             }]);
           } else {
             const tempAssistantId = Date.now().toString() + result.model;
@@ -721,12 +826,17 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
               { 
                 id: tempAssistantId, 
                 role: "assistant", 
-                content: `**[${modelName}]**\n\n${result.content}` 
+                content: `**[${modelName}]**\n\n${result.content}`,
+                thoughtTrace: Array.isArray(result.thoughtTrace) ? result.thoughtTrace : undefined,
               }
             ]);
-            const savedAssistantId = await saveMessage(activeSessionId, "assistant", `**[${modelName}]**\n\n${result.content}`);
+            const thoughtTrace = Array.isArray(result.thoughtTrace) ? result.thoughtTrace : undefined;
+            const savedAssistantId = await saveMessage(activeSessionId, "assistant", `**[${modelName}]**\n\n${result.content}`, undefined, thoughtTrace);
             if (savedAssistantId) {
               setMessages(prev => prev.map(m => m.id === tempAssistantId ? { ...m, id: savedAssistantId } : m));
+              if (thoughtTrace) {
+                storeThoughtTrace(savedAssistantId, thoughtTrace);
+              }
             }
           }
         }
@@ -737,19 +847,25 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
           : null;
         const prefix = autoMode && usedModelName ? `*[Auto: ${usedModelName}]*\n\n` : "";
         const assistantMsg = prefix + data.content;
-        const tempAssistantMsgId = Date.now().toString();
         const toolCalls = Array.isArray(data.toolCalls) ? data.toolCalls : undefined;
-        setMessages(prev => [...prev, { 
-          id: tempAssistantMsgId, 
-          role: "assistant", 
-          content: assistantMsg,
-          toolCalls,
-        }]);
-        const savedAssistantMsgId = await saveMessage(activeSessionId, "assistant", assistantMsg);
-        const finalAssistantMsgId = savedAssistantMsgId ?? tempAssistantMsgId;
+        const rawThoughtTrace = Array.isArray(data.thoughtTrace) ? data.thoughtTrace : undefined;
+        const thoughtTrace = rawThoughtTrace && rawThoughtTrace.length > 0
+          ? rawThoughtTrace
+          : [{ type: "thought", durationMs: responseDurationMs }];
+        setMessages(prev =>
+          prev.map(m =>
+            m.id === pendingId
+              ? { ...m, content: assistantMsg, toolCalls, thoughtTrace, isPending: false }
+              : m
+          )
+        );
+        const savedAssistantMsgId = await saveMessage(activeSessionId, "assistant", assistantMsg, undefined, thoughtTrace);
+        const finalAssistantMsgId = savedAssistantMsgId ?? pendingId;
         if (savedAssistantMsgId) {
-          setMessages(prev => prev.map(m => m.id === tempAssistantMsgId ? { ...m, id: savedAssistantMsgId } : m));
+          setMessages(prev => prev.map(m => m.id === pendingId ? { ...m, id: savedAssistantMsgId } : m));
+          storeThoughtTrace(savedAssistantMsgId, thoughtTrace);
         }
+        setPendingAssistantId(null);
 
         // Review UI: 提案された変更がある場合はレビュー画面を開く（Cursor-like）
         if (onRequestReview && Array.isArray(data.proposedChanges) && data.proposedChanges.length > 0) {
@@ -780,17 +896,25 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
       if (error.name === 'AbortError') {
           // Stopped by user, do nothing or add a "Stopped" message if desired
       } else {
-          setMessages(prev => [...prev, { id: Date.now().toString(), role: "assistant", content: `Error: ${error}`, isError: true }]);
+          setMessages(prev =>
+            prev.map(m =>
+              m.id === pendingId
+                ? { ...m, content: `Error: ${error}`, isError: true, isPending: false }
+                : m
+            )
+          );
       }
     } finally {
         setLoading(false);
         abortControllerRef.current = null;
         isSubmittingRef.current = false; // 送信完了
+        setPendingAssistantId(null);
     }
   };
 
   const submitFromPreviousMessage = async (opts: { revert: boolean }) => {
     if (editingMessageIndex === null) return;
+    let pendingId: string | null = null;
     if (!currentSessionId || currentSessionId.startsWith("new-")) {
       // New Chat状態では通常送信にフォールバック
       cancelEditingMessage();
@@ -899,11 +1023,24 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
       setSubmitPrevDontAskAgain(false);
       setPrompt("");
 
+      pendingId = `pending-${Date.now().toString(36)}`;
+      setPendingAssistantId(pendingId);
+      setMessages(prev => [
+        ...prev,
+        {
+          id: pendingId!,
+          role: "assistant",
+          content: "",
+          isPending: true,
+        },
+      ]);
+
       // Build context
       const fileContext = await buildContextFromMentions(promptToSend);
       const fullPrompt = fileContext + promptToSend;
       const apiKeys = JSON.parse(localStorage.getItem("cursor_api_keys") || "{}");
 
+      const requestStartedAt = Date.now();
       const res = await fetch("/api/ai", {
         method: "POST",
         body: JSON.stringify({
@@ -931,10 +1068,20 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
       }
 
       const data = await res.json();
+      const responseDurationMs = Date.now() - requestStartedAt;
 
       if (data.error) {
-        setMessages(prev => [...prev, { id: Date.now().toString(), role: "assistant", content: `Error: ${data.error}`, isError: true }]);
+        setMessages(prev =>
+          prev.map(m =>
+            m.id === pendingId
+              ? { ...m, content: `Error: ${data.error}`, isError: true, isPending: false }
+              : m
+          )
+        );
+        setPendingAssistantId(null);
       } else if (data.multipleResults) {
+        setMessages(prev => prev.filter(m => m.id !== pendingId));
+        setPendingAssistantId(null);
         for (const result of data.multipleResults) {
           const modelName = availableModels.find(m => m.id === result.model)?.name || result.model;
           if (result.error) {
@@ -942,7 +1089,8 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
               id: Date.now().toString() + result.model, 
               role: "assistant", 
               content: `**[${modelName}]** Error: ${result.error}`,
-              isError: true 
+              isError: true,
+              thoughtTrace: Array.isArray(result.thoughtTrace) ? result.thoughtTrace : undefined,
             }]);
           } else {
             const tempAssistantId = Date.now().toString() + result.model;
@@ -951,12 +1099,17 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
               { 
                 id: tempAssistantId, 
                 role: "assistant", 
-                content: `**[${modelName}]**\n\n${result.content}` 
+                content: `**[${modelName}]**\n\n${result.content}`,
+                thoughtTrace: Array.isArray(result.thoughtTrace) ? result.thoughtTrace : undefined,
               }
             ]);
-            const savedAssistantId = await saveMessage(activeSessionId, "assistant", `**[${modelName}]**\n\n${result.content}`);
+            const thoughtTrace = Array.isArray(result.thoughtTrace) ? result.thoughtTrace : undefined;
+            const savedAssistantId = await saveMessage(activeSessionId, "assistant", `**[${modelName}]**\n\n${result.content}`, undefined, thoughtTrace);
             if (savedAssistantId) {
               setMessages(prev => prev.map(m => m.id === tempAssistantId ? { ...m, id: savedAssistantId } : m));
+              if (thoughtTrace) {
+                storeThoughtTrace(savedAssistantId, thoughtTrace);
+              }
             }
           }
         }
@@ -966,15 +1119,26 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
           : null;
         const prefix = autoMode && usedModelName ? `*[Auto: ${usedModelName}]*\n\n` : "";
         const assistantMsg = prefix + data.content;
-        const tempAssistantMsgId = Date.now().toString();
         const toolCalls = Array.isArray(data.toolCalls) ? data.toolCalls : undefined;
+        const rawThoughtTrace = Array.isArray(data.thoughtTrace) ? data.thoughtTrace : undefined;
+        const thoughtTrace = rawThoughtTrace && rawThoughtTrace.length > 0
+          ? rawThoughtTrace
+          : [{ type: "thought", durationMs: responseDurationMs }];
 
-        setMessages(prev => [...prev, { id: tempAssistantMsgId, role: "assistant", content: assistantMsg, toolCalls }]);
-        const savedAssistantMsgId = await saveMessage(activeSessionId, "assistant", assistantMsg);
-        const finalAssistantMsgId = savedAssistantMsgId ?? tempAssistantMsgId;
+        setMessages(prev =>
+          prev.map(m =>
+            m.id === pendingId
+              ? { ...m, content: assistantMsg, toolCalls, thoughtTrace, isPending: false }
+              : m
+          )
+        );
+        const savedAssistantMsgId = await saveMessage(activeSessionId, "assistant", assistantMsg, undefined, thoughtTrace);
+        const finalAssistantMsgId = savedAssistantMsgId ?? pendingId;
         if (savedAssistantMsgId) {
-          setMessages(prev => prev.map(m => m.id === tempAssistantMsgId ? { ...m, id: savedAssistantMsgId } : m));
+          setMessages(prev => prev.map(m => m.id === pendingId ? { ...m, id: savedAssistantMsgId } : m));
+          storeThoughtTrace(savedAssistantMsgId, thoughtTrace);
         }
+        setPendingAssistantId(null);
 
         // Review UI: 提案された変更がある場合はレビュー画面を開く（Cursor-like）
         if (onRequestReview && Array.isArray(data.proposedChanges) && data.proposedChanges.length > 0) {
@@ -1000,12 +1164,23 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
       if (error.name === "AbortError") {
         // Stopped by user
       } else {
-        setMessages(prev => [...prev, { id: Date.now().toString(), role: "assistant", content: `Error: ${error}`, isError: true }]);
+        if (pendingId) {
+          setMessages(prev =>
+            prev.map(m =>
+              m.id === pendingId
+                ? { ...m, content: `Error: ${error}`, isError: true, isPending: false }
+                : m
+            )
+          );
+        } else {
+          setMessages(prev => [...prev, { id: Date.now().toString(), role: "assistant", content: `Error: ${error}`, isError: true }]);
+        }
       }
     } finally {
       setLoading(false);
       abortControllerRef.current = null;
       isSubmittingRef.current = false;
+      setPendingAssistantId(null);
     }
   };
 
@@ -1245,6 +1420,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
       role: msg.role,
       content: msg.content,
       images: msg.images || null,
+      thought_trace: msg.thoughtTrace || null,
     }));
     
     await supabase.from("chat_messages").insert(messagesToCopy);
@@ -1868,14 +2044,6 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
     }
   };
 
-  const safeJSONStringify = (value: any) => {
-    try {
-      return JSON.stringify(value, null, 2);
-    } catch {
-      return String(value);
-    }
-  };
-
   const getToolIcon = (toolName: string, className?: string) => {
     switch (toolName) {
       case "web_search":
@@ -1896,6 +2064,274 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
       default:
         return <Icons.File className={className} />;
     }
+  };
+
+  const formatDuration = (durationMs?: number) => {
+    if (!durationMs || !Number.isFinite(durationMs)) return null;
+    const seconds = Math.max(1, Math.round(durationMs / 1000));
+    return `${seconds}s`;
+  };
+
+  const MAX_TOOL_OUTPUT_CHARS = 2000;
+
+  const truncateToolOutput = (value: string) => {
+    if (value.length <= MAX_TOOL_OUTPUT_CHARS) return value;
+    return `${value.slice(0, MAX_TOOL_OUTPUT_CHARS)}\n... (truncated)`;
+  };
+
+  const formatToolCommand = (tool?: string, args?: any) => {
+    if (!tool) return undefined;
+    const safeArgs = args && typeof args === "object" ? args : {};
+    const path = safeArgs.path ? String(safeArgs.path) : "";
+    const query = safeArgs.query ? String(safeArgs.query) : "";
+    const pattern = safeArgs.pattern ? String(safeArgs.pattern) : "";
+    const filePattern = safeArgs.filePattern ? String(safeArgs.filePattern) : "";
+    const caseSensitive = Boolean(safeArgs.caseSensitive);
+
+    switch (tool) {
+      case "read_file":
+        return path ? `cat ${path}` : "cat";
+      case "list_directory":
+        return path ? `ls ${path}` : "ls";
+      case "list_files":
+        return "ls";
+      case "grep": {
+        const flag = caseSensitive ? "" : "-i ";
+        const scope = path ? ` ${path}` : "";
+        return `rg ${flag}"${pattern}"${scope}`.trim();
+      }
+      case "file_search":
+        return query ? `fd "${query}"` : "fd";
+      case "codebase_search": {
+        const glob = filePattern ? ` -g "${filePattern}"` : "";
+        return query ? `rg "${query}"${glob}` : "rg";
+      }
+      case "web_search":
+        return query ? `web_search "${query}"` : "web_search";
+      default:
+        return undefined;
+    }
+  };
+
+  const formatToolOutput = (tool?: string, result?: any) => {
+    if (!tool || !result) return undefined;
+    if (result.error) return truncateToolOutput(`Error: ${result.error}`);
+
+    let output = "";
+    switch (tool) {
+      case "read_file": {
+        const isImage = Boolean(result.isImage);
+        if (isImage) {
+          const mimeType = result.mimeType ? String(result.mimeType) : "binary";
+          return `[image file: ${mimeType}]`;
+        }
+        if (typeof result.content === "string") {
+          output = result.content;
+        }
+        break;
+      }
+      case "list_directory": {
+        const entries = Array.isArray(result.entries) ? result.entries : [];
+        output = entries
+          .map((entry) => {
+            if (!entry?.name) return "";
+            return entry.type === "folder" ? `${entry.name}/` : String(entry.name);
+          })
+          .filter(Boolean)
+          .join("\n");
+        break;
+      }
+      case "list_files": {
+        const list = Array.isArray(result) ? result : [];
+        output = list
+          .map((item) => item?.path || item?.name || "")
+          .filter(Boolean)
+          .join("\n");
+        break;
+      }
+      case "grep": {
+        const results = Array.isArray(result.results) ? result.results : [];
+        const lines = results.map((item) => `${item.path}:${item.lineNumber}:${item.line}`);
+        output = lines.join("\n");
+        if (result.matchCount && result.matchCount > results.length) {
+          output = `${output}\n... and ${result.matchCount - results.length} more`;
+        }
+        break;
+      }
+      case "file_search": {
+        const results = Array.isArray(result.results) ? result.results : [];
+        output = results.map((item) => item.path).filter(Boolean).join("\n");
+        break;
+      }
+      case "codebase_search": {
+        const results = Array.isArray(result.results) ? result.results : [];
+        output = results
+          .map((item) => {
+            if (!item?.path) return "";
+            const snippet = String(item.relevantSnippet || "").trim();
+            if (!snippet) return String(item.path);
+            const indented = snippet
+              .split("\n")
+              .map((line) => `  ${line}`)
+              .join("\n");
+            return `${item.path}\n${indented}`;
+          })
+          .filter(Boolean)
+          .join("\n\n");
+        break;
+      }
+      case "web_search": {
+        const results = Array.isArray(result.results) ? result.results : [];
+        output = results
+          .map((item) => {
+            const title = item?.title ? String(item.title) : "Result";
+            const url = item?.url ? String(item.url) : "";
+            const snippet = item?.snippet ? String(item.snippet) : "";
+            return [title, url, snippet].filter(Boolean).join("\n");
+          })
+          .filter(Boolean)
+          .join("\n\n");
+        break;
+      }
+      default:
+        output = "";
+    }
+
+    if (!output) {
+      switch (tool) {
+        case "read_file":
+          output = "(empty file)";
+          break;
+        case "list_directory":
+        case "list_files":
+          output = "(empty)";
+          break;
+        case "grep":
+        case "file_search":
+        case "codebase_search":
+          output = "No matches";
+          break;
+        case "web_search":
+          output = "No results";
+          break;
+        default:
+          output = "";
+      }
+    }
+
+    if (!output) return undefined;
+    return truncateToolOutput(output);
+  };
+
+  const truncateLabel = (value: string, maxLength = 60) => {
+    if (value.length <= maxLength) return value;
+    return `${value.slice(0, Math.max(0, maxLength - 3))}...`;
+  };
+
+  const getPathBase = (path?: string) => {
+    if (!path) return "";
+    const parts = String(path).split("/");
+    return parts[parts.length - 1] || String(path);
+  };
+
+  const formatToolLabel = (tool?: string, args?: any) => {
+    const path = args?.path ? String(args.path) : "";
+    const fileName = getPathBase(path);
+    switch (tool) {
+      case "read_file":
+        return fileName ? `Read ${fileName}` : "Read file";
+      case "list_files":
+        return "List files";
+      case "list_directory":
+        return path ? `List ${getPathBase(path)}` : "List directory";
+      case "codebase_search":
+        return args?.query ? `Search codebase: "${truncateLabel(String(args.query), 36)}"` : "Search codebase";
+      case "grep": {
+        const pattern = args?.pattern ? `"${truncateLabel(String(args.pattern), 30)}"` : "";
+        const scope = path ? ` in ${getPathBase(path)}` : "";
+        return `Search ${pattern}${scope}`.trim();
+      }
+      case "file_search":
+        return args?.query ? `Find files: "${truncateLabel(String(args.query), 36)}"` : "Find files";
+      case "web_search":
+        return args?.query ? `Web search: "${truncateLabel(String(args.query), 36)}"` : "Web search";
+      case "create_file":
+        return fileName ? `Create ${fileName}` : "Create file";
+      case "update_file":
+        return fileName ? `Update ${fileName}` : "Update file";
+      case "edit_file":
+        return fileName ? `Edit ${fileName}` : "Edit file";
+      case "delete_file":
+        return fileName ? `Delete ${fileName}` : "Delete file";
+      case "create_folder":
+        return path ? `Create folder ${getPathBase(path)}` : "Create folder";
+      default:
+        return tool ? `Run ${tool}` : "Run tool";
+    }
+  };
+
+  const buildTraceFromToolCalls = (toolCalls?: ToolCall[]): ThoughtTraceStep[] => {
+    if (!toolCalls || toolCalls.length === 0) return [];
+    return toolCalls.map(call => ({
+      type: "tool",
+      tool: call.tool,
+      args: call.args,
+      durationMs: call.durationMs,
+      status: call.result?.error ? "error" : "success",
+      command: formatToolCommand(call.tool, call.args),
+      output: formatToolOutput(call.tool, call.result),
+    }));
+  };
+
+  const estimateThoughtMs = (message: Message, previous?: Message) => {
+    const currentTime = message.created_at ? Date.parse(message.created_at) : null;
+    const prevTime = previous?.created_at ? Date.parse(previous.created_at) : null;
+    if (currentTime && prevTime && Number.isFinite(currentTime) && Number.isFinite(prevTime)) {
+      const delta = currentTime - prevTime;
+      if (delta > 0) {
+        return Math.min(Math.max(delta, 1000), 60000);
+      }
+    }
+    const contentLength = message.content ? message.content.length : 0;
+    const seconds = Math.max(1, Math.min(8, Math.round(contentLength / 200)));
+    return seconds * 1000;
+  };
+
+  const normalizeThoughtTrace = (trace: ThoughtTraceStep[], toolCalls?: ToolCall[]) => {
+    let toolIndex = 0;
+    return trace.map(step => {
+      if (step.type !== "tool") return step;
+      const fallback = toolCalls && toolIndex < toolCalls.length ? toolCalls[toolIndex] : undefined;
+      toolIndex += 1;
+      return {
+        ...step,
+        command: step.command ?? formatToolCommand(step.tool || fallback?.tool, step.args ?? fallback?.args),
+        output: step.output ?? (fallback ? formatToolOutput(fallback.tool, fallback.result) : undefined),
+      };
+    });
+  };
+
+  const getThoughtTrace = (message: Message, previous?: Message) => {
+    if (message.thoughtTrace && message.thoughtTrace.length > 0) {
+      return normalizeThoughtTrace(message.thoughtTrace, message.toolCalls);
+    }
+    const toolTrace = buildTraceFromToolCalls(message.toolCalls);
+    if (toolTrace.length > 0) {
+      return [{ type: "thought", durationMs: estimateThoughtMs(message, previous) }, ...toolTrace];
+    }
+    return [{ type: "thought", durationMs: estimateThoughtMs(message, previous) }];
+  };
+
+  const getThoughtSummaryMs = (trace: ThoughtTraceStep[], message: Message, previous?: Message) => {
+    const totalMs = trace.reduce((sum, step) => sum + (step.durationMs || 0), 0);
+    return totalMs > 0 ? totalMs : estimateThoughtMs(message, previous);
+  };
+
+  const getThoughtDetailSteps = (trace: ThoughtTraceStep[]) => {
+    const hasTools = trace.some(step => step.type === "tool");
+    if (hasTools) return trace;
+    const thoughtSteps = trace.filter(step => step.type === "thought");
+    return thoughtSteps.length > 1 ? thoughtSteps : [];
   };
 
   return (
@@ -2186,13 +2622,16 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
                   </div>
 
                   {/* Model Dropdown */}
-                  <div className="relative min-w-0" ref={dropdownRef}>
+                  <div
+                    className={`relative min-w-0 ${compactControls ? "max-w-[110px]" : "max-w-[200px]"}`}
+                    ref={dropdownRef}
+                  >
                     <button
                       onClick={() => setIsModelDropdownOpen(!isModelDropdownOpen)}
                       title={getModelDisplay()}
-                      className="inline-flex w-full items-center gap-1.5 text-[11px] font-medium text-zinc-500 hover:text-zinc-800 hover:bg-zinc-100 rounded px-2 py-1 transition-colors min-w-0 max-w-[200px] text-left overflow-hidden"
+                      className="flex w-full min-w-0 items-center gap-1.5 text-[11px] font-medium text-zinc-500 hover:text-zinc-800 hover:bg-zinc-100 rounded px-2 py-1 transition-colors text-left overflow-hidden"
                     >
-                      <span className="truncate min-w-0">{getModelDisplay()}</span>
+                      <span className="flex-1 min-w-0 truncate">{getModelDisplay()}</span>
                       <Icons.ChevronDown className="w-3 h-3 opacity-50 flex-shrink-0" />
                     </button>
                     
@@ -2403,6 +2842,13 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
           const canRestore = !isFuture && idx < activeHead - 1;
           const codeBlock = msg.role === "assistant" ? extractCodeBlock(msg.content) : null;
           const isThoughtExpanded = expandedThoughts[msg.id];
+          const isPending = Boolean(msg.isPending);
+          const previousMessage = idx > 0 ? messages[idx - 1] : undefined;
+          const thoughtTrace = msg.role === "assistant" && !isPending ? getThoughtTrace(msg, previousMessage) : [];
+          const thoughtSummaryMs = msg.role === "assistant" && !isPending ? getThoughtSummaryMs(thoughtTrace, msg, previousMessage) : 0;
+          const detailSteps = getThoughtDetailSteps(thoughtTrace);
+          const showThoughtDetails = isPending || detailSteps.length > 0;
+          const thoughtSummary = isPending ? "Thinking..." : `Thought for ${formatDuration(thoughtSummaryMs) ?? "1s"}`;
           
           if (msg.role === "user") {
               const hasCheckpoint = checkpoints.some((cp) => cp.anchorMessageId === msg.id);
@@ -2493,139 +2939,152 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
                    <Icons.Plus className="w-4 h-4" />
                  </button>
                )}
-               {/* Thought Accordion (Mock) */}
+               {/* Thought Trace (Cursor-like) */}
                <div className="flex flex-col gap-1">
-                   <button 
-                       onClick={() => toggleThought(msg.id)}
-                       className="flex items-center gap-2 text-xs text-zinc-400 hover:text-zinc-600 w-fit select-none"
-                   >
-                       <Icons.ChevronDown className={`w-3 h-3 transition-transform ${isThoughtExpanded ? "" : "-rotate-90"}`} />
-                       <span>Thought for 2s</span>
-                   </button>
-                   {isThoughtExpanded && (
-                       <div className="pl-5 text-xs text-zinc-500 border-l-2 border-zinc-200 ml-1.5 py-1">
-                           {/* Placeholder thought content */}
-                           Thinking Process...
-                       </div>
-                   )}
-               </div>
-
-               {/* Tool Calls (Cursor-like) */}
-               {msg.toolCalls && msg.toolCalls.length > 0 && (
-                 <div className="mt-2 space-y-2">
-                   {msg.toolCalls.map((tc, i) => {
-                     const hasError = Boolean(tc?.result?.error);
-                     return (
-                       <details
-                         key={`${msg.id}-tool-${i}`}
-                         className="rounded-lg border border-zinc-200 bg-zinc-50 overflow-hidden"
-                       >
-                         <summary className="flex items-center justify-between gap-2 px-3 py-2 text-xs text-zinc-600 cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden">
-                           <div className="flex items-center gap-2 min-w-0">
-                             {getToolIcon(tc.tool, "w-3.5 h-3.5 text-zinc-500")}
-                             <span className="font-medium truncate">{tc.tool}</span>
-                             <span className={`text-[10px] font-semibold ${hasError ? "text-red-500" : "text-green-600"}`}>
-                               {hasError ? "Error" : "Success"}
-                             </span>
-                           </div>
-                           <Icons.ChevronDown className="w-3 h-3 text-zinc-400 flex-shrink-0" />
-                         </summary>
-                         <div className="px-3 pb-3 pt-1 text-xs text-zinc-700 space-y-2">
-                           <div>
-                             <div className="text-[10px] font-semibold text-zinc-400 uppercase tracking-wider">Args</div>
-                             <pre className="mt-1 whitespace-pre-wrap break-words rounded-md bg-white border border-zinc-200 p-2 text-[11px] leading-snug text-zinc-700 overflow-x-auto">{safeJSONStringify(tc?.args)}</pre>
-                           </div>
-                           <div>
-                             <div className="text-[10px] font-semibold text-zinc-400 uppercase tracking-wider">Result</div>
-                             <pre className="mt-1 whitespace-pre-wrap break-words rounded-md bg-white border border-zinc-200 p-2 text-[11px] leading-snug text-zinc-700 overflow-x-auto">{safeJSONStringify(tc?.result)}</pre>
-                           </div>
+                 <button
+                   onClick={() => {
+                     if (!showThoughtDetails) return;
+                     toggleThought(msg.id);
+                   }}
+                   className={`flex items-center gap-2 text-xs w-fit select-none ${showThoughtDetails ? "text-zinc-400 hover:text-zinc-600" : "text-zinc-400 cursor-default"}`}
+                 >
+                   <Icons.ChevronDown className={`w-3 h-3 transition-transform ${isThoughtExpanded && showThoughtDetails ? "" : "-rotate-90"}`} />
+                   <span>{thoughtSummary}</span>
+                 </button>
+                 {isThoughtExpanded && showThoughtDetails && (
+                   <div className="pl-5 text-xs text-zinc-500 border-l-2 border-zinc-200 ml-1.5 py-1 space-y-1">
+                     {isPending ? (
+                       <div className="flex items-center gap-2 text-zinc-400">
+                         <span>Thinking</span>
+                         <div className="flex items-center gap-1">
+                           <span className="w-1 h-1 rounded-full bg-zinc-300 animate-bounce" />
+                           <span className="w-1 h-1 rounded-full bg-zinc-300 animate-bounce delay-150" />
+                           <span className="w-1 h-1 rounded-full bg-zinc-300 animate-bounce delay-300" />
                          </div>
-                       </details>
-                     );
-                   })}
-                 </div>
-               )}
-
-               <div className="text-[14px] leading-relaxed text-zinc-800">
-                  <ChatMarkdown content={msg.content} />
-                    {codeBlock && !msg.isError && (
-                      <div className="flex gap-2 mt-3 mb-1">
-                        <button 
-                          onClick={() => {
-                            if (onRequestReview) {
-                              const activeNode = nodes.find(n => n.id === msg.id) || nodes[0];
-                              const change: PendingChange = {
-                                id: activeNode?.id || Date.now().toString(),
-                                filePath: activeNode?.name || "untitled",
-                                fileName: activeNode?.name || "untitled",
-                                oldContent: currentFileText,
-                                newContent: codeBlock,
-                                action: "update",
-                                status: "pending",
-                              };
-                              onRequestReview([change]);
-                            } else {
-                              onRequestDiff(codeBlock);
-                            }
-                          }} 
-                          className="flex items-center gap-1.5 text-xs font-medium bg-green-50 hover:bg-green-100 text-green-600 border border-green-200 rounded px-2 py-1 transition-colors"
-                        >
-                          <Icons.Review className="w-3.5 h-3.5" />
-                          Review
-                        </button>
-                        <button onClick={() => onRequestDiff(codeBlock)} className="flex items-center gap-1.5 text-xs font-medium bg-blue-50 hover:bg-blue-100 text-blue-600 border border-blue-200 rounded px-2 py-1 transition-colors">Apply</button>
-                        <button onClick={() => onAppend(codeBlock)} className="text-xs font-medium bg-zinc-50 hover:bg-zinc-100 text-zinc-600 border border-zinc-200 rounded px-2 py-1 transition-colors">Append</button>
-                      </div>
-                    )}
-               </div>
-               
-               {/* Message Actions - 右下に配置 */}
-               <div className="flex items-center justify-end gap-1 mt-1">
-                   <button 
-                     onClick={() => {
-                       navigator.clipboard.writeText(msg.content);
-                       setCopiedMessageId(msg.id);
-                       setTimeout(() => setCopiedMessageId(null), 2000);
-                     }}
-                     className={`p-1 hover:bg-zinc-100 rounded transition-colors ${copiedMessageId === msg.id ? "text-green-500" : "text-zinc-400 hover:text-zinc-600"}`}
-                     title="Copy to clipboard"
-                   >
-                       {copiedMessageId === msg.id ? (
-                         <Icons.Check className="w-3.5 h-3.5" />
-                       ) : (
-                         <Icons.Copy className="w-3.5 h-3.5" />
-                       )}
-                   </button>
-                   <div className="relative" ref={openMessageMenu === msg.id ? messageMenuRef : null}>
-                     <button 
-                       onClick={() => setOpenMessageMenu(openMessageMenu === msg.id ? null : msg.id)}
-                       className="p-1 hover:bg-zinc-100 rounded text-zinc-400 hover:text-zinc-600 transition-colors"
-                     >
-                         <Icons.MoreHorizontal className="w-3.5 h-3.5" />
-                     </button>
-                     {openMessageMenu === msg.id && (
-                       <div className="absolute top-full right-0 mt-1 w-40 bg-white border border-zinc-200 rounded-lg shadow-xl z-50 py-1 overflow-hidden">
-                         <button
-                           onClick={duplicateChat}
-                           className="w-full text-left px-3 py-2 text-xs text-zinc-700 hover:bg-zinc-50 flex items-center gap-2"
-                         >
-                           <Icons.Copy className="w-3.5 h-3.5 text-zinc-400" />
-                           <span>Duplicate Chat</span>
-                         </button>
                        </div>
+                     ) : (
+                       detailSteps.map((step, stepIndex) => {
+                         const isTool = step.type === "tool";
+                         const stepDuration = formatDuration(step.durationMs);
+                         const label = isTool
+                           ? formatToolLabel(step.tool, step.args)
+                           : `Thought for ${formatDuration(step.durationMs) ?? "1s"}`;
+                         const labelClass = step.status === "error" ? "text-red-600" : "text-zinc-600";
+                         const title = isTool && step.args?.path ? String(step.args.path) : undefined;
+                         const command = isTool ? step.command : undefined;
+                         const output = isTool ? step.output : undefined;
+                         const hasOutput = typeof output === "string";
+                         const outputBody = hasOutput ? (output.trim() ? output : "(no output)") : "";
+
+                         return (
+                           <div key={`${msg.id}-trace-${stepIndex}`} className="space-y-1">
+                             <div className="flex items-center justify-between gap-3 text-xs">
+                               <div className="flex items-center gap-2 min-w-0">
+                                 {isTool && getToolIcon(step.tool || "", "w-3 h-3 text-zinc-400 flex-shrink-0")}
+                                 <span className={`truncate ${labelClass}`} title={title}>
+                                   {label}
+                                 </span>
+                               </div>
+                               {isTool && stepDuration && (
+                                 <span className="text-[10px] text-zinc-400 flex-shrink-0">{stepDuration}</span>
+                               )}
+                             </div>
+                             {isTool && command && hasOutput && (
+                               <div className="ml-5 rounded-md border border-zinc-200 bg-zinc-50 text-[11px] text-zinc-600 overflow-hidden">
+                                 <div className="flex items-center gap-2 px-2 py-1 border-b border-zinc-200 text-[10px] text-zinc-400">
+                                   <Icons.Terminal className="w-3 h-3 text-zinc-400" />
+                                   <span>Auto-Ran command:</span>
+                                   <span className="font-mono text-zinc-700 truncate">{command}</span>
+                                 </div>
+                                 <pre className="px-2 py-1.5 whitespace-pre-wrap font-mono text-[11px] text-zinc-700 max-h-40 overflow-auto">
+                                   {outputBody}
+                                 </pre>
+                               </div>
+                             )}
+                           </div>
+                         );
+                       })
                      )}
                    </div>
+                 )}
                </div>
+
+               {!isPending && (
+                 <div className="text-[14px] leading-relaxed text-zinc-800">
+                    <ChatMarkdown content={msg.content} />
+                      {codeBlock && !msg.isError && (
+                        <div className="flex gap-2 mt-3 mb-1">
+                          <button 
+                            onClick={() => {
+                              if (onRequestReview) {
+                                const activeNode = nodes.find(n => n.id === msg.id) || nodes[0];
+                                const change: PendingChange = {
+                                  id: activeNode?.id || Date.now().toString(),
+                                  filePath: activeNode?.name || "untitled",
+                                  fileName: activeNode?.name || "untitled",
+                                  oldContent: currentFileText,
+                                  newContent: codeBlock,
+                                  action: "update",
+                                  status: "pending",
+                                };
+                                onRequestReview([change]);
+                              } else {
+                                onRequestDiff(codeBlock);
+                              }
+                            }} 
+                            className="flex items-center gap-1.5 text-xs font-medium bg-green-50 hover:bg-green-100 text-green-600 border border-green-200 rounded px-2 py-1 transition-colors"
+                          >
+                            <Icons.Review className="w-3.5 h-3.5" />
+                            Review
+                          </button>
+                          <button onClick={() => onRequestDiff(codeBlock)} className="flex items-center gap-1.5 text-xs font-medium bg-blue-50 hover:bg-blue-100 text-blue-600 border border-blue-200 rounded px-2 py-1 transition-colors">Apply</button>
+                          <button onClick={() => onAppend(codeBlock)} className="text-xs font-medium bg-zinc-50 hover:bg-zinc-100 text-zinc-600 border border-zinc-200 rounded px-2 py-1 transition-colors">Append</button>
+                        </div>
+                      )}
+                 </div>
+               )}
+               
+               {!isPending && (
+                 <div className="flex items-center justify-end gap-1 mt-1">
+                     <button 
+                       onClick={() => {
+                         navigator.clipboard.writeText(msg.content);
+                         setCopiedMessageId(msg.id);
+                         setTimeout(() => setCopiedMessageId(null), 2000);
+                       }}
+                       className={`p-1 hover:bg-zinc-100 rounded transition-colors ${copiedMessageId === msg.id ? "text-green-500" : "text-zinc-400 hover:text-zinc-600"}`}
+                       title="Copy to clipboard"
+                     >
+                         {copiedMessageId === msg.id ? (
+                           <Icons.Check className="w-3.5 h-3.5" />
+                         ) : (
+                           <Icons.Copy className="w-3.5 h-3.5" />
+                         )}
+                     </button>
+                     <div className="relative" ref={openMessageMenu === msg.id ? messageMenuRef : null}>
+                       <button 
+                         onClick={() => setOpenMessageMenu(openMessageMenu === msg.id ? null : msg.id)}
+                         className="p-1 hover:bg-zinc-100 rounded text-zinc-400 hover:text-zinc-600 transition-colors"
+                       >
+                           <Icons.MoreHorizontal className="w-3.5 h-3.5" />
+                       </button>
+                       {openMessageMenu === msg.id && (
+                         <div className="absolute top-full right-0 mt-1 w-40 bg-white border border-zinc-200 rounded-lg shadow-xl z-50 py-1 overflow-hidden">
+                           <button
+                             onClick={duplicateChat}
+                             className="w-full text-left px-3 py-2 text-xs text-zinc-700 hover:bg-zinc-50 flex items-center gap-2"
+                           >
+                             <Icons.Copy className="w-3.5 h-3.5 text-zinc-400" />
+                             <span>Duplicate Chat</span>
+                           </button>
+                         </div>
+                       )}
+                     </div>
+                 </div>
+               )}
             </div>
           );
         })}
-        {loading && (
-          <div className="flex items-center gap-2 text-zinc-400 text-sm px-1">
-             <div className="w-1.5 h-1.5 bg-zinc-400 rounded-full animate-bounce delay-0" />
-             <div className="w-1.5 h-1.5 bg-zinc-400 rounded-full animate-bounce delay-150" />
-             <div className="w-1.5 h-1.5 bg-zinc-400 rounded-full animate-bounce delay-300" />
-          </div>
-        )}
         <div ref={messagesEndRef} />
       </div>
 
@@ -2789,13 +3248,16 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
                 </div>
 
                 {/* Model Dropdown */}
-                <div className="relative min-w-0" ref={dropdownRef}>
+                <div
+                  className={`relative min-w-0 ${compactControls ? "max-w-[110px]" : "max-w-[200px]"}`}
+                  ref={dropdownRef}
+                >
                   <button
                     onClick={() => setIsModelDropdownOpen(!isModelDropdownOpen)}
                     title={getModelDisplay()}
-                    className="inline-flex w-full items-center gap-1.5 text-[11px] font-medium text-zinc-500 hover:text-zinc-800 hover:bg-zinc-100 rounded px-2 py-1 transition-colors min-w-0 max-w-[200px] text-left overflow-hidden"
+                    className="flex w-full min-w-0 items-center gap-1.5 text-[11px] font-medium text-zinc-500 hover:text-zinc-800 hover:bg-zinc-100 rounded px-2 py-1 transition-colors text-left overflow-hidden"
                   >
-                    <span className="truncate min-w-0">{getModelDisplay()}</span>
+                    <span className="flex-1 min-w-0 truncate">{getModelDisplay()}</span>
                     <Icons.ChevronDown className="w-3 h-3 opacity-50 flex-shrink-0" />
                   </button>
                   

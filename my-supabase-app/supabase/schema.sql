@@ -60,8 +60,12 @@ create table if not exists public.chat_messages (
   role text not null check (role in ('user', 'assistant')),
   content text not null,
   images text[] default null,
+  thought_trace jsonb default null,
   created_at timestamp with time zone default timezone('utc'::text, now()) not null
 );
+
+-- Optional: add new column when the table already exists
+alter table public.chat_messages add column if not exists thought_trace jsonb;
 
 -- RLS Policies
 alter table public.workspaces enable row level security;
