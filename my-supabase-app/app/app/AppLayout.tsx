@@ -6,7 +6,6 @@ import { useRouter } from "next/navigation";
 import { diffLines } from "diff";
 import { AiPanel, AiPanelHandle } from "@/components/AiPanel";
 import { TabBar } from "@/components/TabBar";
-import { PageHeader } from "@/components/PageHeader";
 import { ActivityBar } from "@/components/ActivityBar";
 import { MainEditor } from "@/components/MainEditor";
 import { DiffView } from "@/components/DiffView";
@@ -1470,6 +1469,7 @@ ${diffs}`;
             onCreateFolder={handleCreateFolder}
             onRenameNode={handleRenameNode}
             onDeleteNode={handleDeleteNode}
+            projectName={activeWorkspace.name}
           />
         );
       case "git":
@@ -1520,22 +1520,10 @@ ${diffs}`;
 
       <ActivityBar activeActivity={activeActivity} onSelect={setActiveActivity} />
 
-      <aside 
+      <aside
         className="bg-zinc-50 border-r border-zinc-200 flex flex-col flex-shrink-0"
         style={{ width: leftPanelWidth }}
       >
-        {/* ワークスペース切り替え */}
-        {activeActivity !== "git" && (
-          <div className="p-2 border-b border-zinc-200">
-            <WorkspaceSwitcher
-              workspaces={currentWorkspaces}
-              currentWorkspace={activeWorkspace}
-              userEmail={userEmail}
-              onSwitch={handleSwitchWorkspace}
-              onCreateNew={() => setShowCreateWorkspace(true)}
-            />
-          </div>
-        )}
         {renderSidebarContent()}
       </aside>
 
@@ -1585,9 +1573,7 @@ ${diffs}`;
               </button>
             </div>
           </div>
-        ) : (
-          <PageHeader node={activeNode} isSaving={isSaving} />
-        )}
+        ) : null}
         <div className="flex-1 p-0 relative overflow-hidden">
           {activeNodeId ? (
             activeVirtual ? (
