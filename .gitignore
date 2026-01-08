@@ -1,2 +1,3 @@
 # Local temporary files
 tmp/
+.claude/settings.local.json
