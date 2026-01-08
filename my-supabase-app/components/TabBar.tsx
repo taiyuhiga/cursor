@@ -1,3 +1,5 @@
+import { getFileIcon } from "./fileIcons";
+
 type Tab = {
   id: string;
   title: string;
@@ -15,6 +17,7 @@ export function TabBar({ tabs, activeId, onSelect, onClose }: TabBarProps) {
     <div className="flex h-9 border-b border-zinc-200 bg-zinc-50 text-sm overflow-x-auto no-scrollbar">
       {tabs.map((tab) => {
         const isActive = tab.id === activeId;
+        const FileIcon = getFileIcon(tab.title);
         return (
           <div
             key={tab.id}
@@ -33,10 +36,7 @@ export function TabBar({ tabs, activeId, onSelect, onClose }: TabBarProps) {
               <div className="absolute top-0 left-0 right-0 h-0.5 bg-blue-500" />
             )}
 
-            {/* ファイルアイコン（簡易） */}
-            <span className={`text-xs ${isActive ? "text-blue-500" : "text-zinc-400"}`}>
-              📄
-            </span>
+            <FileIcon className="w-4 h-4 flex-shrink-0" />
 
             <span className="truncate flex-1 text-xs">{tab.title}</span>
             

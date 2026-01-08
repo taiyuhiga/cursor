@@ -6,7 +6,6 @@ import { useRouter } from "next/navigation";
 import { diffLines } from "diff";
 import { AiPanel, AiPanelHandle } from "@/components/AiPanel";
 import { TabBar } from "@/components/TabBar";
-import { ActivityBar } from "@/components/ActivityBar";
 import { MainEditor } from "@/components/MainEditor";
 import { DiffView } from "@/components/DiffView";
 import { CommandPalette } from "@/components/CommandPalette";
@@ -124,6 +123,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const [nodes, setNodes] = useState<Node[]>([]);
   const [openTabs, setOpenTabs] = useState<string[]>([]);
   const [activeNodeId, setActiveNodeId] = useState<string | null>(null);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [activeActivity, setActiveActivity] = useState<Activity>("explorer");
   const [fileContent, setFileContent] = useState<string>("");
   const [isSaving, setIsSaving] = useState(false);
@@ -365,6 +365,8 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     const parts = path.split("/");
     const name = parts[parts.length - 1];
     const tempId = `temp-${Date.now()}`;
+    const prevActiveId = activeNodeId;
+    const prevSelectedId = selectedNodeId;
     
     // 親フォルダを探す（簡易実装：ルート直下のみ即座に反映）
     let parentId: string | null = null;
@@ -384,6 +386,12 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       created_at: new Date().toISOString(),
     };
     setNodes(prev => [...prev, tempNode]);
+    setSelectedNodeId(tempId);
+    setOpenTabs((prev) => (prev.includes(tempId) ? prev : [...prev, tempId]));
+    setActiveNodeId(tempId);
+    if (activeActivity !== "explorer") {
+      setActiveActivity("explorer");
+    }
 
     try {
       const res = await fetch("/api/files", {
@@ -391,12 +399,22 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "create_file", path, projectId }),
       });
-      if (!res.ok) throw new Error("Failed to create file");
+      const json = await res.json();
+      if (!res.ok) throw new Error(json?.error || "Failed to create file");
+      if (json?.nodeId) {
+        setNodes(prev => prev.map(n => n.id === tempId ? { ...n, id: json.nodeId } : n));
+        setOpenTabs(prev => prev.map(id => id === tempId ? json.nodeId : id));
+        setActiveNodeId(json.nodeId);
+        setSelectedNodeId(json.nodeId);
+      }
       // 成功したら正式なデータで更新
       fetchNodes();
     } catch (error: any) {
       // 失敗したらロールバック
       setNodes(prev => prev.filter(n => n.id !== tempId));
+      setOpenTabs(prev => prev.filter(id => id !== tempId));
+      setActiveNodeId(prevActiveId ?? null);
+      setSelectedNodeId(prevSelectedId ?? null);
       alert(`Error: ${error.message}`);
     }
   };
@@ -405,6 +423,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     const parts = path.split("/");
     const name = parts[parts.length - 1];
     const tempId = `temp-${Date.now()}`;
+    const prevSelectedId = selectedNodeId;
     
     let parentId: string | null = null;
     if (parts.length > 1) {
@@ -422,6 +441,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       created_at: new Date().toISOString(),
     };
     setNodes(prev => [...prev, tempNode]);
+    setSelectedNodeId(tempId);
 
     try {
       const res = await fetch("/api/files", {
@@ -429,10 +449,16 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "create_folder", path, projectId }),
       });
-      if (!res.ok) throw new Error("Failed to create folder");
+      const json = await res.json();
+      if (!res.ok) throw new Error(json?.error || "Failed to create folder");
+      if (json?.nodeId) {
+        setNodes(prev => prev.map(n => n.id === tempId ? { ...n, id: json.nodeId } : n));
+        setSelectedNodeId(json.nodeId);
+      }
       fetchNodes();
     } catch (error: any) {
       setNodes(prev => prev.filter(n => n.id !== tempId));
+      setSelectedNodeId(prevSelectedId ?? null);
       alert(`Error: ${error.message}`);
     }
   };
@@ -478,6 +504,9 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     if (activeNodeId && idsToDelete.has(activeNodeId)) {
       setActiveNodeId(null);
     }
+    if (selectedNodeId && idsToDelete.has(selectedNodeId)) {
+      setSelectedNodeId(null);
+    }
 
     try {
       const res = await fetch("/api/files", {
@@ -500,6 +529,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       prev.includes(nodeId) ? prev : [...prev, nodeId]
     );
     setActiveNodeId(nodeId);
+    setSelectedNodeId(nodeId);
     if (activeActivity !== "explorer") {
       setActiveActivity("explorer");
     }
@@ -521,6 +551,9 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
           const idx = prev.indexOf(id);
           const nextId = prev[idx - 1] ?? prev[idx + 1] ?? newTabs[0];
           setActiveNodeId(nextId);
+          if (nodes.some((n) => n.id === nextId)) {
+            setSelectedNodeId(nextId);
+          }
         } else {
           setActiveNodeId(null);
         }
@@ -539,14 +572,18 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     if (activeNodeId.startsWith("virtual-plan:")) {
       return;
     }
+    if (activeNodeId.startsWith("temp-")) {
+      setFileContent("");
+      return;
+    }
     const fetchContent = async () => {
       const { data, error } = await supabase
         .from("file_contents")
-        .select("*")
+        .select("text")
         .eq("node_id", activeNodeId)
-        .single();
+        .maybeSingle();
       if (error) {
-        console.error("Error fetching file content:", error);
+        console.error("Error fetching file content:", error?.message ?? error);
         setFileContent("");
       } else {
         setFileContent(data?.text || "");
@@ -559,13 +596,12 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const saveContent = useCallback(async () => {
     if (!activeNodeId) return;
     // Virtual doc は通常保存しない（Save to workspace を使う）
-    if (activeNodeId.startsWith("virtual-plan:")) return;
+    if (activeNodeId.startsWith("virtual-plan:") || activeNodeId.startsWith("temp-")) return;
     setIsSaving(true);
     const { error } = await supabase
       .from("file_contents")
-      .update({ text: fileContent })
-      .eq("node_id", activeNodeId);
-    if (error) console.error("Error saving content:", error);
+      .upsert({ node_id: activeNodeId, text: fileContent }, { onConflict: "node_id" });
+    if (error) console.error("Error saving content:", error?.message ?? error);
     setIsSaving(false);
     if (activeActivity === "git") {
       void refreshSourceControl();
@@ -875,6 +911,7 @@ ${diffsForReview}`;
 
       setOpenTabs((prev) => (prev.includes(detail.nodeId!) ? prev : [...prev, detail.nodeId!]));
       setActiveNodeId(detail.nodeId!);
+      setSelectedNodeId(detail.nodeId!);
     },
     [scChangeDetails]
   );
@@ -1360,14 +1397,15 @@ ${diffs}`;
 
   // Get file content by node ID for @Files feature
   const handleGetFileContent = useCallback(async (nodeId: string): Promise<string> => {
+    if (nodeId.startsWith("temp-")) return "";
     const { data, error } = await supabase
       .from("file_contents")
       .select("text")
       .eq("node_id", nodeId)
-      .single();
+      .maybeSingle();
     
     if (error) {
-      console.error("Error fetching file content:", error);
+      console.error("Error fetching file content:", error?.message ?? error);
       return "";
     }
     return data?.text || "";
@@ -1377,7 +1415,7 @@ ${diffs}`;
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
       if (isResizingLeft) {
-        const newWidth = e.clientX - 48; // 48px is ActivityBar width
+        const newWidth = e.clientX;
         setLeftPanelWidth(Math.max(180, Math.min(500, newWidth)));
       }
       if (isResizingRight) {
@@ -1463,8 +1501,9 @@ ${diffs}`;
         return (
           <FileTree
             nodes={nodes}
-            activeNodeId={activeNodeId}
+            selectedNodeId={selectedNodeId}
             onSelectNode={handleOpenNode}
+            onSelectFolder={setSelectedNodeId}
             onCreateFile={handleCreateFile}
             onCreateFolder={handleCreateFolder}
             onRenameNode={handleRenameNode}
@@ -1497,7 +1536,6 @@ ${diffs}`;
   if (activeActivity === "settings") {
     return (
       <div className="h-screen bg-white text-zinc-700 flex">
-        <ActivityBar activeActivity={activeActivity} onSelect={setActiveActivity} />
         <div className="flex-1 min-w-0">
           <SettingsView />
         </div>
@@ -1517,8 +1555,6 @@ ${diffs}`;
           onCancel={() => setDiffState({ show: false, newCode: "" })}
         />
       )}
-
-      <ActivityBar activeActivity={activeActivity} onSelect={setActiveActivity} />
 
       <aside
         className="bg-zinc-50 border-r border-zinc-200 flex flex-col flex-shrink-0"
@@ -1547,7 +1583,12 @@ ${diffs}`;
         <TabBar
           tabs={tabs}
           activeId={activeNodeId}
-          onSelect={setActiveNodeId}
+          onSelect={(id) => {
+            setActiveNodeId(id);
+            if (nodes.some((n) => n.id === id)) {
+              setSelectedNodeId(id);
+            }
+          }}
           onClose={handleCloseTab}
         />
         {activeVirtual ? (

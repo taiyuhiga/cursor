@@ -28,6 +28,33 @@ type ThoughtTraceStep = {
   output?: string;
 };
 
+type DirectoryEntry = {
+  name?: string;
+  type?: "file" | "folder" | string;
+};
+
+type FileListEntry = {
+  path?: string;
+  name?: string;
+};
+
+type GrepResultEntry = {
+  path?: string;
+  lineNumber?: number | string;
+  line?: string;
+};
+
+type SearchResultEntry = {
+  path?: string;
+  relevantSnippet?: string;
+};
+
+type WebSearchResultEntry = {
+  title?: string;
+  url?: string;
+  snippet?: string;
+};
+
 type Message = {
   id: string;
   role: "user" | "assistant";
@@ -210,9 +237,9 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
     const savedModels = localStorage.getItem("cursor_models");
     if (savedModels) {
       const parsed = JSON.parse(savedModels) as ModelConfig[];
-      const enabled = parsed.filter(m => m.enabled);
+      const enabled = parsed.filter((m: ModelConfig) => m.enabled);
       setAvailableModels(enabled.length > 0 ? enabled : DEFAULT_MODELS);
-      if (enabled.length > 0 && !enabled.find(m => m.id === selectedModel)) {
+      if (enabled.length > 0 && !enabled.find((m: ModelConfig) => m.id === selectedModel)) {
         setSelectedModel(enabled[0].id);
       }
     }
@@ -2131,7 +2158,9 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
         break;
       }
       case "list_directory": {
-        const entries = Array.isArray(result.entries) ? result.entries : [];
+        const entries = Array.isArray(result.entries)
+          ? (result.entries as DirectoryEntry[])
+          : [];
         output = entries
           .map((entry) => {
             if (!entry?.name) return "";
@@ -2142,7 +2171,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
         break;
       }
       case "list_files": {
-        const list = Array.isArray(result) ? result : [];
+        const list = Array.isArray(result) ? (result as FileListEntry[]) : [];
         output = list
           .map((item) => item?.path || item?.name || "")
           .filter(Boolean)
@@ -2150,7 +2179,9 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
         break;
       }
       case "grep": {
-        const results = Array.isArray(result.results) ? result.results : [];
+        const results = Array.isArray(result.results)
+          ? (result.results as GrepResultEntry[])
+          : [];
         const lines = results.map((item) => `${item.path}:${item.lineNumber}:${item.line}`);
         output = lines.join("\n");
         if (result.matchCount && result.matchCount > results.length) {
@@ -2159,12 +2190,16 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
         break;
       }
       case "file_search": {
-        const results = Array.isArray(result.results) ? result.results : [];
+        const results = Array.isArray(result.results)
+          ? (result.results as SearchResultEntry[])
+          : [];
         output = results.map((item) => item.path).filter(Boolean).join("\n");
         break;
       }
       case "codebase_search": {
-        const results = Array.isArray(result.results) ? result.results : [];
+        const results = Array.isArray(result.results)
+          ? (result.results as SearchResultEntry[])
+          : [];
         output = results
           .map((item) => {
             if (!item?.path) return "";
@@ -2181,7 +2216,9 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
         break;
       }
       case "web_search": {
-        const results = Array.isArray(result.results) ? result.results : [];
+        const results = Array.isArray(result.results)
+          ? (result.results as WebSearchResultEntry[])
+          : [];
         output = results
           .map((item) => {
             const title = item?.title ? String(item.title) : "Result";
@@ -2297,7 +2334,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
     return seconds * 1000;
   };
 
-  const normalizeThoughtTrace = (trace: ThoughtTraceStep[], toolCalls?: ToolCall[]) => {
+  const normalizeThoughtTrace = (trace: ThoughtTraceStep[], toolCalls?: ToolCall[]): ThoughtTraceStep[] => {
     let toolIndex = 0;
     return trace.map(step => {
       if (step.type !== "tool") return step;
@@ -2311,15 +2348,16 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
     });
   };
 
-  const getThoughtTrace = (message: Message, previous?: Message) => {
+  const getThoughtTrace = (message: Message, previous?: Message): ThoughtTraceStep[] => {
     if (message.thoughtTrace && message.thoughtTrace.length > 0) {
       return normalizeThoughtTrace(message.thoughtTrace, message.toolCalls);
     }
     const toolTrace = buildTraceFromToolCalls(message.toolCalls);
+    const thoughtStep: ThoughtTraceStep = { type: "thought", durationMs: estimateThoughtMs(message, previous) };
     if (toolTrace.length > 0) {
-      return [{ type: "thought", durationMs: estimateThoughtMs(message, previous) }, ...toolTrace];
+      return [thoughtStep, ...toolTrace];
     }
-    return [{ type: "thought", durationMs: estimateThoughtMs(message, previous) }];
+    return [thoughtStep];
   };
 
   const getThoughtSummaryMs = (trace: ThoughtTraceStep[], message: Message, previous?: Message) => {

@@ -101,7 +101,7 @@ export async function POST(req: NextRequest) {
         // フォルダ作成（パス全体をフォルダとして作成）
         // ensureParentFolders + 最後の要素を作る
         const parentId = await ensureParentFolders(supabase, projectId, path + "/dummy");
-        result = { success: true };
+        result = { success: true, nodeId: parentId };
         break;
       }
       

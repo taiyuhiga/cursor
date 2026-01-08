@@ -58,16 +58,21 @@ export function MainEditor({ value, onChange, fileName, onSave }: Props) {
       onChange={(v) => onChange(v ?? "")}
       onMount={handleEditorDidMount}
       options={{
-        minimap: { enabled: true },
+        minimap: { enabled: false },
         fontSize: 14,
-        lineHeight: 24,
-        padding: { top: 16, bottom: 16 },
-        fontFamily: "'Menlo', 'Monaco', 'Courier New', monospace",
+        lineHeight: 0,
+        letterSpacing: 0,
+        padding: { top: 0, bottom: 0 },
+        fontFamily:
+          '"SF Mono", Monaco, Menlo, Consolas, "Ubuntu Mono", "Liberation Mono", "DejaVu Sans Mono", "Courier New", monospace',
+        fontLigatures: false,
+        fontWeight: "normal",
         automaticLayout: true,
-        scrollBeyondLastLine: false,
+        scrollBeyondLastLine: true,
         wordWrap: "on",
-        tabSize: 2,
-        renderLineHighlight: "all",
+        scrollbar: { horizontal: "hidden", vertical: "auto" },
+        tabSize: 4,
+        renderLineHighlight: "line",
       }}
     />
   );
