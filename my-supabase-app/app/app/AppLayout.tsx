@@ -161,6 +161,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const [isResizingRight, setIsResizingRight] = useState(false);
 
   const aiPanelRef = useRef<AiPanelHandle>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const supabase = createClient();
 
   const nodeById = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
@@ -556,6 +557,125 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const handleClearSelection = useCallback(() => {
     setSelectedNodeIds(new Set());
   }, []);
+
+  const handleUpload = useCallback(() => {
+    fileInputRef.current?.click();
+  }, []);
+
+  const handleFileUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    for (const file of Array.from(files)) {
+      const fileName = file.name;
+      const text = await file.text();
+
+      // Create the file node
+      const tempId = `temp-${Date.now()}-${Math.random()}`;
+      const tempNode: Node = {
+        id: tempId,
+        project_id: projectId,
+        parent_id: null,
+        type: "file",
+        name: fileName,
+        created_at: new Date().toISOString(),
+      };
+
+      setNodes(prev => [...prev, tempNode]);
+
+      try {
+        const res = await fetch("/api/files", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "create_node",
+            project_id: projectId,
+            parent_id: null,
+            type: "file",
+            name: fileName,
+          }),
+        });
+        if (!res.ok) throw new Error("Failed to create file");
+        const result = await res.json();
+        const newId = result.id;
+
+        // Update the node with the real ID
+        setNodes(prev => prev.map(n => n.id === tempId ? { ...n, id: newId } : n));
+
+        // Save the file content
+        await supabase
+          .from("file_contents")
+          .upsert({ node_id: newId, text }, { onConflict: "node_id" });
+
+        // Open the file
+        setOpenTabs(prev => prev.includes(newId) ? prev : [...prev, newId]);
+        setActiveNodeId(newId);
+        setSelectedNodeIds(new Set([newId]));
+      } catch (error: any) {
+        setNodes(prev => prev.filter(n => n.id !== tempId));
+        alert(`Upload error: ${error.message}`);
+      }
+    }
+
+    // Reset the input
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+  }, [projectId, supabase]);
+
+  const handleExport = useCallback(async () => {
+    // Get all file nodes
+    const fileNodes = nodes.filter(n => n.type === "file");
+    if (fileNodes.length === 0) {
+      alert("No files to export");
+      return;
+    }
+
+    // If there's only one file, download it directly
+    if (fileNodes.length === 1) {
+      const node = fileNodes[0];
+      const { data } = await supabase
+        .from("file_contents")
+        .select("text")
+        .eq("node_id", node.id)
+        .maybeSingle();
+
+      const content = data?.text || "";
+      const blob = new Blob([content], { type: "text/plain" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = node.name;
+      a.click();
+      URL.revokeObjectURL(url);
+      return;
+    }
+
+    // For multiple files, create a simple combined download
+    // Note: For a full ZIP implementation, you'd use a library like JSZip
+    const fileContents: string[] = [];
+
+    for (const node of fileNodes) {
+      const path = pathByNodeId.get(node.id) || node.name;
+      const { data } = await supabase
+        .from("file_contents")
+        .select("text")
+        .eq("node_id", node.id)
+        .maybeSingle();
+
+      const content = data?.text || "";
+      fileContents.push(`// === ${path} ===\n${content}\n`);
+    }
+
+    const combined = fileContents.join("\n");
+    const blob = new Blob([combined], { type: "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${activeWorkspace.name}-export.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [nodes, supabase, pathByNodeId, activeWorkspace.name]);
 
   const handleCloseTab = (id: string) => {
     setOpenTabs((prev) => prev.filter((x) => x !== id));
@@ -1532,6 +1652,8 @@ ${diffs}`;
             onCreateFolder={handleCreateFolder}
             onRenameNode={handleRenameNode}
             onDeleteNode={handleDeleteNode}
+            onUpload={handleUpload}
+            onExport={handleExport}
             projectName={activeWorkspace.name}
           />
         );
@@ -1570,7 +1692,17 @@ ${diffs}`;
   return (
     <div className="h-screen bg-white text-zinc-700 flex">
       <CommandPalette nodes={nodes} onSelectNode={handleOpenNode} onAction={handleAiAction} />
-      
+
+      {/* Hidden file input for uploads */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={handleFileUpload}
+        accept=".txt,.md,.js,.jsx,.ts,.tsx,.json,.css,.html,.lua,.py,.env,.yml,.yaml,.xml,.svg"
+      />
+
       {diffState.show && (
         <DiffView
           oldCode={activeEditorContent}

@@ -1,5 +1,7 @@
+import React from "react";
+
 export type IconProps = { className?: string };
-export type IconComponent = (props: IconProps) => JSX.Element;
+export type IconComponent = (props: IconProps) => React.ReactElement;
 
 // File type icons
 export const FileIcons = {
@@ -228,6 +230,38 @@ export const ActionIcons = {
   Collapse: ({ className }: IconProps) => (
     <svg viewBox="0 0 16 16" className={className} fill="currentColor">
       <path d="M1 2a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V2zm1.5.5v1h11v-1h-11zM1 8a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V8zm1.5.5v1h11v-1h-11z" />
+    </svg>
+  ),
+  Upload: ({ className }: IconProps) => (
+    <svg
+      viewBox="0 0 16 16"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M9.5 1.5H4.5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h7a2 2 0 0 0 2-2V6.5L9.5 1.5z" />
+      <path d="M9.5 1.5v5h5" />
+      <path d="M8 13V9" />
+      <path d="M6 11l2-2 2 2" />
+    </svg>
+  ),
+  Export: ({ className }: IconProps) => (
+    <svg
+      viewBox="0 0 16 16"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M9.5 1.5H4.5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h7a2 2 0 0 0 2-2V6.5L9.5 1.5z" />
+      <path d="M9.5 1.5v5h5" />
+      <path d="M8 9v4" />
+      <path d="M6 11l2 2 2-2" />
     </svg>
   ),
 };

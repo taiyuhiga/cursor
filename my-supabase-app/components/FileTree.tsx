@@ -23,6 +23,8 @@ type FileTreeProps = {
   onCreateFolder: (path: string) => void;
   onRenameNode: (id: string, newName: string) => void;
   onDeleteNode: (id: string) => void;
+  onUpload?: () => void;
+  onExport?: () => void;
   projectName?: string;
 };
 
@@ -45,6 +47,8 @@ export function FileTree({
   onCreateFolder,
   onRenameNode,
   onDeleteNode,
+  onUpload,
+  onExport,
   projectName,
 }: FileTreeProps) {
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
@@ -492,6 +496,30 @@ export function FileTree({
             >
               <ActionIcons.FolderPlus className="w-[18px] h-[18px]" />
             </button>
+            {onUpload && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onUpload();
+                }}
+                className="p-1 rounded text-zinc-700 hover:text-zinc-900 bg-transparent hover:bg-transparent"
+                title="Upload File"
+              >
+                <ActionIcons.Upload className="w-[18px] h-[18px]" />
+              </button>
+            )}
+            {onExport && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onExport();
+                }}
+                className="p-1 rounded text-zinc-700 hover:text-zinc-900 bg-transparent hover:bg-transparent"
+                title="Export"
+              >
+                <ActionIcons.Export className="w-[18px] h-[18px]" />
+              </button>
+            )}
           </div>
         </div>
       )}
