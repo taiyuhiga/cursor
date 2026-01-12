@@ -123,7 +123,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const [nodes, setNodes] = useState<Node[]>([]);
   const [openTabs, setOpenTabs] = useState<string[]>([]);
   const [activeNodeId, setActiveNodeId] = useState<string | null>(null);
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(new Set());
   const [activeActivity, setActiveActivity] = useState<Activity>("explorer");
   const [fileContent, setFileContent] = useState<string>("");
   const [isSaving, setIsSaving] = useState(false);
@@ -366,7 +366,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     const name = parts[parts.length - 1];
     const tempId = `temp-${Date.now()}`;
     const prevActiveId = activeNodeId;
-    const prevSelectedId = selectedNodeId;
+    const prevSelectedIds = new Set(selectedNodeIds);
     
     // 親フォルダを探す（簡易実装：ルート直下のみ即座に反映）
     let parentId: string | null = null;
@@ -386,7 +386,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       created_at: new Date().toISOString(),
     };
     setNodes(prev => [...prev, tempNode]);
-    setSelectedNodeId(tempId);
+    setSelectedNodeIds(new Set([tempId]));
     setOpenTabs((prev) => (prev.includes(tempId) ? prev : [...prev, tempId]));
     setActiveNodeId(tempId);
     if (activeActivity !== "explorer") {
@@ -405,7 +405,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         setNodes(prev => prev.map(n => n.id === tempId ? { ...n, id: json.nodeId } : n));
         setOpenTabs(prev => prev.map(id => id === tempId ? json.nodeId : id));
         setActiveNodeId(json.nodeId);
-        setSelectedNodeId(json.nodeId);
+        setSelectedNodeIds(new Set([json.nodeId]));
       }
       // 成功したら正式なデータで更新
       fetchNodes();
@@ -414,7 +414,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       setNodes(prev => prev.filter(n => n.id !== tempId));
       setOpenTabs(prev => prev.filter(id => id !== tempId));
       setActiveNodeId(prevActiveId ?? null);
-      setSelectedNodeId(prevSelectedId ?? null);
+      setSelectedNodeIds(new Set(prevSelectedIds));
       alert(`Error: ${error.message}`);
     }
   };
@@ -423,7 +423,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     const parts = path.split("/");
     const name = parts[parts.length - 1];
     const tempId = `temp-${Date.now()}`;
-    const prevSelectedId = selectedNodeId;
+    const prevSelectedIds = new Set(selectedNodeIds);
     
     let parentId: string | null = null;
     if (parts.length > 1) {
@@ -441,7 +441,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       created_at: new Date().toISOString(),
     };
     setNodes(prev => [...prev, tempNode]);
-    setSelectedNodeId(tempId);
+    setSelectedNodeIds(new Set([tempId]));
 
     try {
       const res = await fetch("/api/files", {
@@ -453,12 +453,12 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       if (!res.ok) throw new Error(json?.error || "Failed to create folder");
       if (json?.nodeId) {
         setNodes(prev => prev.map(n => n.id === tempId ? { ...n, id: json.nodeId } : n));
-        setSelectedNodeId(json.nodeId);
+        setSelectedNodeIds(new Set([json.nodeId]));
       }
       fetchNodes();
     } catch (error: any) {
       setNodes(prev => prev.filter(n => n.id !== tempId));
-      setSelectedNodeId(prevSelectedId ?? null);
+      setSelectedNodeIds(new Set(prevSelectedIds));
       alert(`Error: ${error.message}`);
     }
   };
@@ -504,9 +504,11 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     if (activeNodeId && idsToDelete.has(activeNodeId)) {
       setActiveNodeId(null);
     }
-    if (selectedNodeId && idsToDelete.has(selectedNodeId)) {
-      setSelectedNodeId(null);
-    }
+    setSelectedNodeIds(prev => {
+      const next = new Set(prev);
+      idsToDelete.forEach((nodeId) => next.delete(nodeId));
+      return next;
+    });
 
     try {
       const res = await fetch("/api/files", {
@@ -529,11 +531,31 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       prev.includes(nodeId) ? prev : [...prev, nodeId]
     );
     setActiveNodeId(nodeId);
-    setSelectedNodeId(nodeId);
+    setSelectedNodeIds(new Set([nodeId]));
     if (activeActivity !== "explorer") {
       setActiveActivity("explorer");
     }
   };
+
+  const handleToggleSelectNode = useCallback((nodeId: string) => {
+    setSelectedNodeIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(nodeId)) {
+        next.delete(nodeId);
+      } else {
+        next.add(nodeId);
+      }
+      return next;
+    });
+  }, []);
+
+  const handleSelectFolder = useCallback((nodeId: string) => {
+    setSelectedNodeIds(new Set([nodeId]));
+  }, []);
+
+  const handleClearSelection = useCallback(() => {
+    setSelectedNodeIds(new Set());
+  }, []);
 
   const handleCloseTab = (id: string) => {
     setOpenTabs((prev) => prev.filter((x) => x !== id));
@@ -552,7 +574,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
           const nextId = prev[idx - 1] ?? prev[idx + 1] ?? newTabs[0];
           setActiveNodeId(nextId);
           if (nodes.some((n) => n.id === nextId)) {
-            setSelectedNodeId(nextId);
+            setSelectedNodeIds(new Set([nextId]));
           }
         } else {
           setActiveNodeId(null);
@@ -911,7 +933,7 @@ ${diffsForReview}`;
 
       setOpenTabs((prev) => (prev.includes(detail.nodeId!) ? prev : [...prev, detail.nodeId!]));
       setActiveNodeId(detail.nodeId!);
-      setSelectedNodeId(detail.nodeId!);
+      setSelectedNodeIds(new Set([detail.nodeId!]));
     },
     [scChangeDetails]
   );
@@ -1501,9 +1523,11 @@ ${diffs}`;
         return (
           <FileTree
             nodes={nodes}
-            selectedNodeId={selectedNodeId}
+            selectedNodeIds={selectedNodeIds}
             onSelectNode={handleOpenNode}
-            onSelectFolder={setSelectedNodeId}
+            onToggleSelectNode={handleToggleSelectNode}
+            onClearSelection={handleClearSelection}
+            onSelectFolder={handleSelectFolder}
             onCreateFile={handleCreateFile}
             onCreateFolder={handleCreateFolder}
             onRenameNode={handleRenameNode}
@@ -1586,7 +1610,7 @@ ${diffs}`;
           onSelect={(id) => {
             setActiveNodeId(id);
             if (nodes.some((n) => n.id === id)) {
-              setSelectedNodeId(id);
+              setSelectedNodeIds(new Set([id]));
             }
           }}
           onClose={handleCloseTab}

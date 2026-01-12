@@ -14,8 +14,10 @@ type Node = {
 
 type FileTreeProps = {
   nodes: Node[];
-  selectedNodeId: string | null;
+  selectedNodeIds: Set<string>;
   onSelectNode: (nodeId: string) => void;
+  onToggleSelectNode: (nodeId: string) => void;
+  onClearSelection: () => void;
   onSelectFolder?: (nodeId: string) => void;
   onCreateFile: (path: string) => void;
   onCreateFolder: (path: string) => void;
@@ -34,8 +36,10 @@ type EditingState = {
 
 export function FileTree({
   nodes,
-  selectedNodeId,
+  selectedNodeIds,
   onSelectNode,
+  onToggleSelectNode,
+  onClearSelection,
   onSelectFolder,
   onCreateFile,
   onCreateFolder,
@@ -242,27 +246,41 @@ export function FileTree({
         return a.name.localeCompare(b.name);
       });
 
-    let nodesToRender = [...currentLevelNodes];
+    const nodesToRender = [...currentLevelNodes];
     let editItem = null;
+    const isCreatingFile =
+      editingState?.type === "create" &&
+      editingState.parentId === parentId &&
+      editingState.nodeType === "file";
+    const isCreatingFolder =
+      editingState?.type === "create" &&
+      editingState.parentId === parentId &&
+      editingState.nodeType === "folder";
 
     if (editingState && editingState.type === "create" && editingState.parentId === parentId) {
-      const IconComponent = editingState.nodeType === "file" ? FileIcons.File : FileIcons.Folder;
+      const IconComponent = isCreatingFile ? FileIcons.Plain : FileIcons.Folder;
+      const editPaddingLeft = depth * 16 + (isCreatingFolder ? 4 : 22);
       editItem = (
         <div
           key="editing-item"
           className="relative"
         >
           <div
-            className="flex items-center gap-1 px-2 py-1 text-[14px] leading-5"
-            style={{ paddingLeft: `${depth * 16 + 22}px` }}
+            className="flex items-center gap-1 px-2 py-0 text-[14px] leading-5"
+            style={{ paddingLeft: `${editPaddingLeft}px` }}
           >
-            <IconComponent className="w-4 h-4 text-zinc-400 flex-shrink-0" />
+            {isCreatingFolder && (
+              <ChevronIcon isOpen={false} className="w-4 h-4 text-zinc-400 flex-shrink-0" />
+            )}
+            <IconComponent
+              className={`w-4 h-4 flex-shrink-0 ${isCreatingFolder ? "text-zinc-500" : ""}`}
+            />
             <input
               ref={inputRef}
               type="text"
               value={inputValue}
               onChange={handleInputChange}
-              className={`bg-white text-zinc-900 border rounded px-1.5 py-1 text-[14px] leading-5 w-full outline-none min-w-0 ${
+              className={`bg-white text-zinc-900 border rounded px-1.5 py-[3px] text-[14px] leading-5 w-full outline-none min-w-0 ${
                 validationError ? "border-red-400" : "border-blue-500 ring-1 ring-blue-500"
               }`}
               onBlur={handleInputBlur}
@@ -282,139 +300,147 @@ export function FileTree({
       );
     }
 
+    const renderNode = (node: Node) => {
+      const isRenaming = editingState?.type === "rename" && editingState.targetId === node.id;
+
+      if (isRenaming) {
+        const IconComponent = node.type === "file" ? getFileIcon(node.name) : FileIcons.Folder;
+        return (
+          <div
+            key={node.id}
+            className="relative"
+          >
+            <div
+              className="flex items-center gap-1 px-2 py-0 text-[14px] leading-5"
+              style={{ paddingLeft: `${depth * 16 + (node.type === "folder" ? 4 : 22)}px` }}
+            >
+              {node.type === "folder" && (
+                <ChevronIcon isOpen={expandedFolders.has(node.id)} className="w-4 h-4 text-zinc-400" />
+              )}
+              <IconComponent className={`w-4 h-4 flex-shrink-0 ${node.type === "folder" ? getFolderColor(node.name) : ""}`} />
+              <input
+                ref={inputRef}
+                type="text"
+                value={inputValue}
+                onChange={handleInputChange}
+                className={`bg-white text-zinc-900 border rounded px-1.5 py-[3px] text-[14px] leading-5 w-full outline-none min-w-0 ${
+                  validationError ? "border-red-400" : "border-blue-500 ring-1 ring-blue-500"
+                }`}
+                onBlur={handleInputBlur}
+                onKeyDown={handleKeyDown}
+              />
+            </div>
+            {validationError && (
+              <div
+                className="mt-1 mx-2 p-2 bg-red-50 border border-red-200 rounded text-xs text-red-600"
+                style={{ marginLeft: `${depth * 16 + 22}px` }}
+              >
+                {validationError}
+              </div>
+            )}
+          </div>
+        );
+      }
+
+      const isExpanded = expandedFolders.has(node.id);
+      const isSelected = selectedNodeIds.has(node.id);
+      const FileIcon = getFileIcon(node.name);
+
+      const handleAddFile = (e: React.MouseEvent) => {
+        e.stopPropagation();
+        setExpandedFolders(prev => new Set(prev).add(node.id));
+        setEditingState({ type: "create", nodeType: "file", parentId: node.id });
+      };
+
+      const handleAddFolder = (e: React.MouseEvent) => {
+        e.stopPropagation();
+        setExpandedFolders(prev => new Set(prev).add(node.id));
+        setEditingState({ type: "create", nodeType: "folder", parentId: node.id });
+      };
+
+      return (
+        <div key={node.id}>
+          <div
+            draggable
+            onDragStart={(e) => {
+              e.dataTransfer.setData("application/cursor-node", node.name);
+              e.dataTransfer.effectAllowed = "copy";
+            }}
+            className={`
+              group/item flex items-center gap-1 px-2 py-1 text-[14px] leading-5 cursor-pointer select-none
+              ${isSelected
+                ? "bg-blue-600/10 text-zinc-900"
+                : "text-zinc-700 hover:bg-zinc-100"
+              }
+            `}
+            style={{ paddingLeft: `${depth * 16 + (node.type === "folder" ? 4 : 22)}px` }}
+            onClick={(e) => {
+              if (e.metaKey || e.ctrlKey) {
+                onToggleSelectNode(node.id);
+                return;
+              }
+              if (node.type === "folder") {
+                toggleFolder(node.id);
+                onSelectFolder?.(node.id);
+              } else {
+                onSelectNode(node.id);
+              }
+            }}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setContextMenu({ x: e.clientX, y: e.clientY, targetId: node.id });
+            }}
+          >
+            {node.type === "folder" ? (
+              <>
+                <ChevronIcon isOpen={isExpanded} className="w-4 h-4 text-zinc-400 flex-shrink-0" />
+                {isExpanded ? (
+                  <FileIcons.FolderOpen className={`w-4 h-4 flex-shrink-0 ${getFolderColor(node.name)}`} />
+                ) : (
+                  <FileIcons.Folder className={`w-4 h-4 flex-shrink-0 ${getFolderColor(node.name)}`} />
+                )}
+              </>
+            ) : (
+              <FileIcon className="w-4 h-4 flex-shrink-0" />
+            )}
+            <span className="truncate flex-1">{node.name}</span>
+
+            {/* Hover action buttons for folders */}
+            {node.type === "folder" && (
+              <div className="flex items-center gap-0.5 opacity-0 group-hover/item:opacity-100 transition-opacity">
+                <button
+                  onClick={handleAddFile}
+                  className="p-0.5 rounded text-zinc-500 hover:text-zinc-800 hover:bg-zinc-100"
+                  title="New File"
+                >
+                  <ActionIcons.FilePlus className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={handleAddFolder}
+                  className="p-0.5 rounded text-zinc-500 hover:text-zinc-800 hover:bg-zinc-100"
+                  title="New Folder"
+                >
+                  <ActionIcons.FolderPlus className="w-4 h-4" />
+                </button>
+              </div>
+            )}
+          </div>
+
+          {node.type === "folder" && isExpanded && renderTree(node.id, depth + 1)}
+        </div>
+      );
+    };
+
+    const folderNodes = nodesToRender.filter((node) => node.type === "folder");
+    const fileNodes = nodesToRender.filter((node) => node.type === "file");
+
     return (
       <>
-        {editItem && editingState?.nodeType === "folder" ? editItem : null}
-
-        {nodesToRender.map(node => {
-          const isRenaming = editingState?.type === "rename" && editingState.targetId === node.id;
-
-          if (isRenaming) {
-            const IconComponent = node.type === "file" ? getFileIcon(node.name) : FileIcons.Folder;
-            return (
-              <div
-                key={node.id}
-                className="relative"
-              >
-                <div
-                  className="flex items-center gap-1 px-2 py-1 text-[14px] leading-5"
-                  style={{ paddingLeft: `${depth * 16 + (node.type === "folder" ? 4 : 22)}px` }}
-                >
-                  {node.type === "folder" && (
-                    <ChevronIcon isOpen={expandedFolders.has(node.id)} className="w-4 h-4 text-zinc-400" />
-                  )}
-                  <IconComponent className={`w-4 h-4 flex-shrink-0 ${node.type === "folder" ? getFolderColor(node.name) : ""}`} />
-                  <input
-                    ref={inputRef}
-                    type="text"
-                    value={inputValue}
-                    onChange={handleInputChange}
-                    className={`bg-white text-zinc-900 border rounded px-1.5 py-1 text-[14px] leading-5 w-full outline-none min-w-0 ${
-                      validationError ? "border-red-400" : "border-blue-500 ring-1 ring-blue-500"
-                    }`}
-                    onBlur={handleInputBlur}
-                    onKeyDown={handleKeyDown}
-                  />
-                </div>
-                {validationError && (
-                  <div
-                    className="mt-1 mx-2 p-2 bg-red-50 border border-red-200 rounded text-xs text-red-600"
-                    style={{ marginLeft: `${depth * 16 + 22}px` }}
-                  >
-                    {validationError}
-                  </div>
-                )}
-              </div>
-            );
-          }
-
-          const isExpanded = expandedFolders.has(node.id);
-          const isSelected = selectedNodeId === node.id;
-          const FileIcon = getFileIcon(node.name);
-
-          const handleAddFile = (e: React.MouseEvent) => {
-            e.stopPropagation();
-            setExpandedFolders(prev => new Set(prev).add(node.id));
-            setEditingState({ type: "create", nodeType: "file", parentId: node.id });
-          };
-
-          const handleAddFolder = (e: React.MouseEvent) => {
-            e.stopPropagation();
-            setExpandedFolders(prev => new Set(prev).add(node.id));
-            setEditingState({ type: "create", nodeType: "folder", parentId: node.id });
-          };
-
-          return (
-            <div key={node.id}>
-              <div
-                draggable
-                onDragStart={(e) => {
-                  e.dataTransfer.setData("application/cursor-node", node.name);
-                  e.dataTransfer.effectAllowed = "copy";
-                }}
-                className={`
-                  group/item flex items-center gap-1 px-2 py-1 text-[14px] leading-5 cursor-pointer select-none
-                  ${isSelected
-                    ? "bg-blue-600/10 text-zinc-900"
-                    : "text-zinc-700 hover:bg-zinc-100"
-                  }
-                `}
-                style={{ paddingLeft: `${depth * 16 + (node.type === "folder" ? 4 : 22)}px` }}
-                onClick={() => {
-                  if (node.type === "folder") {
-                    toggleFolder(node.id);
-                    onSelectFolder?.(node.id);
-                  } else {
-                    onSelectNode(node.id);
-                  }
-                }}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  setContextMenu({ x: e.clientX, y: e.clientY, targetId: node.id });
-                }}
-              >
-                {node.type === "folder" ? (
-                  <>
-                    <ChevronIcon isOpen={isExpanded} className="w-4 h-4 text-zinc-400 flex-shrink-0" />
-                    {isExpanded ? (
-                      <FileIcons.FolderOpen className={`w-4 h-4 flex-shrink-0 ${getFolderColor(node.name)}`} />
-                    ) : (
-                      <FileIcons.Folder className={`w-4 h-4 flex-shrink-0 ${getFolderColor(node.name)}`} />
-                    )}
-                  </>
-                ) : (
-                  <FileIcon className="w-4 h-4 flex-shrink-0" />
-                )}
-                <span className="truncate flex-1">{node.name}</span>
-
-                {/* Hover action buttons for folders */}
-                {node.type === "folder" && (
-                  <div className="flex items-center gap-0.5 opacity-0 group-hover/item:opacity-100 transition-opacity">
-                    <button
-                      onClick={handleAddFile}
-                      className="p-0.5 rounded text-zinc-500 hover:text-zinc-800 hover:bg-zinc-100"
-                      title="New File"
-                    >
-                      <ActionIcons.FilePlus className="w-4 h-4" />
-                    </button>
-                    <button
-                      onClick={handleAddFolder}
-                      className="p-0.5 rounded text-zinc-500 hover:text-zinc-800 hover:bg-zinc-100"
-                      title="New Folder"
-                    >
-                      <ActionIcons.FolderPlus className="w-4 h-4" />
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              {node.type === "folder" && isExpanded && renderTree(node.id, depth + 1)}
-            </div>
-          );
-        })}
-
-        {editItem && editingState?.nodeType === "file" ? editItem : null}
+        {editItem && isCreatingFolder ? editItem : null}
+        {folderNodes.map(renderNode)}
+        {editItem && isCreatingFile ? editItem : null}
+        {fileNodes.map(renderNode)}
       </>
     );
   };
@@ -422,7 +448,12 @@ export function FileTree({
   return (
     <div
       className="flex-1 flex flex-col min-h-0 text-zinc-700"
-      onClick={() => setContextMenu(null)}
+      onClick={(e) => {
+        setContextMenu(null);
+        if (e.target === e.currentTarget) {
+          onClearSelection();
+        }
+      }}
       onContextMenu={(e) => {
         e.preventDefault();
         setContextMenu({ x: e.clientX, y: e.clientY, targetId: null });
@@ -466,7 +497,14 @@ export function FileTree({
       )}
 
       {/* File tree content */}
-      <div className="flex-1 overflow-y-auto py-1">
+      <div
+        className="flex-1 overflow-y-auto py-1"
+        onClick={(e) => {
+          if (e.target === e.currentTarget) {
+            onClearSelection();
+          }
+        }}
+      >
         {(!projectName || isProjectExpanded) && (
           nodes.length === 0 && !editingState ? (
             <div className="text-zinc-400 text-sm p-4 text-center">
