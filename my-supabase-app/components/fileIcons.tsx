@@ -150,9 +150,47 @@ export const FileIcons = {
 
   // Image files
   Image: ({ className }: IconProps) => (
-    <svg viewBox="0 0 16 16" className={className} fill="currentColor">
-      <path d="M6.002 5.5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0z" fillOpacity="0.7" />
-      <path d="M2.002 1a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V3a2 2 0 0 0-2-2h-12zm12 1a1 1 0 0 1 1 1v6.5l-3.777-1.947a.5.5 0 0 0-.577.093l-3.71 3.71-2.66-1.772a.5.5 0 0 0-.63.062L1.002 12V3a1 1 0 0 1 1-1h12z" fillOpacity="0.7" />
+    <svg viewBox="0 0 16 16" className={`${className} text-emerald-500`} fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="2" y="2" width="12" height="12" rx="2" />
+      <circle cx="5.5" cy="5.5" r="1.5" />
+      <path d="M14 10l-3-3-5 5" />
+      <path d="M14 14l-8-8-4 4" />
+    </svg>
+  ),
+
+  // Video files
+  Video: ({ className }: IconProps) => (
+    <svg
+      viewBox="0 0 16 16"
+      className={`${className} text-red-500`}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="2" y="3" width="12" height="10" rx="1.6" />
+      <path d="M2 6h12" />
+      <path d="M7 7.5l3 2-3 2z" fill="currentColor" stroke="none" />
+    </svg>
+  ),
+
+  // Audio files
+  Audio: ({ className }: IconProps) => (
+    <svg
+      viewBox="0 0 16 16"
+      className={`${className} text-red-500`}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <circle cx="5" cy="11.5" r="1.5" />
+      <circle cx="10" cy="10" r="1.5" />
+      <path d="M6.5 11.5V4.5" />
+      <path d="M11.5 10V4" />
+      <path d="M6.5 4.5 11.5 4" />
     </svg>
   ),
 
@@ -264,6 +302,48 @@ export const ActionIcons = {
       <path d="M6 11l2 2 2-2" />
     </svg>
   ),
+  FolderUpload: ({ className }: IconProps) => (
+    <svg
+      viewBox="0 0 16 16"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="1.5" y="5" width="13" height="8.5" rx="1.5" />
+      <path d="M1.5 5V4a1.5 1.5 0 0 1 1.5-1.5h3l1.5 1.5h4" />
+      <path d="M8 12V8" />
+      <path d="M6 10l2-2 2 2" />
+    </svg>
+  ),
+  Download: ({ className }: IconProps) => (
+    <svg
+      viewBox="0 0 16 16"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M8 2v8" />
+      <path d="M5 7l3 3 3-3" />
+      <path d="M2 12v1.5a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V12" />
+    </svg>
+  ),
+  More: ({ className }: IconProps) => (
+    <svg
+      viewBox="0 0 16 16"
+      className={className}
+      fill="currentColor"
+    >
+      <circle cx="8" cy="3" r="1.5" />
+      <circle cx="8" cy="8" r="1.5" />
+      <circle cx="8" cy="13" r="1.5" />
+    </svg>
+  ),
 };
 
 // Get file icon based on extension
@@ -327,7 +407,22 @@ export const getFileIcon = (fileName: string): IconComponent => {
     case "svg":
     case "webp":
     case "ico":
+    case "bmp":
       return FileIcons.Image;
+    case "mp4":
+    case "webm":
+    case "mov":
+    case "avi":
+    case "mkv":
+    case "m4v":
+      return FileIcons.Video;
+    case "mp3":
+    case "wav":
+    case "ogg":
+    case "m4a":
+    case "flac":
+    case "aac":
+      return FileIcons.Audio;
     default:
       return hasExtension ? FileIcons.File : FileIcons.Plain;
   }
@@ -340,3 +435,6 @@ export const getFolderColor = (name: string): string => {
   if (n.startsWith(".") || n.includes(".")) return "text-zinc-400";
   return "text-zinc-500";
 };
+
+// Alias for MediaPreview component
+export const fileIcons = FileIcons;

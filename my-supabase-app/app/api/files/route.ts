@@ -52,7 +52,16 @@ async function ensureParentFolders(supabase: any, projectId: string, path: strin
 
 export async function POST(req: NextRequest) {
   const supabase = await createClient();
-  const body = await req.json();
+
+  let body;
+  try {
+    body = await req.json();
+  } catch (parseError: any) {
+    return NextResponse.json({
+      error: `Failed to parse request body: ${parseError.message}. The file may be too large.`
+    }, { status: 400 });
+  }
+
   const { action, path, content, id, newName, projectId } = body;
 
   // projectIdが必須の操作の場合はチェック

@@ -15,6 +15,7 @@ import { CreateWorkspaceDialog } from "@/components/CreateWorkspaceDialog";
 import { SettingsView } from "@/components/SettingsView";
 import { ReviewPanel } from "@/components/ReviewPanel";
 import { SourceControlPanel, type SourceControlChange } from "@/components/SourceControlPanel";
+import { MediaPreview, isMediaFile } from "@/components/MediaPreview";
 import type { PendingChange, ReviewIssue } from "@/lib/review/types";
 import type { AgentCheckpointChange, AgentCheckpointRecordInput } from "@/lib/checkpoints/types";
 
@@ -162,6 +163,8 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
 
   const aiPanelRef = useRef<AiPanelHandle>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
+  const [uploadTargetParentId, setUploadTargetParentId] = useState<string | null>(null);
   const supabase = createClient();
 
   const nodeById = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
@@ -361,17 +364,17 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   }, [activeActivity, refreshSourceControl]);
 
   // ファイル操作アクション（Optimistic UI）
-  const handleCreateFile = async (path: string) => {
+  const handleCreateFile = async (path: string, explicitParentId?: string | null) => {
     // パスから名前とparent_idを計算
     const parts = path.split("/");
     const name = parts[parts.length - 1];
     const tempId = `temp-${Date.now()}`;
     const prevActiveId = activeNodeId;
     const prevSelectedIds = new Set(selectedNodeIds);
-    
-    // 親フォルダを探す（簡易実装：ルート直下のみ即座に反映）
-    let parentId: string | null = null;
-    if (parts.length > 1) {
+
+    // 明示的なparentIdが渡された場合はそれを使用、そうでなければパスから推測
+    let parentId: string | null = explicitParentId !== undefined ? explicitParentId : null;
+    if (explicitParentId === undefined && parts.length > 1) {
       const parentName = parts[parts.length - 2];
       const parentNode = nodes.find(n => n.name === parentName && n.type === "folder");
       parentId = parentNode?.id || null;
@@ -398,7 +401,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       const res = await fetch("/api/files", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "create_file", path, projectId }),
+        body: JSON.stringify({ action: "create_file", path, projectId, parentId }),
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json?.error || "Failed to create file");
@@ -420,14 +423,15 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     }
   };
 
-  const handleCreateFolder = async (path: string) => {
+  const handleCreateFolder = async (path: string, explicitParentId?: string | null) => {
     const parts = path.split("/");
     const name = parts[parts.length - 1];
     const tempId = `temp-${Date.now()}`;
     const prevSelectedIds = new Set(selectedNodeIds);
-    
-    let parentId: string | null = null;
-    if (parts.length > 1) {
+
+    // 明示的なparentIdが渡された場合はそれを使用
+    let parentId: string | null = explicitParentId !== undefined ? explicitParentId : null;
+    if (explicitParentId === undefined && parts.length > 1) {
       const parentName = parts[parts.length - 2];
       const parentNode = nodes.find(n => n.name === parentName && n.type === "folder");
       parentId = parentNode?.id || null;
@@ -448,7 +452,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       const res = await fetch("/api/files", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "create_folder", path, projectId }),
+        body: JSON.stringify({ action: "create_folder", path, projectId, parentId }),
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json?.error || "Failed to create folder");
@@ -558,24 +562,71 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     setSelectedNodeIds(new Set());
   }, []);
 
-  const handleUpload = useCallback(() => {
+  // Upload files handler
+  const handleUploadFiles = useCallback((parentId: string | null) => {
+    setUploadTargetParentId(parentId);
     fileInputRef.current?.click();
   }, []);
 
-  const handleFileUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Upload folder handler
+  const handleUploadFolder = useCallback((parentId: string | null) => {
+    setUploadTargetParentId(parentId);
+    folderInputRef.current?.click();
+  }, []);
+
+  // Check if file is binary (image, video, audio, etc.)
+  const isBinaryFile = (fileName: string): boolean => {
+    const binaryExtensions = [
+      "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg",
+      "mp4", "webm", "mov", "avi", "mkv", "m4v",
+      "mp3", "wav", "ogg", "m4a", "flac", "aac",
+      "pdf", "zip", "rar", "7z", "tar", "gz",
+      "ttf", "otf", "woff", "woff2", "eot"
+    ];
+    const ext = fileName.split(".").pop()?.toLowerCase() || "";
+    return binaryExtensions.includes(ext);
+  };
+
+  // Read file as base64 for binary files, text for others
+  const readFileContent = async (file: File): Promise<string> => {
+    if (isBinaryFile(file.name)) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = reader.result as string;
+          resolve(result); // Data URL format: data:mime/type;base64,...
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+    } else {
+      return file.text();
+    }
+  };
+
+  const handleFileInputChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
 
+    const parentId = uploadTargetParentId;
+    // Get parent path from parentId
+    const parentPath = parentId ? pathByNodeId.get(parentId) || "" : "";
+
+    // Threshold for using Storage (2MB for binary, 5MB for text)
+    const STORAGE_THRESHOLD_BINARY = 2 * 1024 * 1024;
+    const STORAGE_THRESHOLD_TEXT = 5 * 1024 * 1024;
+
     for (const file of Array.from(files)) {
       const fileName = file.name;
-      const text = await file.text();
+      const isBinary = isBinaryFile(fileName);
+      const useStorage = isBinary || file.size > (isBinary ? STORAGE_THRESHOLD_BINARY : STORAGE_THRESHOLD_TEXT);
 
-      // Create the file node
+      // Create the file node optimistically
       const tempId = `temp-${Date.now()}-${Math.random()}`;
       const tempNode: Node = {
         id: tempId,
         project_id: projectId,
-        parent_id: null,
+        parent_id: parentId,
         type: "file",
         name: fileName,
         created_at: new Date().toISOString(),
@@ -583,36 +634,113 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
 
       setNodes(prev => [...prev, tempNode]);
 
+      let createdNodeId: string | null = null;
+
       try {
-        const res = await fetch("/api/files", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            action: "create_node",
-            project_id: projectId,
-            parent_id: null,
-            type: "file",
-            name: fileName,
-          }),
-        });
-        if (!res.ok) throw new Error("Failed to create file");
-        const result = await res.json();
-        const newId = result.id;
+        let newId: string;
+
+        if (useStorage) {
+          // Use signed URL approach for large/binary files
+          // Step 1: Get signed upload URL
+          const createUrlRes = await fetch("/api/storage/create-upload-url", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              projectId,
+              parentId: parentId || null,
+              fileName,
+              contentType: file.type || "application/octet-stream",
+            }),
+          });
+
+          const createUrlResult = await createUrlRes.json();
+          if (!createUrlRes.ok) {
+            throw new Error(createUrlResult.error || "Failed to create upload URL");
+          }
+
+          createdNodeId = createUrlResult.nodeId;
+          if (!createUrlResult.token || !createUrlResult.storagePath) {
+            throw new Error("Invalid upload URL response");
+          }
+
+          // Step 2: Upload directly to Supabase Storage using signed URL token
+          const { error: uploadError } = await supabase.storage
+            .from("files")
+            .uploadToSignedUrl(
+              createUrlResult.storagePath,
+              createUrlResult.token,
+              file,
+              { contentType: file.type || "application/octet-stream" }
+            );
+
+          if (uploadError) {
+            throw new Error(`Failed to upload file to storage: ${uploadError.message}`);
+          }
+
+          // Step 3: Confirm the upload
+          const confirmRes = await fetch("/api/storage/confirm-upload", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              nodeId: createUrlResult.nodeId,
+              storagePath: createUrlResult.storagePath,
+            }),
+          });
+
+          const confirmResult = await confirmRes.json();
+          if (!confirmRes.ok) {
+            throw new Error(confirmResult.error || "Failed to confirm upload");
+          }
+
+          newId = createUrlResult.nodeId;
+        } else {
+          // Use regular JSON API for small text files
+          const content = await readFileContent(file);
+          const fullPath = parentPath ? `${parentPath}/${fileName}` : fileName;
+
+          const res = await fetch("/api/files", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              action: "create_file",
+              path: fullPath,
+              content: content,
+              projectId: projectId,
+            }),
+          });
+
+          let result;
+          try {
+            const text = await res.text();
+            result = text ? JSON.parse(text) : {};
+          } catch {
+            throw new Error("Failed to parse server response.");
+          }
+
+          if (!res.ok) {
+            throw new Error(result.error || "Failed to create file");
+          }
+
+          newId = result.nodeId;
+        }
 
         // Update the node with the real ID
         setNodes(prev => prev.map(n => n.id === tempId ? { ...n, id: newId } : n));
 
-        // Save the file content
-        await supabase
-          .from("file_contents")
-          .upsert({ node_id: newId, text }, { onConflict: "node_id" });
-
-        // Open the file
+        // Open the file in tabs (MediaPreview will handle media files)
         setOpenTabs(prev => prev.includes(newId) ? prev : [...prev, newId]);
         setActiveNodeId(newId);
         setSelectedNodeIds(new Set([newId]));
       } catch (error: any) {
         setNodes(prev => prev.filter(n => n.id !== tempId));
+        if (createdNodeId) {
+          try {
+            await supabase.from("file_contents").delete().eq("node_id", createdNodeId);
+            await supabase.from("nodes").delete().eq("id", createdNodeId);
+          } catch (cleanupError) {
+            console.error("Failed to cleanup failed upload:", cleanupError);
+          }
+        }
         alert(`Upload error: ${error.message}`);
       }
     }
@@ -621,19 +749,93 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
-  }, [projectId, supabase]);
+    setUploadTargetParentId(null);
+  }, [projectId, supabase, uploadTargetParentId, pathByNodeId]);
 
-  const handleExport = useCallback(async () => {
-    // Get all file nodes
-    const fileNodes = nodes.filter(n => n.type === "file");
+  const handleFolderInputChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    const baseParentId = uploadTargetParentId;
+    // Get base parent path
+    const baseParentPath = baseParentId ? pathByNodeId.get(baseParentId) || "" : "";
+
+    // Sort files by path depth to process in order
+    const sortedFiles = Array.from(files).sort((a, b) => {
+      const aDepth = (a.webkitRelativePath || a.name).split("/").length;
+      const bDepth = (b.webkitRelativePath || b.name).split("/").length;
+      return aDepth - bDepth;
+    });
+
+    for (const file of sortedFiles) {
+      const relativePath = file.webkitRelativePath || file.name;
+      const content = await readFileContent(file);
+
+      // Build full path including base parent
+      const fullPath = baseParentPath ? `${baseParentPath}/${relativePath}` : relativePath;
+
+      try {
+        const res = await fetch("/api/files", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "create_file",
+            path: fullPath,
+            content: content,
+            projectId: projectId,
+          }),
+        });
+        if (!res.ok) {
+          const errorData = await res.json();
+          throw new Error(errorData.error || "Failed to create file");
+        }
+      } catch (error: any) {
+        console.error(`File upload error: ${error.message}`);
+      }
+    }
+
+    // Reset and refresh
+    if (folderInputRef.current) {
+      folderInputRef.current.value = "";
+    }
+    setUploadTargetParentId(null);
+    fetchNodes();
+  }, [projectId, uploadTargetParentId, pathByNodeId, fetchNodes]);
+
+  // Download handler
+  const handleDownload = useCallback(async (nodeIds: string[]) => {
+    // Collect all file nodes to download
+    const collectFiles = (ids: string[]): Node[] => {
+      const result: Node[] = [];
+      const collectRecursive = (id: string) => {
+        const node = nodeById.get(id);
+        if (!node) return;
+        if (node.type === "file") {
+          result.push(node);
+        } else {
+          // Folder - collect all children
+          nodes.filter(n => n.parent_id === id).forEach(child => collectRecursive(child.id));
+        }
+      };
+
+      if (ids.length === 0) {
+        // Download all root-level items
+        nodes.filter(n => n.parent_id === null).forEach(n => collectRecursive(n.id));
+      } else {
+        ids.forEach(collectRecursive);
+      }
+      return result;
+    };
+
+    const fileNodes = collectFiles(nodeIds);
+
     if (fileNodes.length === 0) {
-      alert("No files to export");
+      alert("No files to download");
       return;
     }
 
-    // If there's only one file, download it directly
-    if (fileNodes.length === 1) {
-      const node = fileNodes[0];
+    // Helper to download a single file
+    const downloadSingleFile = async (node: Node) => {
       const { data } = await supabase
         .from("file_contents")
         .select("text")
@@ -641,6 +843,39 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         .maybeSingle();
 
       const content = data?.text || "";
+
+      // Check if it's a storage file
+      if (content.startsWith("storage:")) {
+        // Download from Supabase Storage via API
+        const response = await fetch(`/api/storage/download?nodeId=${node.id}`);
+        if (!response.ok) {
+          const error = await response.json();
+          throw new Error(error.error || "Failed to download");
+        }
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = node.name;
+        a.click();
+        URL.revokeObjectURL(url);
+        return;
+      }
+
+      // Check if it's a data URL (legacy binary file)
+      if (content.startsWith("data:")) {
+        const response = await fetch(content);
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = node.name;
+        a.click();
+        URL.revokeObjectURL(url);
+        return;
+      }
+
+      // Text file
       const blob = new Blob([content], { type: "text/plain" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -648,12 +883,21 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       a.download = node.name;
       a.click();
       URL.revokeObjectURL(url);
+    };
+
+    // Single file download
+    if (fileNodes.length === 1) {
+      try {
+        await downloadSingleFile(fileNodes[0]);
+      } catch (error: any) {
+        alert(`Download error: ${error.message}`);
+      }
       return;
     }
 
-    // For multiple files, create a simple combined download
-    // Note: For a full ZIP implementation, you'd use a library like JSZip
-    const fileContents: string[] = [];
+    // Multiple files - combine text files, download storage files separately
+    const textContents: string[] = [];
+    const storageFiles: Node[] = [];
 
     for (const node of fileNodes) {
       const path = pathByNodeId.get(node.id) || node.name;
@@ -664,18 +908,38 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         .maybeSingle();
 
       const content = data?.text || "";
-      fileContents.push(`// === ${path} ===\n${content}\n`);
+
+      if (content.startsWith("storage:")) {
+        storageFiles.push(node);
+        textContents.push(`// === ${path} === (storage file, downloading separately)\n`);
+      } else if (content.startsWith("data:")) {
+        textContents.push(`// === ${path} === (binary file, skipped)\n`);
+      } else {
+        textContents.push(`// === ${path} ===\n${content}\n`);
+      }
     }
 
-    const combined = fileContents.join("\n");
-    const blob = new Blob([combined], { type: "text/plain" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${activeWorkspace.name}-export.txt`;
-    a.click();
-    URL.revokeObjectURL(url);
-  }, [nodes, supabase, pathByNodeId, activeWorkspace.name]);
+    // Download text files combined
+    if (textContents.length > 0) {
+      const combined = textContents.join("\n");
+      const blob = new Blob([combined], { type: "text/plain" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${activeWorkspace.name}-export.txt`;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    // Download storage files separately
+    for (const node of storageFiles) {
+      try {
+        await downloadSingleFile(node);
+      } catch (error: any) {
+        console.error(`Failed to download ${node.name}: ${error.message}`);
+      }
+    }
+  }, [nodes, nodeById, supabase, pathByNodeId, activeWorkspace.name]);
 
   const handleCloseTab = (id: string) => {
     setOpenTabs((prev) => prev.filter((x) => x !== id));
@@ -1652,8 +1916,9 @@ ${diffs}`;
             onCreateFolder={handleCreateFolder}
             onRenameNode={handleRenameNode}
             onDeleteNode={handleDeleteNode}
-            onUpload={handleUpload}
-            onExport={handleExport}
+            onUploadFiles={handleUploadFiles}
+            onUploadFolder={handleUploadFolder}
+            onDownload={handleDownload}
             projectName={activeWorkspace.name}
           />
         );
@@ -1693,14 +1958,24 @@ ${diffs}`;
     <div className="h-screen bg-white text-zinc-700 flex">
       <CommandPalette nodes={nodes} onSelectNode={handleOpenNode} onAction={handleAiAction} />
 
-      {/* Hidden file input for uploads */}
+      {/* Hidden file input for file uploads */}
       <input
         ref={fileInputRef}
         type="file"
         multiple
         className="hidden"
-        onChange={handleFileUpload}
-        accept=".txt,.md,.js,.jsx,.ts,.tsx,.json,.css,.html,.lua,.py,.env,.yml,.yaml,.xml,.svg"
+        onChange={handleFileInputChange}
+      />
+
+      {/* Hidden folder input for folder uploads */}
+      <input
+        ref={folderInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={handleFolderInputChange}
+        // @ts-ignore webkitdirectory is not in React types but needed for folder upload
+        webkitdirectory=""
       />
 
       {diffState.show && (
@@ -1787,12 +2062,19 @@ ${diffs}`;
                 onSave={() => handleSavePlanToWorkspace(activeVirtual.id)}
               />
             ) : activeNode ? (
-              <MainEditor
-                value={fileContent}
-                onChange={setFileContent}
-                fileName={activeNode.name}
-                onSave={saveContent}
-              />
+              isMediaFile(activeNode.name) ? (
+                <MediaPreview
+                  fileName={activeNode.name}
+                  nodeId={activeNode.id}
+                />
+              ) : (
+                <MainEditor
+                  value={fileContent}
+                  onChange={setFileContent}
+                  fileName={activeNode.name}
+                  onSave={saveContent}
+                />
+              )
             ) : (
               <div className="absolute inset-0 flex items-center justify-center text-zinc-400">
                 <div className="text-center">

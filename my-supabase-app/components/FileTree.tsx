@@ -19,12 +19,13 @@ type FileTreeProps = {
   onToggleSelectNode: (nodeId: string) => void;
   onClearSelection: () => void;
   onSelectFolder?: (nodeId: string) => void;
-  onCreateFile: (path: string) => void;
-  onCreateFolder: (path: string) => void;
+  onCreateFile: (path: string, parentId: string | null) => void;
+  onCreateFolder: (path: string, parentId: string | null) => void;
   onRenameNode: (id: string, newName: string) => void;
   onDeleteNode: (id: string) => void;
-  onUpload?: () => void;
-  onExport?: () => void;
+  onUploadFiles?: (parentId: string | null) => void;
+  onUploadFolder?: (parentId: string | null) => void;
+  onDownload?: (nodeIds: string[]) => void;
   projectName?: string;
 };
 
@@ -35,6 +36,12 @@ type EditingState = {
   targetId?: string;
   initialValue?: string;
 };
+
+type DropdownMenu = {
+  type: "more";
+  x: number;
+  y: number;
+} | null;
 
 export function FileTree({
   nodes,
@@ -47,8 +54,9 @@ export function FileTree({
   onCreateFolder,
   onRenameNode,
   onDeleteNode,
-  onUpload,
-  onExport,
+  onUploadFiles,
+  onUploadFolder,
+  onDownload,
   projectName,
 }: FileTreeProps) {
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
@@ -63,6 +71,8 @@ export function FileTree({
   const [validationError, setValidationError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const [isProjectExpanded, setIsProjectExpanded] = useState(true);
+  const [dropdownMenu, setDropdownMenu] = useState<DropdownMenu>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
 
   // Delete confirmation dialog state
   const [confirmDialog, setConfirmDialog] = useState<{
@@ -76,6 +86,15 @@ export function FileTree({
   });
 
   const nodeMap = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
+
+  // Get the selected folder (for creating files/folders in it)
+  const getSelectedParentId = (): string | null => {
+    if (selectedNodeIds.size === 0) return null;
+    const firstSelectedId = Array.from(selectedNodeIds)[0];
+    const selectedNode = nodeMap.get(firstSelectedId);
+    if (!selectedNode) return null;
+    return selectedNode.type === "folder" ? selectedNode.id : selectedNode.parent_id;
+  };
 
   const getNodePath = (nodeId: string | null): string => {
     if (!nodeId) return "";
@@ -96,6 +115,19 @@ export function FileTree({
       n.id !== excludeId
     );
   };
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as HTMLElement)) {
+        setDropdownMenu(null);
+      }
+    };
+    if (dropdownMenu) {
+      document.addEventListener("mousedown", handleClickOutside);
+    }
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [dropdownMenu]);
 
   useEffect(() => {
     if (editingState && inputRef.current) {
@@ -146,9 +178,9 @@ export function FileTree({
       const parentPath = getNodePath(editingState.parentId);
       const fullPath = parentPath ? `${parentPath}/${value}` : value;
       if (editingState.nodeType === "file") {
-        onCreateFile(fullPath);
+        onCreateFile(fullPath, editingState.parentId);
       } else {
-        onCreateFolder(fullPath);
+        onCreateFolder(fullPath, editingState.parentId);
       }
     } else if (editingState.type === "rename" && editingState.targetId) {
       if (value !== editingState.initialValue) {
@@ -182,18 +214,28 @@ export function FileTree({
     }
   };
 
-  const handleContextMenuAction = (action: string) => {
+  // Determine parent for context menu actions
+  const getContextParentId = (): string | null => {
     const targetId = contextMenu?.targetId || null;
     const targetNode = targetId ? nodeMap.get(targetId) : null;
 
-    let parentId: string | null = null;
     if (targetNode) {
       if (targetNode.type === "folder") {
-        parentId = targetNode.id;
-        setExpandedFolders(prev => new Set(prev).add(targetNode.id));
+        return targetNode.id;
       } else {
-        parentId = targetNode.parent_id;
+        return targetNode.parent_id;
       }
+    }
+    return null;
+  };
+
+  const handleContextMenuAction = (action: string) => {
+    const targetId = contextMenu?.targetId || null;
+    const targetNode = targetId ? nodeMap.get(targetId) : null;
+    const parentId = getContextParentId();
+
+    if (parentId && targetNode?.type === "folder") {
+      setExpandedFolders(prev => new Set(prev).add(parentId));
     }
 
     switch (action) {
@@ -202,6 +244,20 @@ export function FileTree({
         break;
       case "new_folder":
         setEditingState({ type: "create", nodeType: "folder", parentId });
+        break;
+      case "upload_files":
+        onUploadFiles?.(parentId);
+        break;
+      case "upload_folder":
+        onUploadFolder?.(parentId);
+        break;
+      case "download":
+        if (targetId) {
+          onDownload?.([targetId]);
+        } else {
+          // Download all
+          onDownload?.([]);
+        }
         break;
       case "rename":
         if (targetId && targetNode) {
@@ -240,6 +296,56 @@ export function FileTree({
       else next.add(id);
       return next;
     });
+  };
+
+  // Handle header button clicks - use selected folder as parent
+  const handleHeaderNewFile = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const parentId = getSelectedParentId();
+    if (parentId) {
+      setExpandedFolders(prev => new Set(prev).add(parentId));
+    }
+    setEditingState({ type: "create", nodeType: "file", parentId });
+  };
+
+  const handleHeaderNewFolder = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const parentId = getSelectedParentId();
+    if (parentId) {
+      setExpandedFolders(prev => new Set(prev).add(parentId));
+    }
+    setEditingState({ type: "create", nodeType: "folder", parentId });
+  };
+
+  const handleMoreClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const rect = (e.target as HTMLElement).getBoundingClientRect();
+    setDropdownMenu({
+      type: "more",
+      x: rect.left,
+      y: rect.bottom + 4,
+    });
+  };
+
+  const handleDropdownAction = (action: string) => {
+    const parentId = getSelectedParentId();
+
+    switch (action) {
+      case "upload_files":
+        onUploadFiles?.(parentId);
+        break;
+      case "upload_folder":
+        onUploadFolder?.(parentId);
+        break;
+      case "download":
+        if (selectedNodeIds.size > 0) {
+          onDownload?.(Array.from(selectedNodeIds));
+        } else {
+          onDownload?.([]);
+        }
+        break;
+    }
+    setDropdownMenu(null);
   };
 
   const renderTree = (parentId: string | null, depth: number = 0) => {
@@ -350,18 +456,6 @@ export function FileTree({
       const isSelected = selectedNodeIds.has(node.id);
       const FileIcon = getFileIcon(node.name);
 
-      const handleAddFile = (e: React.MouseEvent) => {
-        e.stopPropagation();
-        setExpandedFolders(prev => new Set(prev).add(node.id));
-        setEditingState({ type: "create", nodeType: "file", parentId: node.id });
-      };
-
-      const handleAddFolder = (e: React.MouseEvent) => {
-        e.stopPropagation();
-        setExpandedFolders(prev => new Set(prev).add(node.id));
-        setEditingState({ type: "create", nodeType: "folder", parentId: node.id });
-      };
-
       return (
         <div key={node.id}>
           <div
@@ -409,26 +503,6 @@ export function FileTree({
               <FileIcon className="w-4 h-4 flex-shrink-0" />
             )}
             <span className="truncate flex-1">{node.name}</span>
-
-            {/* Hover action buttons for folders */}
-            {node.type === "folder" && (
-              <div className="flex items-center gap-0.5 opacity-0 group-hover/item:opacity-100 transition-opacity">
-                <button
-                  onClick={handleAddFile}
-                  className="p-0.5 rounded text-zinc-500 hover:text-zinc-800 hover:bg-zinc-100"
-                  title="New File"
-                >
-                  <ActionIcons.FilePlus className="w-4 h-4" />
-                </button>
-                <button
-                  onClick={handleAddFolder}
-                  className="p-0.5 rounded text-zinc-500 hover:text-zinc-800 hover:bg-zinc-100"
-                  title="New Folder"
-                >
-                  <ActionIcons.FolderPlus className="w-4 h-4" />
-                </button>
-              </div>
-            )}
           </div>
 
           {node.type === "folder" && isExpanded && renderTree(node.id, depth + 1)}
@@ -454,6 +528,7 @@ export function FileTree({
       className="flex-1 flex flex-col min-h-0 text-zinc-700"
       onClick={(e) => {
         setContextMenu(null);
+        setDropdownMenu(null);
         if (e.target === e.currentTarget) {
           onClearSelection();
         }
@@ -477,50 +552,59 @@ export function FileTree({
           </div>
           <div className="flex items-center gap-0.5">
             <button
-              onClick={(e) => {
-                e.stopPropagation();
-                setEditingState({ type: "create", nodeType: "file", parentId: null });
-              }}
+              onClick={handleHeaderNewFile}
               className="p-1 rounded text-zinc-700 hover:text-zinc-900 bg-transparent hover:bg-transparent"
               title="New File"
             >
               <ActionIcons.FilePlus className="w-[18px] h-[18px]" />
             </button>
             <button
-              onClick={(e) => {
-                e.stopPropagation();
-                setEditingState({ type: "create", nodeType: "folder", parentId: null });
-              }}
+              onClick={handleHeaderNewFolder}
               className="p-1 rounded text-zinc-700 hover:text-zinc-900 bg-transparent hover:bg-transparent"
               title="New Folder"
             >
               <ActionIcons.FolderPlus className="w-[18px] h-[18px]" />
             </button>
-            {onUpload && (
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onUpload();
-                }}
-                className="p-1 rounded text-zinc-700 hover:text-zinc-900 bg-transparent hover:bg-transparent"
-                title="Upload File"
-              >
-                <ActionIcons.Upload className="w-[18px] h-[18px]" />
-              </button>
-            )}
-            {onExport && (
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onExport();
-                }}
-                className="p-1 rounded text-zinc-700 hover:text-zinc-900 bg-transparent hover:bg-transparent"
-                title="Export"
-              >
-                <ActionIcons.Export className="w-[18px] h-[18px]" />
-              </button>
-            )}
+            <button
+              onClick={handleMoreClick}
+              className="p-1 rounded text-zinc-700 hover:text-zinc-900 bg-transparent hover:bg-transparent"
+              title="More Actions"
+            >
+              <ActionIcons.More className="w-[18px] h-[18px]" />
+            </button>
           </div>
+        </div>
+      )}
+
+      {/* Dropdown menu */}
+      {dropdownMenu && (
+        <div
+          ref={dropdownRef}
+          className="fixed bg-white border border-zinc-200 rounded-lg shadow-lg py-1 z-50 min-w-[180px]"
+          style={{ left: dropdownMenu.x, top: dropdownMenu.y }}
+        >
+          <button
+            className="w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-100 flex items-center gap-2"
+            onClick={() => handleDropdownAction("upload_files")}
+          >
+            <ActionIcons.Upload className="w-4 h-4" />
+            Upload Files
+          </button>
+          <button
+            className="w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-100 flex items-center gap-2"
+            onClick={() => handleDropdownAction("upload_folder")}
+          >
+            <ActionIcons.FolderUpload className="w-4 h-4" />
+            Upload Folder
+          </button>
+          <div className="border-t border-zinc-200 my-1" />
+          <button
+            className="w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-100 flex items-center gap-2"
+            onClick={() => handleDropdownAction("download")}
+          >
+            <ActionIcons.Download className="w-4 h-4" />
+            {selectedNodeIds.size > 0 ? "Download Selected" : "Download All"}
+          </button>
         </div>
       )}
 
@@ -552,6 +636,11 @@ export function FileTree({
           items={[
             { label: "New File", action: () => handleContextMenuAction("new_file") },
             { label: "New Folder", action: () => handleContextMenuAction("new_folder") },
+            { separator: true, label: "", action: () => {} },
+            { label: "Upload Files", action: () => handleContextMenuAction("upload_files") },
+            { label: "Upload Folder", action: () => handleContextMenuAction("upload_folder") },
+            { separator: true, label: "", action: () => {} },
+            { label: "Download", action: () => handleContextMenuAction("download") },
             ...(contextMenu.targetId ? [
               { separator: true, label: "", action: () => {} },
               { label: "Rename", action: () => handleContextMenuAction("rename") },
