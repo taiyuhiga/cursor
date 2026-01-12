@@ -15,7 +15,7 @@ import { CreateWorkspaceDialog } from "@/components/CreateWorkspaceDialog";
 import { SettingsView } from "@/components/SettingsView";
 import { ReviewPanel } from "@/components/ReviewPanel";
 import { SourceControlPanel, type SourceControlChange } from "@/components/SourceControlPanel";
-import { MediaPreview, isMediaFile } from "@/components/MediaPreview";
+import { MediaPreview, isMediaFile, prefetchMediaUrl } from "@/components/MediaPreview";
 import type { PendingChange, ReviewIssue } from "@/lib/review/types";
 import type { AgentCheckpointChange, AgentCheckpointRecordInput } from "@/lib/checkpoints/types";
 
@@ -165,6 +165,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const [uploadTargetParentId, setUploadTargetParentId] = useState<string | null>(null);
+  const [uploadProgress, setUploadProgress] = useState<Record<string, number>>({});
   const supabase = createClient();
 
   const nodeById = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
@@ -532,6 +533,11 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const handleOpenNode = (nodeId: string) => {
     // フォルダかどうかはFileTree側で判断して展開/ファイルオープンを呼び分けてもらう形にするが、
     // ここではファイルを開く処理のみ
+    const isTempNode = nodeId.startsWith("temp-");
+    const node = nodeById.get(nodeId);
+    if (!isTempNode && node && isMediaFile(node.name)) {
+      prefetchMediaUrl(nodeId);
+    }
     setOpenTabs((prev) =>
       prev.includes(nodeId) ? prev : [...prev, nodeId]
     );
@@ -541,6 +547,14 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       setActiveActivity("explorer");
     }
   };
+
+  const handleHoverNode = useCallback((nodeId: string) => {
+    if (nodeId.startsWith("temp-")) return;
+    const node = nodeById.get(nodeId);
+    if (node && isMediaFile(node.name)) {
+      prefetchMediaUrl(nodeId);
+    }
+  }, [nodeById]);
 
   const handleToggleSelectNode = useCallback((nodeId: string) => {
     setSelectedNodeIds((prev) => {
@@ -604,6 +618,33 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     }
   };
 
+  const uploadFileToSignedUrl = useCallback((uploadUrl: string, file: File, onProgress: (percent: number | null) => void) => {
+    return new Promise<void>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("PUT", uploadUrl);
+      xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+      xhr.upload.onprogress = (event) => {
+        if (!event.lengthComputable) {
+          onProgress(null);
+          return;
+        }
+        const percent = Math.min(100, Math.round((event.loaded / event.total) * 100));
+        onProgress(percent);
+      };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          onProgress(100);
+          resolve();
+        } else {
+          reject(new Error(`Failed to upload file to storage (status ${xhr.status})`));
+        }
+      };
+      xhr.onerror = () => reject(new Error("Failed to upload file to storage"));
+      xhr.onabort = () => reject(new Error("Upload cancelled"));
+      xhr.send(file);
+    });
+  }, []);
+
   const handleFileInputChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
@@ -659,23 +700,17 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
           }
 
           createdNodeId = createUrlResult.nodeId;
-          if (!createUrlResult.token || !createUrlResult.storagePath) {
+          if (!createUrlResult.uploadUrl || !createUrlResult.storagePath) {
             throw new Error("Invalid upload URL response");
           }
 
-          // Step 2: Upload directly to Supabase Storage using signed URL token
-          const { error: uploadError } = await supabase.storage
-            .from("files")
-            .uploadToSignedUrl(
-              createUrlResult.storagePath,
-              createUrlResult.token,
-              file,
-              { contentType: file.type || "application/octet-stream" }
-            );
+          setUploadProgress(prev => ({ ...prev, [tempId]: 0 }));
 
-          if (uploadError) {
-            throw new Error(`Failed to upload file to storage: ${uploadError.message}`);
-          }
+          // Step 2: Upload directly to Supabase Storage using signed URL (XHR for progress)
+          await uploadFileToSignedUrl(createUrlResult.uploadUrl, file, (percent) => {
+            if (percent === null) return;
+            setUploadProgress(prev => ({ ...prev, [tempId]: percent }));
+          });
 
           // Step 3: Confirm the upload
           const confirmRes = await fetch("/api/storage/confirm-upload", {
@@ -724,15 +759,34 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
           newId = result.nodeId;
         }
 
+        if (isMediaFile(fileName)) {
+          prefetchMediaUrl(newId);
+        }
+
         // Update the node with the real ID
         setNodes(prev => prev.map(n => n.id === tempId ? { ...n, id: newId } : n));
 
         // Open the file in tabs (MediaPreview will handle media files)
-        setOpenTabs(prev => prev.includes(newId) ? prev : [...prev, newId]);
+        setOpenTabs(prev => {
+          const replaced = prev.map(id => id === tempId ? newId : id);
+          return replaced.includes(newId) ? replaced : [...replaced, newId];
+        });
         setActiveNodeId(newId);
         setSelectedNodeIds(new Set([newId]));
+        setUploadProgress(prev => {
+          const next = { ...prev };
+          delete next[tempId];
+          return next;
+        });
       } catch (error: any) {
         setNodes(prev => prev.filter(n => n.id !== tempId));
+        setOpenTabs(prev => prev.filter(id => id !== tempId));
+        setActiveNodeId(prev => (prev === tempId ? null : prev));
+        setUploadProgress(prev => {
+          const next = { ...prev };
+          delete next[tempId];
+          return next;
+        });
         if (createdNodeId) {
           try {
             await supabase.from("file_contents").delete().eq("node_id", createdNodeId);
@@ -750,7 +804,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       fileInputRef.current.value = "";
     }
     setUploadTargetParentId(null);
-  }, [projectId, supabase, uploadTargetParentId, pathByNodeId]);
+  }, [projectId, supabase, uploadTargetParentId, pathByNodeId, uploadFileToSignedUrl]);
 
   const handleFolderInputChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -982,6 +1036,11 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       setFileContent("");
       return;
     }
+    const activeNode = nodeById.get(activeNodeId);
+    if (activeNode && isMediaFile(activeNode.name)) {
+      setFileContent("");
+      return;
+    }
     const fetchContent = async () => {
       const { data, error } = await supabase
         .from("file_contents")
@@ -996,7 +1055,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       }
     };
     fetchContent();
-  }, [activeNodeId, supabase]);
+  }, [activeNodeId, nodeById, supabase]);
 
   // 保存
   const saveContent = useCallback(async () => {
@@ -1865,6 +1924,9 @@ ${diffs}`;
     ? (nodes.find((n) => n.id === activeNodeId) ?? null)
     : null;
   const activeEditorContent = activeVirtual ? activeVirtual.content : fileContent;
+  const activeUploadProgress = activeNode && activeNode.id.startsWith("temp-")
+    ? uploadProgress[activeNode.id]
+    : null;
 
   // ワークスペース切り替え
   const handleSwitchWorkspace = async (workspaceId: string) => {
@@ -1905,14 +1967,15 @@ ${diffs}`;
     switch (activeActivity) {
       case "explorer":
         return (
-          <FileTree
-            nodes={nodes}
-            selectedNodeIds={selectedNodeIds}
-            onSelectNode={handleOpenNode}
-            onToggleSelectNode={handleToggleSelectNode}
-            onClearSelection={handleClearSelection}
-            onSelectFolder={handleSelectFolder}
-            onCreateFile={handleCreateFile}
+            <FileTree
+              nodes={nodes}
+              selectedNodeIds={selectedNodeIds}
+              onSelectNode={handleOpenNode}
+              onToggleSelectNode={handleToggleSelectNode}
+              onClearSelection={handleClearSelection}
+              onHoverNode={handleHoverNode}
+              onSelectFolder={handleSelectFolder}
+              onCreateFile={handleCreateFile}
             onCreateFolder={handleCreateFolder}
             onRenameNode={handleRenameNode}
             onDeleteNode={handleDeleteNode}
@@ -1956,7 +2019,12 @@ ${diffs}`;
 
   return (
     <div className="h-screen bg-white text-zinc-700 flex">
-      <CommandPalette nodes={nodes} onSelectNode={handleOpenNode} onAction={handleAiAction} />
+      <CommandPalette
+        nodes={nodes}
+        onSelectNode={handleOpenNode}
+        onHoverNode={handleHoverNode}
+        onAction={handleAiAction}
+      />
 
       {/* Hidden file input for file uploads */}
       <input
@@ -2015,6 +2083,10 @@ ${diffs}`;
           tabs={tabs}
           activeId={activeNodeId}
           onSelect={(id) => {
+            const node = nodeById.get(id);
+            if (node && !id.startsWith("temp-") && isMediaFile(node.name)) {
+              prefetchMediaUrl(id);
+            }
             setActiveNodeId(id);
             if (nodes.some((n) => n.id === id)) {
               setSelectedNodeIds(new Set([id]));
@@ -2062,7 +2134,44 @@ ${diffs}`;
                 onSave={() => handleSavePlanToWorkspace(activeVirtual.id)}
               />
             ) : activeNode ? (
-              isMediaFile(activeNode.name) ? (
+              activeNode.id.startsWith("temp-") ? (
+                <div className="absolute inset-0 flex items-center justify-center text-zinc-500">
+                  <div className="flex flex-col items-center gap-3">
+                    <div className="flex items-center gap-3">
+                      <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
+                        <circle
+                          className="opacity-25"
+                          cx="12"
+                          cy="12"
+                          r="10"
+                          stroke="currentColor"
+                          strokeWidth="4"
+                          fill="none"
+                        />
+                        <path
+                          className="opacity-75"
+                          fill="currentColor"
+                          d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                        />
+                      </svg>
+                      <span>Uploading...</span>
+                    </div>
+                    {typeof activeUploadProgress === "number" && (
+                      <div className="w-64">
+                        <div className="h-1.5 w-full rounded-full bg-zinc-200 overflow-hidden">
+                          <div
+                            className="h-1.5 bg-blue-500"
+                            style={{ width: `${activeUploadProgress}%` }}
+                          />
+                        </div>
+                        <div className="mt-2 text-xs text-zinc-500 text-center">
+                          {activeUploadProgress}%
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : isMediaFile(activeNode.name) ? (
                 <MediaPreview
                   fileName={activeNode.name}
                   nodeId={activeNode.id}
@@ -2140,6 +2249,7 @@ ${diffs}`;
             onFileCreated={handleFileCreated}
             nodes={nodes}
             onGetFileContent={handleGetFileContent}
+            onHoverNode={handleHoverNode}
             reviewChanges={pendingChanges}
             reviewIssues={reviewIssues}
             isFindingReviewIssues={isFindingReviewIssues}

@@ -98,6 +98,7 @@ type Props = {
   onFileCreated?: () => void;
   nodes: FileNode[];
   onGetFileContent: (nodeId: string) => Promise<string>;
+  onHoverNode?: (nodeId: string) => void;
 
   // Cursor-like Review (rendered inside the chat panel)
   reviewChanges?: PendingChange[];
@@ -139,6 +140,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
   onFileCreated,
   nodes,
   onGetFileContent,
+  onHoverNode,
   reviewChanges,
   reviewIssues,
   isFindingReviewIssues,
@@ -2536,6 +2538,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
                   {filteredFiles.map((file, index) => (
                     <button
                       key={file.id}
+                      onMouseEnter={() => onHoverNode?.(file.id)}
                       onClick={() => insertFileReference(file.name)}
                       className={`w-full text-left px-3 py-2 text-xs flex items-center gap-2 ${index === selectedFileIndex ? "bg-blue-50 text-blue-700" : "text-zinc-700 hover:bg-zinc-50"}`}
                     >
@@ -3159,12 +3162,13 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
           {showFilesPopup && filteredFiles.length > 0 && (
             <div ref={filesPopupRef} className="absolute bottom-full left-0 mb-2 w-64 bg-white border border-zinc-200 rounded-lg shadow-xl z-50 overflow-hidden max-h-48 overflow-y-auto py-1 animate-in fade-in slide-in-from-bottom-2 duration-100">
               <div className="px-3 py-1.5 text-[10px] font-semibold text-zinc-400 uppercase tracking-wider bg-zinc-50 border-b border-zinc-100">Files</div>
-              {filteredFiles.map((file, index) => (
-                <button
-                  key={file.id}
-                  onClick={() => insertFileReference(file.name)}
-                  className={`w-full text-left px-3 py-2 text-xs flex items-center gap-2 ${index === selectedFileIndex ? "bg-blue-50 text-blue-700" : "text-zinc-700 hover:bg-zinc-50"}`}
-                >
+                  {filteredFiles.map((file, index) => (
+                    <button
+                      key={file.id}
+                      onMouseEnter={() => onHoverNode?.(file.id)}
+                      onClick={() => insertFileReference(file.name)}
+                      className={`w-full text-left px-3 py-2 text-xs flex items-center gap-2 ${index === selectedFileIndex ? "bg-blue-50 text-blue-700" : "text-zinc-700 hover:bg-zinc-50"}`}
+                    >
                   <Icons.File className="w-3.5 h-3.5 text-zinc-400" />
                   <span className="truncate">{file.name}</span>
                 </button>

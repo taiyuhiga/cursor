@@ -103,10 +103,10 @@ export async function POST(req: NextRequest) {
       storagePath = buildStoragePath(node.project_id, node.id, node.name);
     }
 
-    // Create a signed URL (valid for 1 hour)
+    // Create a signed URL (valid for 24 hours)
     const { data: signedUrl, error: urlError } = await supabase.storage
       .from("files")
-      .createSignedUrl(storagePath, 3600);
+      .createSignedUrl(storagePath, 86400);
 
     if (urlError) {
       return NextResponse.json({ error: `Failed to create URL: ${urlError.message}` }, { status: 500 });

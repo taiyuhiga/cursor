@@ -18,6 +18,7 @@ type FileTreeProps = {
   onSelectNode: (nodeId: string) => void;
   onToggleSelectNode: (nodeId: string) => void;
   onClearSelection: () => void;
+  onHoverNode?: (nodeId: string) => void;
   onSelectFolder?: (nodeId: string) => void;
   onCreateFile: (path: string, parentId: string | null) => void;
   onCreateFolder: (path: string, parentId: string | null) => void;
@@ -49,6 +50,7 @@ export function FileTree({
   onSelectNode,
   onToggleSelectNode,
   onClearSelection,
+  onHoverNode,
   onSelectFolder,
   onCreateFile,
   onCreateFolder,
@@ -472,6 +474,11 @@ export function FileTree({
               }
             `}
             style={{ paddingLeft: `${depth * 16 + (node.type === "folder" ? 4 : 22)}px` }}
+            onMouseEnter={() => {
+              if (node.type === "file") {
+                onHoverNode?.(node.id);
+              }
+            }}
             onClick={(e) => {
               if (e.metaKey || e.ctrlKey) {
                 onToggleSelectNode(node.id);

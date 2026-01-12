@@ -29,6 +29,33 @@ type ReviewState = {
 
 type AgentMode = "agent" | "plan" | "ask";
 
+type DirectoryEntry = {
+  name?: string;
+  type?: "file" | "folder" | string;
+};
+
+type FileListEntry = {
+  path?: string;
+  name?: string;
+};
+
+type GrepResultEntry = {
+  path?: string;
+  lineNumber?: number;
+  line?: string;
+};
+
+type SearchResultEntry = {
+  path?: string;
+  relevantSnippet?: string;
+};
+
+type WebSearchResultEntry = {
+  title?: string;
+  url?: string;
+  snippet?: string;
+};
+
 async function initReviewState(projectId?: string): Promise<ReviewState> {
   const nodes = await listFiles(projectId);
   const nodeIdByPath = new Map<string, string>();
@@ -375,9 +402,9 @@ function formatToolOutput(name: string, result: any) {
       break;
     }
     case "list_directory": {
-      const entries = Array.isArray(result.entries) ? result.entries : [];
+      const entries = Array.isArray(result.entries) ? (result.entries as DirectoryEntry[]) : [];
       output = entries
-        .map((entry) => {
+        .map((entry: DirectoryEntry) => {
           if (!entry?.name) return "";
           return entry.type === "folder" ? `${entry.name}/` : String(entry.name);
         })
@@ -386,16 +413,16 @@ function formatToolOutput(name: string, result: any) {
       break;
     }
     case "list_files": {
-      const list = Array.isArray(result) ? result : [];
+      const list = Array.isArray(result) ? (result as FileListEntry[]) : [];
       output = list
-        .map((item) => item?.path || item?.name || "")
+        .map((item: FileListEntry) => item?.path || item?.name || "")
         .filter(Boolean)
         .join("\n");
       break;
     }
     case "grep": {
-      const results = Array.isArray(result.results) ? result.results : [];
-      const lines = results.map((item) => `${item.path}:${item.lineNumber}:${item.line}`);
+      const results = Array.isArray(result.results) ? (result.results as GrepResultEntry[]) : [];
+      const lines = results.map((item: GrepResultEntry) => `${item.path}:${item.lineNumber}:${item.line}`);
       output = lines.join("\n");
       if (result.matchCount && result.matchCount > results.length) {
         output = `${output}\n... and ${result.matchCount - results.length} more`;
@@ -403,14 +430,14 @@ function formatToolOutput(name: string, result: any) {
       break;
     }
     case "file_search": {
-      const results = Array.isArray(result.results) ? result.results : [];
-      output = results.map((item) => item.path).filter(Boolean).join("\n");
+      const results = Array.isArray(result.results) ? (result.results as SearchResultEntry[]) : [];
+      output = results.map((item: SearchResultEntry) => item.path).filter(Boolean).join("\n");
       break;
     }
     case "codebase_search": {
-      const results = Array.isArray(result.results) ? result.results : [];
+      const results = Array.isArray(result.results) ? (result.results as SearchResultEntry[]) : [];
       output = results
-        .map((item) => {
+        .map((item: SearchResultEntry) => {
           if (!item?.path) return "";
           const snippet = String(item.relevantSnippet || "").trim();
           if (!snippet) return String(item.path);
@@ -425,9 +452,9 @@ function formatToolOutput(name: string, result: any) {
       break;
     }
     case "web_search": {
-      const results = Array.isArray(result.results) ? result.results : [];
+      const results = Array.isArray(result.results) ? (result.results as WebSearchResultEntry[]) : [];
       output = results
-        .map((item) => {
+        .map((item: WebSearchResultEntry) => {
           const title = item?.title ? String(item.title) : "Result";
           const url = item?.url ? String(item.url) : "";
           const snippet = item?.snippet ? String(item.snippet) : "";

@@ -13,10 +13,11 @@ type Node = {
 type Props = {
   nodes: Node[];
   onSelectNode: (nodeId: string) => void;
+  onHoverNode?: (nodeId: string) => void;
   onAction: (action: string) => void;
 };
 
-export function CommandPalette({ nodes, onSelectNode, onAction }: Props) {
+export function CommandPalette({ nodes, onSelectNode, onHoverNode, onAction }: Props) {
   const [open, setOpen] = useState(false);
   const [mode, setMode] = useState<"file" | "command">("file");
 
@@ -73,6 +74,7 @@ export function CommandPalette({ nodes, onSelectNode, onAction }: Props) {
             {files.map((node) => (
               <Command.Item
                 key={node.id}
+                onMouseEnter={() => onHoverNode?.(node.id)}
                 onSelect={() => {
                   onSelectNode(node.id);
                   setOpen(false);

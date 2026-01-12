@@ -11,6 +11,76 @@ type MediaPreviewProps = {
 
 type MediaType = "image" | "video" | "audio" | "unknown";
 
+type MediaCacheEntry = {
+  url: string;
+  expiresAt: number;
+};
+
+const MEDIA_URL_CACHE = new Map<string, MediaCacheEntry>();
+const MEDIA_URL_INFLIGHT = new Map<string, Promise<string>>();
+const SIGNED_URL_TTL_MS = 24 * 60 * 60 * 1000 - 10 * 60 * 1000;
+const MAX_CACHE_ENTRIES = 64;
+
+function pruneMediaCache() {
+  if (MEDIA_URL_CACHE.size <= MAX_CACHE_ENTRIES) return;
+  const firstKey = MEDIA_URL_CACHE.keys().next().value as string | undefined;
+  if (firstKey) MEDIA_URL_CACHE.delete(firstKey);
+}
+
+function getCachedMediaUrl(nodeId: string): string | null {
+  const cached = MEDIA_URL_CACHE.get(nodeId);
+  if (!cached) return null;
+  if (cached.expiresAt <= Date.now()) {
+    MEDIA_URL_CACHE.delete(nodeId);
+    return null;
+  }
+  return cached.url;
+}
+
+async function requestMediaUrl(nodeId: string): Promise<string> {
+  const res = await fetch("/api/storage/download", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ nodeId }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.error || "Failed to get media URL");
+  }
+  if (!data.url) {
+    throw new Error("Missing media URL");
+  }
+  return data.url as string;
+}
+
+async function fetchMediaUrl(nodeId: string): Promise<string> {
+  const cached = getCachedMediaUrl(nodeId);
+  if (cached) return cached;
+  const inFlight = MEDIA_URL_INFLIGHT.get(nodeId);
+  if (inFlight) return inFlight;
+
+  const promise = requestMediaUrl(nodeId)
+    .then((url) => {
+      MEDIA_URL_CACHE.set(nodeId, {
+        url,
+        expiresAt: Date.now() + SIGNED_URL_TTL_MS,
+      });
+      pruneMediaCache();
+      return url;
+    })
+    .finally(() => {
+      MEDIA_URL_INFLIGHT.delete(nodeId);
+    });
+
+  MEDIA_URL_INFLIGHT.set(nodeId, promise);
+  return promise;
+}
+
+export function prefetchMediaUrl(nodeId: string) {
+  if (!nodeId) return;
+  void fetchMediaUrl(nodeId).catch(() => {});
+}
+
 function getMediaType(fileName: string): MediaType {
   const ext = fileName.split(".").pop()?.toLowerCase() || "";
 
@@ -60,46 +130,58 @@ function getFileIcon(fileName: string): React.ReactNode {
 }
 
 export function MediaPreview({ fileName, nodeId, onError }: MediaPreviewProps) {
-  const [mediaUrl, setMediaUrl] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+  const initialUrl = getCachedMediaUrl(nodeId);
+  const [mediaUrl, setMediaUrl] = useState<string | null>(initialUrl);
+  const [isLoading, setIsLoading] = useState(!initialUrl);
   const [error, setError] = useState<string | null>(null);
 
   const mediaType = getMediaType(fileName);
 
   useEffect(() => {
-    const fetchMediaUrl = async () => {
-      setIsLoading(true);
+    let cancelled = false;
+
+    if (!nodeId || mediaType === "unknown") {
+      setMediaUrl(null);
+      setIsLoading(false);
       setError(null);
+      return () => {
+        cancelled = true;
+      };
+    }
 
-      try {
-        // Get signed URL from the storage download API
-        const res = await fetch("/api/storage/download", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ nodeId }),
-        });
+    setError(null);
 
-        const data = await res.json();
+    const cached = getCachedMediaUrl(nodeId);
+    if (cached) {
+      setMediaUrl(cached);
+      setIsLoading(false);
+      return () => {
+        cancelled = true;
+      };
+    }
 
-        if (!res.ok) {
-          throw new Error(data.error || "Failed to get media URL");
-        }
+    setMediaUrl(null);
+    setIsLoading(true);
 
-        setMediaUrl(data.url);
-      } catch (err: any) {
-        const errorMsg = err.message || "Failed to load media";
+    fetchMediaUrl(nodeId)
+      .then((url) => {
+        if (cancelled) return;
+        setMediaUrl(url);
+      })
+      .catch((err: any) => {
+        if (cancelled) return;
+        const errorMsg = err?.message || "Failed to load media";
         setError(errorMsg);
         onError?.(errorMsg);
-      } finally {
+      })
+      .finally(() => {
+        if (cancelled) return;
         setIsLoading(false);
-      }
-    };
+      });
 
-    if (nodeId && mediaType !== "unknown") {
-      fetchMediaUrl();
-    } else {
-      setIsLoading(false);
-    }
+    return () => {
+      cancelled = true;
+    };
   }, [nodeId, mediaType, onError]);
 
   if (mediaType === "unknown") {
