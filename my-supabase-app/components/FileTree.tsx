@@ -687,7 +687,7 @@ export function FileTree({
               group/item flex items-center gap-1 px-2 py-1 text-[14px] leading-5 cursor-pointer select-none
               transition-colors duration-75
               ${isDragOver || isDragOverSubtree
-                ? "bg-green-100/75 text-zinc-900"
+                ? "bg-green-600/10 text-zinc-900"
                 : isSelected
                   ? "bg-blue-600/10 text-zinc-900"
                   : "text-zinc-700 hover:bg-zinc-100"
@@ -838,7 +838,7 @@ export function FileTree({
       {/* File tree content */}
       <div
         className={`flex-1 overflow-y-auto py-1 transition-colors duration-75 ${
-          dragOverNodeId === "root" ? "bg-green-100/75" : ""
+          dragOverNodeId === "root" ? "bg-green-600/10" : ""
         }`}
         ref={treeScrollRef}
         onClick={(e) => {
