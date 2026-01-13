@@ -523,6 +523,30 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     }
   };
 
+  const handleMoveNode = async (nodeId: string, newParentId: string | null) => {
+    // Optimistic: 即座にUIを更新
+    const oldNode = nodes.find(n => n.id === nodeId);
+    if (!oldNode) return;
+
+    // Check if moving to the same parent (no-op)
+    if (oldNode.parent_id === newParentId) return;
+
+    setNodes(prev => prev.map(n => n.id === nodeId ? { ...n, parent_id: newParentId } : n));
+
+    try {
+      const res = await fetch("/api/files", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "move_node", id: nodeId, newParentId }),
+      });
+      if (!res.ok) throw new Error("Failed to move");
+    } catch (error: any) {
+      // 失敗したらロールバック
+      setNodes(prev => prev.map(n => n.id === nodeId ? oldNode : n));
+      alert(`Error: ${error.message}`);
+    }
+  };
+
   const handleDeleteNode = async (id: string) => {
     // Optimistic: 即座にUIから削除
     const oldNodes = [...nodes];
@@ -1077,7 +1101,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
 
     const refreshedNodes = await fetchNodes();
     if (rootFolderName) {
-      const folderNode = refreshedNodes.find((node) =>
+      const folderNode = refreshedNodes.find((node: Node) =>
         node.type === "folder" &&
         node.name === rootFolderName &&
         node.parent_id === parentId
@@ -2313,6 +2337,7 @@ ${diffs}`;
             onUploadFolder={handleUploadFolder}
             onDownload={handleDownload}
             onDropFiles={handleDropFilesOnFolder}
+            onMoveNode={handleMoveNode}
             projectName={activeWorkspace.name}
             userEmail={userEmail}
             onOpenSettings={() => setActiveActivity("settings")}

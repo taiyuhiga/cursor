@@ -30,6 +30,7 @@ type FileTreeProps = {
   onUploadFolder?: (parentId: string | null) => void;
   onDownload?: (nodeIds: string[]) => void;
   onDropFiles?: (dataTransfer: DataTransfer, targetFolderId: string | null) => void;
+  onMoveNode?: (nodeId: string, newParentId: string | null) => void;
   projectName?: string;
   userEmail?: string;
   userName?: string;
@@ -68,6 +69,7 @@ export function FileTree({
   onUploadFolder,
   onDownload,
   onDropFiles,
+  onMoveNode,
   projectName,
   userEmail,
   userName,
@@ -91,6 +93,7 @@ export function FileTree({
   const dropdownRef = useRef<HTMLDivElement>(null);
   const [dragOverNodeId, setDragOverNodeId] = useState<string | null>(null);
   const [dragOverSubtreeId, setDragOverSubtreeId] = useState<string | null>(null);
+  const [draggingNodeId, setDraggingNodeId] = useState<string | null>(null);
   const dragCounterRef = useRef<Record<string, number>>({});
   const dragExpandTimerRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -372,6 +375,23 @@ export function FileTree({
     return hasFiles && !hasInternalNode;
   };
 
+  // Check if drag is internal node drag
+  const isInternalNodeDrag = (dataTransfer: DataTransfer): boolean => {
+    if (!dataTransfer.types) return false;
+    return dataTransfer.types.includes("application/cursor-node");
+  };
+
+  // Check if any drag is happening (external or internal)
+  const isAnyDrag = (dataTransfer: DataTransfer): boolean => {
+    return isExternalFileDrag(dataTransfer) || isInternalNodeDrag(dataTransfer);
+  };
+
+  // Check if dropping node into target would create a cycle (can't drop folder into itself or its descendants)
+  const wouldCreateCycle = (draggedNodeId: string, targetFolderId: string | null): boolean => {
+    if (!targetFolderId) return false;
+    return isNodeInSubtree(targetFolderId, draggedNodeId);
+  };
+
   // Clear drag expand timer
   const clearDragExpandTimer = () => {
     if (dragExpandTimerRef.current) {
@@ -399,11 +419,27 @@ export function FileTree({
 
   // Drag handlers for node drop targets (files and folders)
   const handleNodeDragEnter = (e: React.DragEvent, nodeId: string) => {
-    if (!isExternalFileDrag(e.dataTransfer)) return;
+    const isExternal = isExternalFileDrag(e.dataTransfer);
+    const isInternal = isInternalNodeDrag(e.dataTransfer);
+    if (!isExternal && !isInternal) return;
+
     e.preventDefault();
     e.stopPropagation();
     const node = nodeMap.get(nodeId);
     if (!node) return;
+
+    // For internal drag, prevent dropping onto itself or its descendants
+    if (isInternal && draggingNodeId) {
+      const targetFolderId = node.type === "folder" ? node.id : node.parent_id;
+      if (wouldCreateCycle(draggingNodeId, targetFolderId)) {
+        return;
+      }
+      // Don't allow dropping on the node being dragged
+      if (nodeId === draggingNodeId) {
+        return;
+      }
+    }
+
     const isTopLevelFile = node.type === "file" && !node.parent_id;
     const targetId = node.type === "file"
       ? (node.parent_id ?? "root")
@@ -446,7 +482,10 @@ export function FileTree({
   };
 
   const handleNodeDragLeave = (e: React.DragEvent, nodeId: string) => {
-    if (!isExternalFileDrag(e.dataTransfer)) return;
+    const isExternal = isExternalFileDrag(e.dataTransfer);
+    const isInternal = isInternalNodeDrag(e.dataTransfer);
+    if (!isExternal && !isInternal) return;
+
     e.preventDefault();
     e.stopPropagation();
     const node = nodeMap.get(nodeId);
@@ -463,15 +502,31 @@ export function FileTree({
     }
   };
 
-  const handleNodeDragOver = (e: React.DragEvent) => {
-    if (!isExternalFileDrag(e.dataTransfer)) return;
+  const handleNodeDragOver = (e: React.DragEvent, nodeId?: string) => {
+    const isExternal = isExternalFileDrag(e.dataTransfer);
+    const isInternal = isInternalNodeDrag(e.dataTransfer);
+    if (!isExternal && !isInternal) return;
+
+    // For internal drag, prevent dropping onto itself or its descendants
+    if (isInternal && draggingNodeId && nodeId) {
+      const node = nodeMap.get(nodeId);
+      const targetFolderId = node?.type === "folder" ? node.id : node?.parent_id ?? null;
+      if (wouldCreateCycle(draggingNodeId, targetFolderId) || nodeId === draggingNodeId) {
+        e.dataTransfer.dropEffect = "none";
+        return;
+      }
+    }
+
     e.preventDefault();
     e.stopPropagation();
-    e.dataTransfer.dropEffect = "copy";
+    e.dataTransfer.dropEffect = isInternal ? "move" : "copy";
   };
 
   const handleNodeDrop = (e: React.DragEvent, nodeId: string | null) => {
-    if (!isExternalFileDrag(e.dataTransfer)) return;
+    const isExternal = isExternalFileDrag(e.dataTransfer);
+    const isInternal = isInternalNodeDrag(e.dataTransfer);
+    if (!isExternal && !isInternal) return;
+
     e.preventDefault();
     e.stopPropagation();
     clearDragExpandTimer();
@@ -479,10 +534,29 @@ export function FileTree({
     setDragOverNodeId(null);
     setDragOverSubtreeId(null);
 
-    if (onDropFiles) {
-      // Get the target folder (for files, use parent folder)
-      const targetFolderId = nodeId ? getDropTargetFolderId(nodeId) : null;
-      // Expand the folder when dropping into it
+    // Get the target folder (for files, use parent folder)
+    const targetFolderId = nodeId ? getDropTargetFolderId(nodeId) : null;
+
+    if (isInternal && draggingNodeId) {
+      // Internal move
+      if (wouldCreateCycle(draggingNodeId, targetFolderId)) {
+        setDraggingNodeId(null);
+        return;
+      }
+      // Check if moving to the same parent (no-op)
+      const draggedNode = nodeMap.get(draggingNodeId);
+      if (draggedNode?.parent_id === targetFolderId) {
+        setDraggingNodeId(null);
+        return;
+      }
+      // Expand the target folder
+      if (targetFolderId) {
+        setExpandedFolders(prev => new Set(prev).add(targetFolderId));
+      }
+      onMoveNode?.(draggingNodeId, targetFolderId);
+      setDraggingNodeId(null);
+    } else if (isExternal && onDropFiles) {
+      // External file drop
       if (targetFolderId) {
         setExpandedFolders(prev => new Set(prev).add(targetFolderId));
       }
@@ -490,9 +564,19 @@ export function FileTree({
     }
   };
 
+  const handleDragEnd = () => {
+    setDraggingNodeId(null);
+    setDragOverNodeId(null);
+    setDragOverSubtreeId(null);
+    clearDragExpandTimer();
+    dragCounterRef.current = {};
+  };
+
   // Reset drag state when drag leaves the tree entirely
   const handleTreeDragLeave = (e: React.DragEvent) => {
-    if (!isExternalFileDrag(e.dataTransfer)) return;
+    const isExternal = isExternalFileDrag(e.dataTransfer);
+    const isInternal = isInternalNodeDrag(e.dataTransfer);
+    if (!isExternal && !isInternal) return;
     // Only reset if leaving the tree container itself
     const rect = treeScrollRef.current?.getBoundingClientRect();
     if (rect) {
@@ -662,6 +746,7 @@ export function FileTree({
 
       const isExpanded = expandedFolders.has(node.id);
       const isSelected = selectedNodeIds.has(node.id);
+      const isBeingDragged = draggingNodeId === node.id;
       const isRootDragOver = dragOverNodeId === "root";
       const isDragOver = !isRootDragOver && dragOverNodeId === node.id;
       const isDragOverSubtree =
@@ -676,21 +761,25 @@ export function FileTree({
             draggable
             data-node-id={node.id}
             onDragStart={(e) => {
-              e.dataTransfer.setData("application/cursor-node", node.name);
-              e.dataTransfer.effectAllowed = "copy";
+              e.dataTransfer.setData("application/cursor-node", node.id);
+              e.dataTransfer.effectAllowed = "move";
+              setDraggingNodeId(node.id);
             }}
+            onDragEnd={handleDragEnd}
             onDragEnter={(e) => handleNodeDragEnter(e, node.id)}
             onDragLeave={(e) => handleNodeDragLeave(e, node.id)}
-            onDragOver={handleNodeDragOver}
+            onDragOver={(e) => handleNodeDragOver(e, node.id)}
             onDrop={(e) => handleNodeDrop(e, node.id)}
             className={`
               group/item flex items-center gap-1 px-2 py-1 text-[14px] leading-5 cursor-pointer select-none
               transition-colors duration-75
-              ${isDragOver || isDragOverSubtree
-                ? "bg-green-600/10 text-zinc-900"
-                : isSelected
-                  ? "bg-blue-600/10 text-zinc-900"
-                  : "text-zinc-700 hover:bg-zinc-100"
+              ${isBeingDragged
+                ? "opacity-50"
+                : isDragOver || isDragOverSubtree
+                  ? "bg-green-600/10 text-zinc-900"
+                  : isSelected
+                    ? "bg-blue-600/10 text-zinc-900"
+                    : "text-zinc-700 hover:bg-zinc-100"
               }
             `}
             style={{ paddingLeft: `${depth * 16 + (node.type === "folder" ? 4 : 22)}px` }}
@@ -847,7 +936,9 @@ export function FileTree({
           }
         }}
         onDragEnter={(e) => {
-          if (!isExternalFileDrag(e.dataTransfer)) return;
+          const isExternal = isExternalFileDrag(e.dataTransfer);
+          const isInternal = isInternalNodeDrag(e.dataTransfer);
+          if (!isExternal && !isInternal) return;
           e.preventDefault();
           dragCounterRef.current["root"] = (dragCounterRef.current["root"] || 0) + 1;
           // Only set root as target if not hovering over a specific folder
@@ -857,7 +948,9 @@ export function FileTree({
           }
         }}
         onDragLeave={(e) => {
-          if (!isExternalFileDrag(e.dataTransfer)) return;
+          const isExternal = isExternalFileDrag(e.dataTransfer);
+          const isInternal = isInternalNodeDrag(e.dataTransfer);
+          if (!isExternal && !isInternal) return;
           e.preventDefault();
           dragCounterRef.current["root"] = Math.max(0, (dragCounterRef.current["root"] || 1) - 1);
           if (dragCounterRef.current["root"] === 0 && dragOverNodeId === "root") {
@@ -866,16 +959,20 @@ export function FileTree({
           }
         }}
         onDragOver={(e) => {
-          if (!isExternalFileDrag(e.dataTransfer)) return;
+          const isExternal = isExternalFileDrag(e.dataTransfer);
+          const isInternal = isInternalNodeDrag(e.dataTransfer);
+          if (!isExternal && !isInternal) return;
           e.preventDefault();
-          e.dataTransfer.dropEffect = "copy";
+          e.dataTransfer.dropEffect = isInternal ? "move" : "copy";
           if (e.target === e.currentTarget) {
             setDragOverNodeId("root");
             setDragOverSubtreeId(null);
           }
         }}
         onDrop={(e) => {
-          if (!isExternalFileDrag(e.dataTransfer)) return;
+          const isExternal = isExternalFileDrag(e.dataTransfer);
+          const isInternal = isInternalNodeDrag(e.dataTransfer);
+          if (!isExternal && !isInternal) return;
           e.preventDefault();
           clearDragExpandTimer();
           dragCounterRef.current = {};
@@ -886,7 +983,15 @@ export function FileTree({
           }
           setDragOverNodeId(null);
           setDragOverSubtreeId(null);
-          if (onDropFiles) {
+
+          if (isInternal && draggingNodeId) {
+            // Internal move to root
+            const draggedNode = nodeMap.get(draggingNodeId);
+            if (draggedNode?.parent_id !== targetFolderId) {
+              onMoveNode?.(draggingNodeId, targetFolderId);
+            }
+            setDraggingNodeId(null);
+          } else if (isExternal && onDropFiles) {
             if (targetFolderId) {
               setExpandedFolders(prev => new Set(prev).add(targetFolderId!));
             }

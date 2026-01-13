@@ -143,7 +143,18 @@ export async function POST(req: NextRequest) {
         result = { success: true };
         break;
       }
-      
+
+      case "move_node": {
+        const { newParentId } = body;
+        const { error } = await supabase
+          .from("nodes")
+          .update({ parent_id: newParentId })
+          .eq("id", id);
+        if (error) throw new Error(error.message);
+        result = { success: true };
+        break;
+      }
+
       default:
         return NextResponse.json({ error: "Invalid action" }, { status: 400 });
     }
