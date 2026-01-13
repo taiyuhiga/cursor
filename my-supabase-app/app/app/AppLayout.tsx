@@ -28,6 +28,21 @@ type Node = {
   created_at: string;
 };
 
+type UploadItem = {
+  file: File;
+  relativePath: string;
+};
+
+type WebkitEntry = {
+  isFile: boolean;
+  isDirectory: boolean;
+  name: string;
+  file?: (success: (file: File) => void, error?: (error: DOMException) => void) => void;
+  createReader?: () => {
+    readEntries: (success: (entries: WebkitEntry[]) => void, error?: (error: DOMException) => void) => void;
+  };
+};
+
 type Workspace = {
   id: string;
   name: string;
@@ -166,7 +181,23 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const folderInputRef = useRef<HTMLInputElement>(null);
   const [uploadTargetParentId, setUploadTargetParentId] = useState<string | null>(null);
   const [uploadProgress, setUploadProgress] = useState<Record<string, number>>({});
+  const [revealNodeId, setRevealNodeId] = useState<string | null>(null);
+  const prefetchedMediaIdsRef = useRef<Set<string>>(new Set());
   const supabase = createClient();
+
+  const runWithConcurrency = useCallback(async <T,>(items: T[], limit: number, worker: (item: T) => Promise<void>) => {
+    if (items.length === 0) return;
+    const queue = items.slice();
+    const concurrency = Math.max(1, Math.min(limit, queue.length));
+    const workers = Array.from({ length: concurrency }, async () => {
+      while (queue.length) {
+        const next = queue.shift();
+        if (!next) return;
+        await worker(next);
+      }
+    });
+    await Promise.all(workers);
+  }, []);
 
   const nodeById = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
 
@@ -208,6 +239,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       setNodes(data || []);
     }
     setIsLoading(false);
+    return data || [];
   }, [projectId, supabase]);
 
   useEffect(() => {
@@ -556,6 +588,43 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     }
   }, [nodeById]);
 
+  useEffect(() => {
+    if (!nodes.length) return;
+    const mediaNodes = nodes.filter((node) =>
+      node.type === "file" &&
+      !node.id.startsWith("temp-") &&
+      isMediaFile(node.name)
+    );
+    if (mediaNodes.length === 0) return;
+
+    const pending = mediaNodes.filter((node) => !prefetchedMediaIdsRef.current.has(node.id));
+    if (pending.length === 0) return;
+
+    let cancelled = false;
+    const queue = pending.slice(0, 256);
+    const concurrency = 4;
+
+    const worker = async () => {
+      while (!cancelled) {
+        const next = queue.shift();
+        if (!next) return;
+        prefetchedMediaIdsRef.current.add(next.id);
+        await prefetchMediaUrl(next.id);
+      }
+    };
+
+    const timer = window.setTimeout(() => {
+      for (let i = 0; i < concurrency; i += 1) {
+        void worker();
+      }
+    }, 300);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [nodes]);
+
   const handleToggleSelectNode = useCallback((nodeId: string) => {
     setSelectedNodeIds((prev) => {
       const next = new Set(prev);
@@ -645,25 +714,36 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     });
   }, []);
 
-  const handleFileInputChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
-
-    const parentId = uploadTargetParentId;
-    // Get parent path from parentId
+  const uploadFiles = useCallback(async (files: File[], parentId: string | null) => {
+    if (!files.length) return;
     const parentPath = parentId ? pathByNodeId.get(parentId) || "" : "";
 
     // Threshold for using Storage (2MB for binary, 5MB for text)
     const STORAGE_THRESHOLD_BINARY = 2 * 1024 * 1024;
     const STORAGE_THRESHOLD_TEXT = 5 * 1024 * 1024;
 
-    for (const file of Array.from(files)) {
+    const filesArray = Array.from(files);
+    const lastFile = filesArray[filesArray.length - 1];
+    let lastTempId: string | null = null;
+    let lastFinalId: string | null = null;
+    let lastSuccessId: string | null = null;
+    const uploadSelection = new Set<string>();
+
+    const syncSelection = () => {
+      setSelectedNodeIds(new Set(uploadSelection));
+    };
+
+    const uploadOne = async (file: File) => {
       const fileName = file.name;
       const isBinary = isBinaryFile(fileName);
       const useStorage = isBinary || file.size > (isBinary ? STORAGE_THRESHOLD_BINARY : STORAGE_THRESHOLD_TEXT);
+      const shouldFocus = file === lastFile;
 
       // Create the file node optimistically
       const tempId = `temp-${Date.now()}-${Math.random()}`;
+      if (file === lastFile) {
+        lastTempId = tempId;
+      }
       const tempNode: Node = {
         id: tempId,
         project_id: projectId,
@@ -674,6 +754,13 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       };
 
       setNodes(prev => [...prev, tempNode]);
+      uploadSelection.add(tempId);
+      syncSelection();
+      setOpenTabs(prev => (prev.includes(tempId) ? prev : [...prev, tempId]));
+      if (shouldFocus) {
+        setActiveNodeId(tempId);
+        setRevealNodeId(tempId);
+      }
 
       let createdNodeId: string | null = null;
 
@@ -765,21 +852,34 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
 
         // Update the node with the real ID
         setNodes(prev => prev.map(n => n.id === tempId ? { ...n, id: newId } : n));
+        if (uploadSelection.delete(tempId)) {
+          uploadSelection.add(newId);
+          syncSelection();
+        }
 
         // Open the file in tabs (MediaPreview will handle media files)
         setOpenTabs(prev => {
           const replaced = prev.map(id => id === tempId ? newId : id);
           return replaced.includes(newId) ? replaced : [...replaced, newId];
         });
-        setActiveNodeId(newId);
-        setSelectedNodeIds(new Set([newId]));
+        if (shouldFocus) {
+          setActiveNodeId(newId);
+          setRevealNodeId(newId);
+        }
         setUploadProgress(prev => {
           const next = { ...prev };
           delete next[tempId];
           return next;
         });
+        lastSuccessId = newId;
+        if (tempId === lastTempId) {
+          lastFinalId = newId;
+        }
       } catch (error: any) {
         setNodes(prev => prev.filter(n => n.id !== tempId));
+        if (uploadSelection.delete(tempId)) {
+          syncSelection();
+        }
         setOpenTabs(prev => prev.filter(id => id !== tempId));
         setActiveNodeId(prev => (prev === tempId ? null : prev));
         setUploadProgress(prev => {
@@ -797,64 +897,293 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         }
         alert(`Upload error: ${error.message}`);
       }
+    };
+
+    await runWithConcurrency(filesArray, filesArray.length, uploadOne);
+
+    if (lastFinalId || lastSuccessId) {
+      const finalId = lastFinalId || lastSuccessId;
+      if (finalId) {
+        setActiveNodeId(finalId);
+        if (!uploadSelection.has(finalId)) {
+          uploadSelection.add(finalId);
+          syncSelection();
+        }
+        setRevealNodeId(finalId);
+      }
+    }
+  }, [projectId, supabase, pathByNodeId, uploadFileToSignedUrl, runWithConcurrency]);
+
+  const uploadFolderItems = useCallback(async (items: UploadItem[], parentId: string | null) => {
+    if (items.length === 0) return;
+
+    const baseParentPath = parentId ? pathByNodeId.get(parentId) || "" : "";
+    const rootNames: string[] = [];
+    const rootSet = new Set<string>();
+
+    for (const item of items) {
+      const normalized = item.relativePath.replace(/\\/g, "/").replace(/^\/+/, "");
+      const root = normalized.split("/")[0];
+      if (root && !rootSet.has(root)) {
+        rootSet.add(root);
+        rootNames.push(root);
+      }
     }
 
-    // Reset the input
+    const rootFolderName = rootNames.length ? rootNames[rootNames.length - 1] : null;
+    let lastCreatedNodeId: string | null = null;
+
+    const folderIdByPath = new Map<string, string>();
+    for (const node of nodes) {
+      if (node.type !== "folder") continue;
+      const path = pathByNodeId.get(node.id);
+      if (path) {
+        folderIdByPath.set(path, node.id);
+      }
+    }
+
+    const folderInflight = new Map<string, Promise<string>>();
+    const ensureFolderId = async (fullPath: string): Promise<string> => {
+      const cached = folderIdByPath.get(fullPath);
+      if (cached) return cached;
+      const inflight = folderInflight.get(fullPath);
+      if (inflight) return inflight;
+
+      const promise = (async () => {
+        const res = await fetch("/api/files", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "create_folder",
+            path: fullPath,
+            projectId,
+            parentId,
+          }),
+        });
+        const result = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(result.error || "Failed to create folder");
+        }
+        const folderId = result.nodeId as string | undefined;
+        if (!folderId) {
+          throw new Error("Missing folder id");
+        }
+        folderIdByPath.set(fullPath, folderId);
+        return folderId;
+      })().finally(() => {
+        folderInflight.delete(fullPath);
+      });
+
+      folderInflight.set(fullPath, promise);
+      return promise;
+    };
+
+    const STORAGE_THRESHOLD_BINARY = 2 * 1024 * 1024;
+    const STORAGE_THRESHOLD_TEXT = 5 * 1024 * 1024;
+    const sortedItems = items.slice().sort((a, b) => {
+      const aDepth = a.relativePath.replace(/\\/g, "/").replace(/^\/+/, "").split("/").length;
+      const bDepth = b.relativePath.replace(/\\/g, "/").replace(/^\/+/, "").split("/").length;
+      return aDepth - bDepth;
+    });
+
+    const uploadOne = async (item: UploadItem) => {
+      const normalized = item.relativePath.replace(/\\/g, "/").replace(/^\/+/, "");
+      const parts = normalized.split("/");
+      const fileName = parts.pop() || item.file.name;
+      const folderPath = parts.join("/");
+      const fullPath = baseParentPath ? `${baseParentPath}/${normalized}` : normalized;
+      const isBinary = isBinaryFile(fileName);
+      const useStorage = isBinary || item.file.size > (isBinary ? STORAGE_THRESHOLD_BINARY : STORAGE_THRESHOLD_TEXT);
+      let createdNodeId: string | null = null;
+
+      try {
+        if (useStorage) {
+          let targetParentId = parentId;
+          if (folderPath) {
+            const fullFolderPath = baseParentPath ? `${baseParentPath}/${folderPath}` : folderPath;
+            targetParentId = await ensureFolderId(fullFolderPath);
+          }
+
+          const createUrlRes = await fetch("/api/storage/create-upload-url", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              projectId,
+              parentId: targetParentId || null,
+              fileName,
+              contentType: item.file.type || "application/octet-stream",
+            }),
+          });
+
+          const createUrlResult = await createUrlRes.json();
+          if (!createUrlRes.ok) {
+            throw new Error(createUrlResult.error || "Failed to create upload URL");
+          }
+          createdNodeId = createUrlResult.nodeId;
+          if (!createUrlResult.uploadUrl || !createUrlResult.storagePath) {
+            throw new Error("Invalid upload URL response");
+          }
+
+          await uploadFileToSignedUrl(createUrlResult.uploadUrl, item.file, () => {});
+
+          const confirmRes = await fetch("/api/storage/confirm-upload", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              nodeId: createUrlResult.nodeId,
+              storagePath: createUrlResult.storagePath,
+            }),
+          });
+
+          const confirmResult = await confirmRes.json();
+          if (!confirmRes.ok) {
+            throw new Error(confirmResult.error || "Failed to confirm upload");
+          }
+          lastCreatedNodeId = createUrlResult.nodeId;
+        } else {
+          const content = await readFileContent(item.file);
+          const res = await fetch("/api/files", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              action: "create_file",
+              path: fullPath,
+              content,
+              projectId,
+            }),
+          });
+          const result = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            throw new Error(result.error || "Failed to create file");
+          }
+          if (result?.nodeId) {
+            lastCreatedNodeId = result.nodeId as string;
+          }
+        }
+      } catch (error: any) {
+        if (createdNodeId) {
+          try {
+            await supabase.from("file_contents").delete().eq("node_id", createdNodeId);
+            await supabase.from("nodes").delete().eq("id", createdNodeId);
+          } catch (cleanupError) {
+            console.error("Failed to cleanup failed upload:", cleanupError);
+          }
+        }
+        console.error(`File upload error: ${error.message}`);
+      }
+    };
+
+    await runWithConcurrency(sortedItems, sortedItems.length, uploadOne);
+
+    const refreshedNodes = await fetchNodes();
+    if (rootFolderName) {
+      const folderNode = refreshedNodes.find((node) =>
+        node.type === "folder" &&
+        node.name === rootFolderName &&
+        node.parent_id === parentId
+      );
+      if (folderNode) {
+        setSelectedNodeIds(new Set([folderNode.id]));
+        setRevealNodeId(folderNode.id);
+        if (activeActivity !== "explorer") {
+          setActiveActivity("explorer");
+        }
+        return;
+      }
+    }
+    if (lastCreatedNodeId) {
+      handleOpenNode(lastCreatedNodeId);
+    }
+  }, [activeActivity, fetchNodes, handleOpenNode, nodes, pathByNodeId, projectId, runWithConcurrency, supabase, uploadFileToSignedUrl]);
+
+  const handleFileInputChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    const parentId = uploadTargetParentId;
+    await uploadFiles(Array.from(files), parentId);
+
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
     setUploadTargetParentId(null);
-  }, [projectId, supabase, uploadTargetParentId, pathByNodeId, uploadFileToSignedUrl]);
+  }, [uploadFiles, uploadTargetParentId]);
 
   const handleFolderInputChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
 
-    const baseParentId = uploadTargetParentId;
-    // Get base parent path
-    const baseParentPath = baseParentId ? pathByNodeId.get(baseParentId) || "" : "";
+    const parentId = uploadTargetParentId;
+    const items: UploadItem[] = Array.from(files).map((file) => ({
+      file,
+      relativePath: file.webkitRelativePath || file.name,
+    }));
+    await uploadFolderItems(items, parentId);
 
-    // Sort files by path depth to process in order
-    const sortedFiles = Array.from(files).sort((a, b) => {
-      const aDepth = (a.webkitRelativePath || a.name).split("/").length;
-      const bDepth = (b.webkitRelativePath || b.name).split("/").length;
-      return aDepth - bDepth;
-    });
-
-    for (const file of sortedFiles) {
-      const relativePath = file.webkitRelativePath || file.name;
-      const content = await readFileContent(file);
-
-      // Build full path including base parent
-      const fullPath = baseParentPath ? `${baseParentPath}/${relativePath}` : relativePath;
-
-      try {
-        const res = await fetch("/api/files", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            action: "create_file",
-            path: fullPath,
-            content: content,
-            projectId: projectId,
-          }),
-        });
-        if (!res.ok) {
-          const errorData = await res.json();
-          throw new Error(errorData.error || "Failed to create file");
-        }
-      } catch (error: any) {
-        console.error(`File upload error: ${error.message}`);
-      }
-    }
-
-    // Reset and refresh
     if (folderInputRef.current) {
       folderInputRef.current.value = "";
     }
     setUploadTargetParentId(null);
-    fetchNodes();
-  }, [projectId, uploadTargetParentId, pathByNodeId, fetchNodes]);
+  }, [uploadFolderItems, uploadTargetParentId]);
+
+  const collectDroppedItems = useCallback(async (dataTransfer: DataTransfer) => {
+    const items = Array.from(dataTransfer.items || []).filter((item) => item.kind === "file");
+    let hasDirectories = false;
+
+    const traverseEntry = async (entry: WebkitEntry, pathPrefix: string): Promise<UploadItem[]> => {
+      if (entry.isFile && entry.file) {
+        const file = await new Promise<File>((resolve, reject) => entry.file?.(resolve, reject));
+        const relativePath = pathPrefix ? `${pathPrefix}/${file.name}` : file.name;
+        return [{ file, relativePath }];
+      }
+      if (entry.isDirectory && entry.createReader) {
+        hasDirectories = true;
+        const reader = entry.createReader();
+        const entries: WebkitEntry[] = [];
+        const readBatch = () =>
+          new Promise<WebkitEntry[]>((resolve, reject) => reader.readEntries(resolve, reject));
+
+        while (true) {
+          const batch = await readBatch();
+          if (!batch.length) break;
+          entries.push(...batch);
+        }
+
+        const nextPrefix = pathPrefix ? `${pathPrefix}/${entry.name}` : entry.name;
+        const nested = await Promise.all(entries.map((child) => traverseEntry(child, nextPrefix)));
+        return nested.flat();
+      }
+      return [];
+    };
+
+    if (items.length > 0 && (items[0] as any).webkitGetAsEntry) {
+      const entries = items
+        .map((item) => (item as any).webkitGetAsEntry?.() as WebkitEntry | null)
+        .filter((entry): entry is WebkitEntry => Boolean(entry));
+
+      const results = await Promise.all(entries.map((entry) => traverseEntry(entry, "")));
+      return { items: results.flat(), hasDirectories };
+    }
+
+    const files = Array.from(dataTransfer.files || []);
+    return {
+      items: files.map((file) => ({ file, relativePath: file.name })),
+      hasDirectories: false,
+    };
+  }, []);
+
+  // Handler for dropping files onto specific folders in FileTree
+  const handleDropFilesOnFolder = useCallback(async (dataTransfer: DataTransfer, targetFolderId: string | null) => {
+    const { items, hasDirectories } = await collectDroppedItems(dataTransfer);
+    if (items.length === 0) return;
+
+    const hasNestedPaths = items.some((item) => item.relativePath.includes("/"));
+    if (hasDirectories || hasNestedPaths) {
+      await uploadFolderItems(items, targetFolderId);
+    } else {
+      await uploadFiles(items.map((item) => item.file), targetFolderId);
+    }
+  }, [collectDroppedItems, uploadFolderItems, uploadFiles]);
 
   // Download handler
   const handleDownload = useCallback(async (nodeIds: string[]) => {
@@ -1974,6 +2303,7 @@ ${diffs}`;
               onToggleSelectNode={handleToggleSelectNode}
               onClearSelection={handleClearSelection}
               onHoverNode={handleHoverNode}
+              revealNodeId={revealNodeId}
               onSelectFolder={handleSelectFolder}
               onCreateFile={handleCreateFile}
             onCreateFolder={handleCreateFolder}
@@ -1982,7 +2312,10 @@ ${diffs}`;
             onUploadFiles={handleUploadFiles}
             onUploadFolder={handleUploadFolder}
             onDownload={handleDownload}
+            onDropFiles={handleDropFilesOnFolder}
             projectName={activeWorkspace.name}
+            userEmail={userEmail}
+            onOpenSettings={() => setActiveActivity("settings")}
           />
         );
       case "git":
@@ -2055,134 +2388,143 @@ ${diffs}`;
         />
       )}
 
-      <aside
-        className="bg-zinc-50 border-r border-zinc-200 flex flex-col flex-shrink-0"
-        style={{ width: leftPanelWidth }}
-      >
-        {renderSidebarContent()}
-      </aside>
+      <div className="flex flex-1 min-w-0">
+        <aside
+          className="bg-zinc-50 border-r border-zinc-200 flex flex-col flex-shrink-0"
+          style={{ width: leftPanelWidth }}
+        >
+          {renderSidebarContent()}
+        </aside>
 
-      {/* Left resize handle */}
-      <div
-        className="w-1 bg-transparent hover:bg-blue-500 cursor-col-resize transition-colors flex-shrink-0 group"
-        onMouseDown={() => setIsResizingLeft(true)}
-      >
-        <div className="w-full h-full group-hover:bg-blue-500" />
-      </div>
+        {/* Left resize handle */}
+        <div
+          className="w-1 bg-transparent hover:bg-blue-500 cursor-col-resize transition-colors flex-shrink-0 group"
+          onMouseDown={() => setIsResizingLeft(true)}
+        >
+          <div className="w-full h-full group-hover:bg-blue-500" />
+        </div>
 
-      {/* 新規ワークスペース作成ダイアログ */}
-      {showCreateWorkspace && (
-        <CreateWorkspaceDialog
-          onClose={() => setShowCreateWorkspace(false)}
-          onCreate={handleCreateWorkspace}
-        />
-      )}
+        {/* 新規ワークスペース作成ダイアログ */}
+        {showCreateWorkspace && (
+          <CreateWorkspaceDialog
+            onClose={() => setShowCreateWorkspace(false)}
+            onCreate={handleCreateWorkspace}
+          />
+        )}
 
-      <main className="flex-1 flex flex-col min-w-0 bg-white">
-        <TabBar
-          tabs={tabs}
-          activeId={activeNodeId}
-          onSelect={(id) => {
-            const node = nodeById.get(id);
-            if (node && !id.startsWith("temp-") && isMediaFile(node.name)) {
-              prefetchMediaUrl(id);
-            }
-            setActiveNodeId(id);
-            if (nodes.some((n) => n.id === id)) {
-              setSelectedNodeIds(new Set([id]));
-            }
-          }}
-          onClose={handleCloseTab}
-        />
-        {activeVirtual ? (
-          <div className="px-6 py-3 border-b border-zinc-200 bg-zinc-50 flex items-center justify-between">
-            <div>
-              <div className="text-xs text-zinc-500 mb-0.5">Plan</div>
-              <div className="text-lg font-semibold text-zinc-900 flex items-center gap-2">
-                {activeVirtual.fileName}
-                <span className="text-[11px] font-medium px-2 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200">
-                  Unsaved
-                </span>
+        <main className="flex-1 flex flex-col min-w-0 bg-white">
+          <TabBar
+            tabs={tabs}
+            activeId={activeNodeId}
+            onSelect={(id) => {
+              const node = nodeById.get(id);
+              if (node && !id.startsWith("temp-") && isMediaFile(node.name)) {
+                prefetchMediaUrl(id);
+              }
+              setActiveNodeId(id);
+              if (nodes.some((n) => n.id === id)) {
+                setSelectedNodeIds(new Set([id]));
+              }
+            }}
+            onClose={handleCloseTab}
+          />
+          {activeVirtual ? (
+            <div className="px-6 py-3 border-b border-zinc-200 bg-zinc-50 flex items-center justify-between">
+              <div>
+                <div className="text-xs text-zinc-500 mb-0.5">Plan</div>
+                <div className="text-lg font-semibold text-zinc-900 flex items-center gap-2">
+                  {activeVirtual.fileName}
+                  <span className="text-[11px] font-medium px-2 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200">
+                    Unsaved
+                  </span>
+                </div>
+                <div className="text-xs text-zinc-500 mt-0.5">
+                  Save to: <span className="font-mono">{activeVirtual.pathHint}</span>
+                </div>
               </div>
-              <div className="text-xs text-zinc-500 mt-0.5">
-                Save to: <span className="font-mono">{activeVirtual.pathHint}</span>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => handleSavePlanToWorkspace(activeVirtual.id)}
+                  className="px-3 py-1.5 text-sm font-medium bg-blue-600 hover:bg-blue-700 text-white rounded-md transition-colors"
+                >
+                  Save to workspace
+                </button>
               </div>
             </div>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => handleSavePlanToWorkspace(activeVirtual.id)}
-                className="px-3 py-1.5 text-sm font-medium bg-blue-600 hover:bg-blue-700 text-white rounded-md transition-colors"
-              >
-                Save to workspace
-              </button>
-            </div>
-          </div>
-        ) : null}
-        <div className="flex-1 p-0 relative overflow-hidden">
-          {activeNodeId ? (
-            activeVirtual ? (
-              <MainEditor
-                value={activeVirtual.content}
-                onChange={(v) => {
-                  setVirtualDocs((prev) => {
-                    const doc = prev[activeVirtual.id];
-                    if (!doc) return prev;
-                    return { ...prev, [activeVirtual.id]: { ...doc, content: v } };
-                  });
-                }}
-                fileName={activeVirtual.fileName}
-                onSave={() => handleSavePlanToWorkspace(activeVirtual.id)}
-              />
-            ) : activeNode ? (
-              activeNode.id.startsWith("temp-") ? (
-                <div className="absolute inset-0 flex items-center justify-center text-zinc-500">
-                  <div className="flex flex-col items-center gap-3">
-                    <div className="flex items-center gap-3">
-                      <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
-                        <circle
-                          className="opacity-25"
-                          cx="12"
-                          cy="12"
-                          r="10"
-                          stroke="currentColor"
-                          strokeWidth="4"
-                          fill="none"
-                        />
-                        <path
-                          className="opacity-75"
-                          fill="currentColor"
-                          d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                        />
-                      </svg>
-                      <span>Uploading...</span>
-                    </div>
-                    {typeof activeUploadProgress === "number" && (
-                      <div className="w-64">
-                        <div className="h-1.5 w-full rounded-full bg-zinc-200 overflow-hidden">
-                          <div
-                            className="h-1.5 bg-blue-500"
-                            style={{ width: `${activeUploadProgress}%` }}
+          ) : null}
+          <div className="flex-1 p-0 relative overflow-hidden">
+            {activeNodeId ? (
+              activeVirtual ? (
+                <MainEditor
+                  value={activeVirtual.content}
+                  onChange={(v) => {
+                    setVirtualDocs((prev) => {
+                      const doc = prev[activeVirtual.id];
+                      if (!doc) return prev;
+                      return { ...prev, [activeVirtual.id]: { ...doc, content: v } };
+                    });
+                  }}
+                  fileName={activeVirtual.fileName}
+                  onSave={() => handleSavePlanToWorkspace(activeVirtual.id)}
+                />
+              ) : activeNode ? (
+                activeNode.id.startsWith("temp-") ? (
+                  <div className="absolute inset-0 flex items-center justify-center text-zinc-500">
+                    <div className="flex flex-col items-center gap-3">
+                      <div className="flex items-center gap-3">
+                        <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
+                          <circle
+                            className="opacity-25"
+                            cx="12"
+                            cy="12"
+                            r="10"
+                            stroke="currentColor"
+                            strokeWidth="4"
+                            fill="none"
                           />
-                        </div>
-                        <div className="mt-2 text-xs text-zinc-500 text-center">
-                          {activeUploadProgress}%
-                        </div>
+                          <path
+                            className="opacity-75"
+                            fill="currentColor"
+                            d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                          />
+                        </svg>
+                        <span>Uploading...</span>
                       </div>
-                    )}
+                      {typeof activeUploadProgress === "number" && (
+                        <div className="w-64">
+                          <div className="h-1.5 w-full rounded-full bg-zinc-200 overflow-hidden">
+                            <div
+                              className="h-1.5 bg-blue-500"
+                              style={{ width: `${activeUploadProgress}%` }}
+                            />
+                          </div>
+                          <div className="mt-2 text-xs text-zinc-500 text-center">
+                            {activeUploadProgress}%
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ) : isMediaFile(activeNode.name) ? (
+                  <MediaPreview
+                    fileName={activeNode.name}
+                    nodeId={activeNode.id}
+                  />
+                ) : (
+                  <MainEditor
+                    value={fileContent}
+                    onChange={setFileContent}
+                    fileName={activeNode.name}
+                    onSave={saveContent}
+                  />
+                )
+              ) : (
+                <div className="absolute inset-0 flex items-center justify-center text-zinc-400">
+                  <div className="text-center">
+                    <p className="mb-2">Select a file to edit</p>
+                    <p className="text-xs opacity-60">Cmd+S to save</p>
                   </div>
                 </div>
-              ) : isMediaFile(activeNode.name) ? (
-                <MediaPreview
-                  fileName={activeNode.name}
-                  nodeId={activeNode.id}
-                />
-              ) : (
-                <MainEditor
-                  value={fileContent}
-                  onChange={setFileContent}
-                  fileName={activeNode.name}
-                  onSave={saveContent}
-                />
               )
             ) : (
               <div className="absolute inset-0 flex items-center justify-center text-zinc-400">
@@ -2191,40 +2533,33 @@ ${diffs}`;
                   <p className="text-xs opacity-60">Cmd+S to save</p>
                 </div>
               </div>
-            )
-          ) : (
-            <div className="absolute inset-0 flex items-center justify-center text-zinc-400">
-              <div className="text-center">
-                <p className="mb-2">Select a file to edit</p>
-                <p className="text-xs opacity-60">Cmd+S to save</p>
-              </div>
-            </div>
-          )}
+            )}
 
-          {reviewOverlayOpen && pendingChanges.length > 0 && (
-            <ReviewPanel
-              changes={pendingChanges}
-              selectedChangeId={reviewSelectedChangeId}
-              onSelectChange={handleReviewSelectFile}
-              onAcceptFile={handleAcceptFile}
-              onRejectFile={handleRejectFile}
-              onAcceptLine={handleAcceptLine}
-              onRejectLine={handleRejectLine}
-              focusIssue={reviewFocusIssue}
-              issues={reviewIssues}
-              isFindingIssues={isFindingReviewIssues}
-              onFindIssues={handleFindIssues}
-              onDismissIssue={handleReviewDismissIssue}
-              onFixIssueInChat={handleReviewFixIssueInChat}
-              onFixAllIssuesInChat={handleReviewFixAllIssuesInChat}
-              onClose={() => {
-                handleReviewClose();
-                setReviewIssues(null);
-              }}
-            />
-          )}
-        </div>
-      </main>
+            {reviewOverlayOpen && pendingChanges.length > 0 && (
+              <ReviewPanel
+                changes={pendingChanges}
+                selectedChangeId={reviewSelectedChangeId}
+                onSelectChange={handleReviewSelectFile}
+                onAcceptFile={handleAcceptFile}
+                onRejectFile={handleRejectFile}
+                onAcceptLine={handleAcceptLine}
+                onRejectLine={handleRejectLine}
+                focusIssue={reviewFocusIssue}
+                issues={reviewIssues}
+                isFindingIssues={isFindingReviewIssues}
+                onFindIssues={handleFindIssues}
+                onDismissIssue={handleReviewDismissIssue}
+                onFixIssueInChat={handleReviewFixIssueInChat}
+                onFixAllIssuesInChat={handleReviewFixAllIssuesInChat}
+                onClose={() => {
+                  handleReviewClose();
+                  setReviewIssues(null);
+                }}
+              />
+            )}
+          </div>
+        </main>
+      </div>
 
       {/* Right resize handle */}
       <div

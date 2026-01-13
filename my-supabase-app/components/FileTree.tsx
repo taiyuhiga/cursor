@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useMemo } from "react";
 import { ContextMenu } from "./ContextMenu";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { ActionIcons, ChevronIcon, FileIcons, getFileIcon, getFolderColor } from "./fileIcons";
+import { AccountMenu } from "./AccountMenu";
 
 type Node = {
   id: string;
@@ -19,6 +20,7 @@ type FileTreeProps = {
   onToggleSelectNode: (nodeId: string) => void;
   onClearSelection: () => void;
   onHoverNode?: (nodeId: string) => void;
+  revealNodeId?: string | null;
   onSelectFolder?: (nodeId: string) => void;
   onCreateFile: (path: string, parentId: string | null) => void;
   onCreateFolder: (path: string, parentId: string | null) => void;
@@ -27,7 +29,12 @@ type FileTreeProps = {
   onUploadFiles?: (parentId: string | null) => void;
   onUploadFolder?: (parentId: string | null) => void;
   onDownload?: (nodeIds: string[]) => void;
+  onDropFiles?: (dataTransfer: DataTransfer, targetFolderId: string | null) => void;
   projectName?: string;
+  userEmail?: string;
+  userName?: string;
+  planName?: string;
+  onOpenSettings?: () => void;
 };
 
 type EditingState = {
@@ -51,6 +58,7 @@ export function FileTree({
   onToggleSelectNode,
   onClearSelection,
   onHoverNode,
+  revealNodeId,
   onSelectFolder,
   onCreateFile,
   onCreateFolder,
@@ -59,7 +67,12 @@ export function FileTree({
   onUploadFiles,
   onUploadFolder,
   onDownload,
+  onDropFiles,
   projectName,
+  userEmail,
+  userName,
+  planName,
+  onOpenSettings,
 }: FileTreeProps) {
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [contextMenu, setContextMenu] = useState<{
@@ -72,9 +85,14 @@ export function FileTree({
   const [inputValue, setInputValue] = useState("");
   const [validationError, setValidationError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const treeScrollRef = useRef<HTMLDivElement>(null);
   const [isProjectExpanded, setIsProjectExpanded] = useState(true);
   const [dropdownMenu, setDropdownMenu] = useState<DropdownMenu>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const [dragOverNodeId, setDragOverNodeId] = useState<string | null>(null);
+  const [dragOverSubtreeId, setDragOverSubtreeId] = useState<string | null>(null);
+  const dragCounterRef = useRef<Record<string, number>>({});
+  const dragExpandTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   // Delete confirmation dialog state
   const [confirmDialog, setConfirmDialog] = useState<{
@@ -88,6 +106,42 @@ export function FileTree({
   });
 
   const nodeMap = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
+
+  useEffect(() => {
+    if (!revealNodeId) return;
+    setIsProjectExpanded(true);
+    setExpandedFolders((prev) => {
+      const next = new Set(prev);
+      let currentId: string | null = revealNodeId;
+      while (currentId) {
+        next.add(currentId);
+        const node = nodeMap.get(currentId);
+        if (!node) break;
+        currentId = node.parent_id;
+      }
+      return next;
+    });
+    let cancelled = false;
+    let attempts = 0;
+    const tryScroll = () => {
+      if (cancelled) return;
+      const container = treeScrollRef.current;
+      if (!container) return;
+      const el = container.querySelector<HTMLElement>(`[data-node-id="${revealNodeId}"]`);
+      if (el) {
+        el.scrollIntoView({ block: "nearest" });
+        return;
+      }
+      if (attempts < 6) {
+        attempts += 1;
+        requestAnimationFrame(tryScroll);
+      }
+    };
+    requestAnimationFrame(tryScroll);
+    return () => {
+      cancelled = true;
+    };
+  }, [revealNodeId, nodeMap]);
 
   // Get the selected folder (for creating files/folders in it)
   const getSelectedParentId = (): string | null => {
@@ -130,6 +184,15 @@ export function FileTree({
     }
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [dropdownMenu]);
+
+  // Cleanup drag expand timer on unmount
+  useEffect(() => {
+    return () => {
+      if (dragExpandTimerRef.current) {
+        clearTimeout(dragExpandTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (editingState && inputRef.current) {
@@ -300,6 +363,149 @@ export function FileTree({
     });
   };
 
+  // Check if drag contains files (not internal nodes)
+  const isExternalFileDrag = (dataTransfer: DataTransfer): boolean => {
+    if (!dataTransfer.types) return false;
+    // Check for files being dragged from outside (not internal node drag)
+    const hasFiles = dataTransfer.types.includes("Files");
+    const hasInternalNode = dataTransfer.types.includes("application/cursor-node");
+    return hasFiles && !hasInternalNode;
+  };
+
+  // Clear drag expand timer
+  const clearDragExpandTimer = () => {
+    if (dragExpandTimerRef.current) {
+      clearTimeout(dragExpandTimerRef.current);
+      dragExpandTimerRef.current = null;
+    }
+  };
+
+  // Get the target folder ID for a node (for files, returns parent folder)
+  const getDropTargetFolderId = (nodeId: string): string | null => {
+    const node = nodeMap.get(nodeId);
+    if (!node) return null;
+    return node.type === "folder" ? node.id : node.parent_id;
+  };
+
+  const isNodeInSubtree = (nodeId: string, ancestorId: string): boolean => {
+    if (nodeId === ancestorId) return true;
+    let current = nodeMap.get(nodeId);
+    while (current?.parent_id) {
+      if (current.parent_id === ancestorId) return true;
+      current = nodeMap.get(current.parent_id);
+    }
+    return false;
+  };
+
+  // Drag handlers for node drop targets (files and folders)
+  const handleNodeDragEnter = (e: React.DragEvent, nodeId: string) => {
+    if (!isExternalFileDrag(e.dataTransfer)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const node = nodeMap.get(nodeId);
+    if (!node) return;
+    const isTopLevelFile = node.type === "file" && !node.parent_id;
+    const targetId = node.type === "file"
+      ? (node.parent_id ?? "root")
+      : node.id;
+    dragCounterRef.current[targetId] = (dragCounterRef.current[targetId] || 0) + 1;
+    setDragOverNodeId(targetId);
+
+    // Clear any existing timer
+    clearDragExpandTimer();
+
+    // For files inside a folder, immediately set the parent folder as subtree target
+    if (node.type === "file" && node.parent_id) {
+      setDragOverSubtreeId(node.parent_id);
+      return;
+    }
+
+    // For top-level files, no subtree highlight
+    if (isTopLevelFile) {
+      setDragOverSubtreeId(null);
+      return;
+    }
+
+    const isSameFolderSubtree = node.type === "folder" && dragOverSubtreeId === node.id;
+
+    // For folders
+    if (node.type === "folder" && !isSameFolderSubtree) {
+      const isAlreadyExpanded = expandedFolders.has(node.id);
+
+      if (isAlreadyExpanded) {
+        // Already expanded - immediately highlight subtree
+        setDragOverSubtreeId(node.id);
+      } else {
+        // Not expanded - start a timer to expand after 500ms
+        dragExpandTimerRef.current = setTimeout(() => {
+          setExpandedFolders(prev => new Set(prev).add(node.id));
+          setDragOverSubtreeId(node.id);
+        }, 500);
+      }
+    }
+  };
+
+  const handleNodeDragLeave = (e: React.DragEvent, nodeId: string) => {
+    if (!isExternalFileDrag(e.dataTransfer)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const node = nodeMap.get(nodeId);
+    const targetId = node
+      ? (node.type === "file"
+        ? (node.parent_id ?? "root")
+        : node.id)
+      : nodeId;
+    dragCounterRef.current[targetId] = Math.max(0, (dragCounterRef.current[targetId] || 1) - 1);
+    if (dragCounterRef.current[targetId] === 0 && dragOverNodeId === targetId) {
+      setDragOverNodeId(null);
+      setDragOverSubtreeId(null);
+      clearDragExpandTimer();
+    }
+  };
+
+  const handleNodeDragOver = (e: React.DragEvent) => {
+    if (!isExternalFileDrag(e.dataTransfer)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = "copy";
+  };
+
+  const handleNodeDrop = (e: React.DragEvent, nodeId: string | null) => {
+    if (!isExternalFileDrag(e.dataTransfer)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    clearDragExpandTimer();
+    dragCounterRef.current = {};
+    setDragOverNodeId(null);
+    setDragOverSubtreeId(null);
+
+    if (onDropFiles) {
+      // Get the target folder (for files, use parent folder)
+      const targetFolderId = nodeId ? getDropTargetFolderId(nodeId) : null;
+      // Expand the folder when dropping into it
+      if (targetFolderId) {
+        setExpandedFolders(prev => new Set(prev).add(targetFolderId));
+      }
+      onDropFiles(e.dataTransfer, targetFolderId);
+    }
+  };
+
+  // Reset drag state when drag leaves the tree entirely
+  const handleTreeDragLeave = (e: React.DragEvent) => {
+    if (!isExternalFileDrag(e.dataTransfer)) return;
+    // Only reset if leaving the tree container itself
+    const rect = treeScrollRef.current?.getBoundingClientRect();
+    if (rect) {
+      const { clientX, clientY } = e;
+      if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) {
+        clearDragExpandTimer();
+        dragCounterRef.current = {};
+        setDragOverNodeId(null);
+        setDragOverSubtreeId(null);
+      }
+    }
+  };
+
   // Handle header button clicks - use selected folder as parent
   const handleHeaderNewFile = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -456,21 +662,35 @@ export function FileTree({
 
       const isExpanded = expandedFolders.has(node.id);
       const isSelected = selectedNodeIds.has(node.id);
+      const isRootDragOver = dragOverNodeId === "root";
+      const isDragOver = !isRootDragOver && dragOverNodeId === node.id;
+      const isDragOverSubtree =
+        !isRootDragOver &&
+        dragOverSubtreeId !== null &&
+        isNodeInSubtree(node.id, dragOverSubtreeId);
       const FileIcon = getFileIcon(node.name);
 
       return (
         <div key={node.id}>
           <div
             draggable
+            data-node-id={node.id}
             onDragStart={(e) => {
               e.dataTransfer.setData("application/cursor-node", node.name);
               e.dataTransfer.effectAllowed = "copy";
             }}
+            onDragEnter={(e) => handleNodeDragEnter(e, node.id)}
+            onDragLeave={(e) => handleNodeDragLeave(e, node.id)}
+            onDragOver={handleNodeDragOver}
+            onDrop={(e) => handleNodeDrop(e, node.id)}
             className={`
               group/item flex items-center gap-1 px-2 py-1 text-[14px] leading-5 cursor-pointer select-none
-              ${isSelected
-                ? "bg-blue-600/10 text-zinc-900"
-                : "text-zinc-700 hover:bg-zinc-100"
+              transition-colors duration-75
+              ${isDragOver || isDragOverSubtree
+                ? "bg-green-100/75 text-zinc-900"
+                : isSelected
+                  ? "bg-blue-600/10 text-zinc-900"
+                  : "text-zinc-700 hover:bg-zinc-100"
               }
             `}
             style={{ paddingLeft: `${depth * 16 + (node.type === "folder" ? 4 : 22)}px` }}
@@ -617,10 +837,60 @@ export function FileTree({
 
       {/* File tree content */}
       <div
-        className="flex-1 overflow-y-auto py-1"
+        className={`flex-1 overflow-y-auto py-1 transition-colors duration-75 ${
+          dragOverNodeId === "root" ? "bg-green-100/75" : ""
+        }`}
+        ref={treeScrollRef}
         onClick={(e) => {
           if (e.target === e.currentTarget) {
             onClearSelection();
+          }
+        }}
+        onDragEnter={(e) => {
+          if (!isExternalFileDrag(e.dataTransfer)) return;
+          e.preventDefault();
+          dragCounterRef.current["root"] = (dragCounterRef.current["root"] || 0) + 1;
+          // Only set root as target if not hovering over a specific folder
+          if (!dragOverNodeId || dragOverNodeId === "root") {
+            setDragOverNodeId("root");
+            setDragOverSubtreeId(null);
+          }
+        }}
+        onDragLeave={(e) => {
+          if (!isExternalFileDrag(e.dataTransfer)) return;
+          e.preventDefault();
+          dragCounterRef.current["root"] = Math.max(0, (dragCounterRef.current["root"] || 1) - 1);
+          if (dragCounterRef.current["root"] === 0 && dragOverNodeId === "root") {
+            setDragOverNodeId(null);
+            setDragOverSubtreeId(null);
+          }
+        }}
+        onDragOver={(e) => {
+          if (!isExternalFileDrag(e.dataTransfer)) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "copy";
+          if (e.target === e.currentTarget) {
+            setDragOverNodeId("root");
+            setDragOverSubtreeId(null);
+          }
+        }}
+        onDrop={(e) => {
+          if (!isExternalFileDrag(e.dataTransfer)) return;
+          e.preventDefault();
+          clearDragExpandTimer();
+          dragCounterRef.current = {};
+          // Get the target folder (for files, use parent folder)
+          let targetFolderId: string | null = null;
+          if (dragOverNodeId && dragOverNodeId !== "root") {
+            targetFolderId = getDropTargetFolderId(dragOverNodeId);
+          }
+          setDragOverNodeId(null);
+          setDragOverSubtreeId(null);
+          if (onDropFiles) {
+            if (targetFolderId) {
+              setExpandedFolders(prev => new Set(prev).add(targetFolderId!));
+            }
+            onDropFiles(e.dataTransfer, targetFolderId);
           }
         }}
       >
@@ -633,6 +903,21 @@ export function FileTree({
             renderTree(null)
           )
         )}
+      </div>
+
+      <div
+        className="border-t border-zinc-200 px-2 py-2 bg-zinc-50"
+        onContextMenu={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+        }}
+      >
+        <AccountMenu
+          userEmail={userEmail}
+          displayName={userName}
+          planName={planName}
+          onOpenSettings={onOpenSettings}
+        />
       </div>
 
       {contextMenu && (

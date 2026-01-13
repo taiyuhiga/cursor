@@ -10,41 +10,54 @@ async function ensureParentFolders(supabase: any, projectId: string, path: strin
   let currentParentId: string | null = null;
 
   for (const folderName of folderNames) {
-    // フォルダを探す
-    let query = supabase
-      .from("nodes")
-      .select("id")
-      .eq("project_id", projectId)
-      .eq("type", "folder")
-      .eq("name", folderName);
-
-    if (currentParentId) {
-      query = query.eq("parent_id", currentParentId);
-    } else {
-      query = query.is("parent_id", null);
-    }
-
-    const { data: existingFolder } = await query.maybeSingle();
-
-    if (existingFolder) {
-      currentParentId = existingFolder.id;
-    } else {
-      // なければ作成
-      const insertRes: any = await supabase
+    const findFolderId = async () => {
+      let query = supabase
         .from("nodes")
-        .insert({
-          project_id: projectId,
-          type: "folder",
-          name: folderName,
-          parent_id: currentParentId,
-        })
         .select("id")
-        .single();
+        .eq("project_id", projectId)
+        .eq("type", "folder")
+        .eq("name", folderName);
 
-      if (insertRes.error) throw new Error(`Failed to create folder '${folderName}': ${insertRes.error.message}`);
-      if (!insertRes.data) throw new Error(`Failed to create folder '${folderName}'`);
-      currentParentId = insertRes.data.id;
+      if (currentParentId) {
+        query = query.eq("parent_id", currentParentId);
+      } else {
+        query = query.is("parent_id", null);
+      }
+
+      const { data: existingFolder } = await query.maybeSingle();
+      return existingFolder?.id ?? null;
+    };
+
+    const existingId = await findFolderId();
+    if (existingId) {
+      currentParentId = existingId;
+      continue;
     }
+
+    // なければ作成（競合時は再取得）
+    const insertRes: any = await supabase
+      .from("nodes")
+      .insert({
+        project_id: projectId,
+        type: "folder",
+        name: folderName,
+        parent_id: currentParentId,
+      })
+      .select("id")
+      .single();
+
+    if (insertRes.error) {
+      if (insertRes.error.code === "23505") {
+        const retryId = await findFolderId();
+        if (retryId) {
+          currentParentId = retryId;
+          continue;
+        }
+      }
+      throw new Error(`Failed to create folder '${folderName}': ${insertRes.error.message}`);
+    }
+    if (!insertRes.data) throw new Error(`Failed to create folder '${folderName}'`);
+    currentParentId = insertRes.data.id;
   }
 
   return currentParentId;

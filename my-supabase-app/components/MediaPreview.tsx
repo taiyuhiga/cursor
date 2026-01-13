@@ -19,22 +19,137 @@ type MediaCacheEntry = {
 const MEDIA_URL_CACHE = new Map<string, MediaCacheEntry>();
 const MEDIA_URL_INFLIGHT = new Map<string, Promise<string>>();
 const SIGNED_URL_TTL_MS = 24 * 60 * 60 * 1000 - 10 * 60 * 1000;
-const MAX_CACHE_ENTRIES = 64;
+const REFRESH_MARGIN_MS = 30 * 60 * 1000;
+const MAX_CACHE_ENTRIES = 256;
+const STORAGE_CACHE_KEY = "cursor_media_url_cache_v1";
+
+let storageCacheLoaded = false;
+let storageCache: Record<string, MediaCacheEntry> = {};
+
+function normalizeEntry(value: any): MediaCacheEntry | null {
+  if (!value || typeof value !== "object") return null;
+  const url = typeof value.url === "string" ? value.url : null;
+  const expiresAt = typeof value.expiresAt === "number" ? value.expiresAt : null;
+  if (!url || !expiresAt) return null;
+  return { url, expiresAt };
+}
+
+function loadStorageCache() {
+  if (storageCacheLoaded) return;
+  storageCacheLoaded = true;
+  if (typeof window === "undefined") return;
+  try {
+    const raw = window.localStorage.getItem(STORAGE_CACHE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return;
+    const now = Date.now();
+    for (const [key, value] of Object.entries(parsed)) {
+      const entry = normalizeEntry(value);
+      if (entry && entry.expiresAt > now) {
+        storageCache[key] = entry;
+      }
+    }
+  } catch {
+    storageCache = {};
+  }
+}
+
+function persistStorageCache() {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(STORAGE_CACHE_KEY, JSON.stringify(storageCache));
+  } catch {
+    // Ignore storage errors (quota, disabled, etc.)
+  }
+}
+
+function pruneStorageCache() {
+  loadStorageCache();
+  const now = Date.now();
+  let changed = false;
+  for (const [key, value] of Object.entries(storageCache)) {
+    const entry = normalizeEntry(value);
+    if (!entry || entry.expiresAt <= now) {
+      delete storageCache[key];
+      changed = true;
+    }
+  }
+  const keys = Object.keys(storageCache);
+  if (keys.length > MAX_CACHE_ENTRIES) {
+    const excess = keys.length - MAX_CACHE_ENTRIES;
+    for (let i = 0; i < excess; i += 1) {
+      delete storageCache[keys[i]];
+      changed = true;
+    }
+  }
+  if (changed) persistStorageCache();
+}
+
+function getStorageEntry(nodeId: string): MediaCacheEntry | null {
+  loadStorageCache();
+  const entry = normalizeEntry(storageCache[nodeId]);
+  if (!entry) {
+    if (storageCache[nodeId]) {
+      delete storageCache[nodeId];
+      persistStorageCache();
+    }
+    return null;
+  }
+  if (entry.expiresAt <= Date.now()) {
+    delete storageCache[nodeId];
+    persistStorageCache();
+    return null;
+  }
+  return entry;
+}
+
+function setStorageEntry(nodeId: string, entry: MediaCacheEntry) {
+  loadStorageCache();
+  storageCache[nodeId] = entry;
+  persistStorageCache();
+  pruneStorageCache();
+}
+
+function deleteStorageEntry(nodeId: string) {
+  loadStorageCache();
+  if (!storageCache[nodeId]) return;
+  delete storageCache[nodeId];
+  persistStorageCache();
+}
 
 function pruneMediaCache() {
   if (MEDIA_URL_CACHE.size <= MAX_CACHE_ENTRIES) return;
   const firstKey = MEDIA_URL_CACHE.keys().next().value as string | undefined;
-  if (firstKey) MEDIA_URL_CACHE.delete(firstKey);
+  if (!firstKey) return;
+  MEDIA_URL_CACHE.delete(firstKey);
+  deleteStorageEntry(firstKey);
+}
+
+function getCachedMediaEntry(nodeId: string): MediaCacheEntry | null {
+  const cached = MEDIA_URL_CACHE.get(nodeId);
+  if (!cached) {
+    const stored = getStorageEntry(nodeId);
+    if (!stored) return null;
+    MEDIA_URL_CACHE.set(nodeId, stored);
+    pruneMediaCache();
+    return stored;
+  }
+  if (cached.expiresAt <= Date.now()) {
+    MEDIA_URL_CACHE.delete(nodeId);
+    deleteStorageEntry(nodeId);
+    return null;
+  }
+  return cached;
 }
 
 function getCachedMediaUrl(nodeId: string): string | null {
-  const cached = MEDIA_URL_CACHE.get(nodeId);
-  if (!cached) return null;
-  if (cached.expiresAt <= Date.now()) {
-    MEDIA_URL_CACHE.delete(nodeId);
-    return null;
-  }
-  return cached.url;
+  const cached = getCachedMediaEntry(nodeId);
+  return cached ? cached.url : null;
+}
+
+function shouldRefreshSoon(entry: MediaCacheEntry) {
+  return entry.expiresAt - Date.now() <= REFRESH_MARGIN_MS;
 }
 
 async function requestMediaUrl(nodeId: string): Promise<string> {
@@ -54,17 +169,31 @@ async function requestMediaUrl(nodeId: string): Promise<string> {
 }
 
 async function fetchMediaUrl(nodeId: string): Promise<string> {
-  const cached = getCachedMediaUrl(nodeId);
-  if (cached) return cached;
+  const cachedEntry = getCachedMediaEntry(nodeId);
+  if (cachedEntry) {
+    if (shouldRefreshSoon(cachedEntry)) {
+      void refreshMediaUrl(nodeId);
+    }
+    return cachedEntry.url;
+  }
+  const inFlight = MEDIA_URL_INFLIGHT.get(nodeId);
+  if (inFlight) return inFlight;
+
+  const promise = refreshMediaUrl(nodeId);
+
+  MEDIA_URL_INFLIGHT.set(nodeId, promise);
+  return promise;
+}
+
+async function refreshMediaUrl(nodeId: string): Promise<string> {
   const inFlight = MEDIA_URL_INFLIGHT.get(nodeId);
   if (inFlight) return inFlight;
 
   const promise = requestMediaUrl(nodeId)
     .then((url) => {
-      MEDIA_URL_CACHE.set(nodeId, {
-        url,
-        expiresAt: Date.now() + SIGNED_URL_TTL_MS,
-      });
+      const entry = { url, expiresAt: Date.now() + SIGNED_URL_TTL_MS };
+      MEDIA_URL_CACHE.set(nodeId, entry);
+      setStorageEntry(nodeId, entry);
       pruneMediaCache();
       return url;
     })
@@ -76,9 +205,9 @@ async function fetchMediaUrl(nodeId: string): Promise<string> {
   return promise;
 }
 
-export function prefetchMediaUrl(nodeId: string) {
-  if (!nodeId) return;
-  void fetchMediaUrl(nodeId).catch(() => {});
+export function prefetchMediaUrl(nodeId: string): Promise<void> {
+  if (!nodeId) return Promise.resolve();
+  return fetchMediaUrl(nodeId).then(() => {}).catch(() => {});
 }
 
 function getMediaType(fileName: string): MediaType {
@@ -151,10 +280,13 @@ export function MediaPreview({ fileName, nodeId, onError }: MediaPreviewProps) {
 
     setError(null);
 
-    const cached = getCachedMediaUrl(nodeId);
-    if (cached) {
-      setMediaUrl(cached);
+    const cachedEntry = getCachedMediaEntry(nodeId);
+    if (cachedEntry) {
+      setMediaUrl(cachedEntry.url);
       setIsLoading(false);
+      if (shouldRefreshSoon(cachedEntry)) {
+        void refreshMediaUrl(nodeId).catch(() => {});
+      }
       return () => {
         cancelled = true;
       };
