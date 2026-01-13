@@ -523,26 +523,32 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     }
   };
 
-  const handleMoveNode = async (nodeId: string, newParentId: string | null) => {
+  const handleMoveNodes = async (nodeIds: string[], newParentId: string | null) => {
     // Optimistic: 即座にUIを更新
-    const oldNode = nodes.find(n => n.id === nodeId);
-    if (!oldNode) return;
+    const oldNodes = nodes.filter(n => nodeIds.includes(n.id));
+    if (oldNodes.length === 0) return;
 
-    // Check if moving to the same parent (no-op)
-    if (oldNode.parent_id === newParentId) return;
+    // Filter out nodes that are already in the target folder
+    const nodesToMove = oldNodes.filter(n => n.parent_id !== newParentId);
+    if (nodesToMove.length === 0) return;
 
-    setNodes(prev => prev.map(n => n.id === nodeId ? { ...n, parent_id: newParentId } : n));
+    const idsToMove = nodesToMove.map(n => n.id);
+    setNodes(prev => prev.map(n => idsToMove.includes(n.id) ? { ...n, parent_id: newParentId } : n));
 
     try {
-      const res = await fetch("/api/files", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "move_node", id: nodeId, newParentId }),
-      });
-      if (!res.ok) throw new Error("Failed to move");
+      // Move all nodes in parallel
+      await Promise.all(idsToMove.map(async (id) => {
+        const res = await fetch("/api/files", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "move_node", id, newParentId }),
+        });
+        if (!res.ok) throw new Error(`Failed to move node ${id}`);
+      }));
     } catch (error: any) {
       // 失敗したらロールバック
-      setNodes(prev => prev.map(n => n.id === nodeId ? oldNode : n));
+      const oldNodeMap = new Map(oldNodes.map(n => [n.id, n]));
+      setNodes(prev => prev.map(n => oldNodeMap.has(n.id) ? oldNodeMap.get(n.id)! : n));
       alert(`Error: ${error.message}`);
     }
   };
@@ -2337,7 +2343,7 @@ ${diffs}`;
             onUploadFolder={handleUploadFolder}
             onDownload={handleDownload}
             onDropFiles={handleDropFilesOnFolder}
-            onMoveNode={handleMoveNode}
+            onMoveNodes={handleMoveNodes}
             projectName={activeWorkspace.name}
             userEmail={userEmail}
             onOpenSettings={() => setActiveActivity("settings")}

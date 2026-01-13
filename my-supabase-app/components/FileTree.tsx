@@ -30,7 +30,7 @@ type FileTreeProps = {
   onUploadFolder?: (parentId: string | null) => void;
   onDownload?: (nodeIds: string[]) => void;
   onDropFiles?: (dataTransfer: DataTransfer, targetFolderId: string | null) => void;
-  onMoveNode?: (nodeId: string, newParentId: string | null) => void;
+  onMoveNodes?: (nodeIds: string[], newParentId: string | null) => void;
   projectName?: string;
   userEmail?: string;
   userName?: string;
@@ -69,7 +69,7 @@ export function FileTree({
   onUploadFolder,
   onDownload,
   onDropFiles,
-  onMoveNode,
+  onMoveNodes,
   projectName,
   userEmail,
   userName,
@@ -93,9 +93,10 @@ export function FileTree({
   const dropdownRef = useRef<HTMLDivElement>(null);
   const [dragOverNodeId, setDragOverNodeId] = useState<string | null>(null);
   const [dragOverSubtreeId, setDragOverSubtreeId] = useState<string | null>(null);
-  const [draggingNodeId, setDraggingNodeId] = useState<string | null>(null);
+  const [draggingNodeIds, setDraggingNodeIds] = useState<Set<string>>(new Set());
   const dragCounterRef = useRef<Record<string, number>>({});
   const dragExpandTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const dragPreviewRef = useRef<HTMLDivElement>(null);
 
   // Delete confirmation dialog state
   const [confirmDialog, setConfirmDialog] = useState<{
@@ -386,10 +387,13 @@ export function FileTree({
     return isExternalFileDrag(dataTransfer) || isInternalNodeDrag(dataTransfer);
   };
 
-  // Check if dropping node into target would create a cycle (can't drop folder into itself or its descendants)
-  const wouldCreateCycle = (draggedNodeId: string, targetFolderId: string | null): boolean => {
+  // Check if dropping any of the nodes into target would create a cycle (can't drop folder into itself or its descendants)
+  const wouldCreateCycle = (draggedNodeIds: Set<string>, targetFolderId: string | null): boolean => {
     if (!targetFolderId) return false;
-    return isNodeInSubtree(targetFolderId, draggedNodeId);
+    for (const nodeId of draggedNodeIds) {
+      if (isNodeInSubtree(targetFolderId, nodeId)) return true;
+    }
+    return false;
   };
 
   // Clear drag expand timer
@@ -429,13 +433,13 @@ export function FileTree({
     if (!node) return;
 
     // For internal drag, prevent dropping onto itself or its descendants
-    if (isInternal && draggingNodeId) {
+    if (isInternal && draggingNodeIds.size > 0) {
       const targetFolderId = node.type === "folder" ? node.id : node.parent_id;
-      if (wouldCreateCycle(draggingNodeId, targetFolderId)) {
+      if (wouldCreateCycle(draggingNodeIds, targetFolderId)) {
         return;
       }
-      // Don't allow dropping on the node being dragged
-      if (nodeId === draggingNodeId) {
+      // Don't allow dropping on a node being dragged
+      if (draggingNodeIds.has(nodeId)) {
         return;
       }
     }
@@ -508,10 +512,10 @@ export function FileTree({
     if (!isExternal && !isInternal) return;
 
     // For internal drag, prevent dropping onto itself or its descendants
-    if (isInternal && draggingNodeId && nodeId) {
+    if (isInternal && draggingNodeIds.size > 0 && nodeId) {
       const node = nodeMap.get(nodeId);
       const targetFolderId = node?.type === "folder" ? node.id : node?.parent_id ?? null;
-      if (wouldCreateCycle(draggingNodeId, targetFolderId) || nodeId === draggingNodeId) {
+      if (wouldCreateCycle(draggingNodeIds, targetFolderId) || draggingNodeIds.has(nodeId)) {
         e.dataTransfer.dropEffect = "none";
         return;
       }
@@ -537,24 +541,27 @@ export function FileTree({
     // Get the target folder (for files, use parent folder)
     const targetFolderId = nodeId ? getDropTargetFolderId(nodeId) : null;
 
-    if (isInternal && draggingNodeId) {
+    if (isInternal && draggingNodeIds.size > 0) {
       // Internal move
-      if (wouldCreateCycle(draggingNodeId, targetFolderId)) {
-        setDraggingNodeId(null);
+      if (wouldCreateCycle(draggingNodeIds, targetFolderId)) {
+        setDraggingNodeIds(new Set());
         return;
       }
-      // Check if moving to the same parent (no-op)
-      const draggedNode = nodeMap.get(draggingNodeId);
-      if (draggedNode?.parent_id === targetFolderId) {
-        setDraggingNodeId(null);
+      // Filter out nodes that are already in the target folder
+      const nodesToMove = Array.from(draggingNodeIds).filter(id => {
+        const node = nodeMap.get(id);
+        return node && node.parent_id !== targetFolderId;
+      });
+      if (nodesToMove.length === 0) {
+        setDraggingNodeIds(new Set());
         return;
       }
       // Expand the target folder
       if (targetFolderId) {
         setExpandedFolders(prev => new Set(prev).add(targetFolderId));
       }
-      onMoveNode?.(draggingNodeId, targetFolderId);
-      setDraggingNodeId(null);
+      onMoveNodes?.(nodesToMove, targetFolderId);
+      setDraggingNodeIds(new Set());
     } else if (isExternal && onDropFiles) {
       // External file drop
       if (targetFolderId) {
@@ -565,7 +572,7 @@ export function FileTree({
   };
 
   const handleDragEnd = () => {
-    setDraggingNodeId(null);
+    setDraggingNodeIds(new Set());
     setDragOverNodeId(null);
     setDragOverSubtreeId(null);
     clearDragExpandTimer();
@@ -746,7 +753,7 @@ export function FileTree({
 
       const isExpanded = expandedFolders.has(node.id);
       const isSelected = selectedNodeIds.has(node.id);
-      const isBeingDragged = draggingNodeId === node.id;
+      const isBeingDragged = draggingNodeIds.has(node.id);
       const isRootDragOver = dragOverNodeId === "root";
       const isDragOver = !isRootDragOver && dragOverNodeId === node.id;
       const isDragOverSubtree =
@@ -763,7 +770,55 @@ export function FileTree({
             onDragStart={(e) => {
               e.dataTransfer.setData("application/cursor-node", node.id);
               e.dataTransfer.effectAllowed = "move";
-              setDraggingNodeId(node.id);
+              // If the dragged node is selected, drag all selected nodes
+              // Otherwise, drag only this node
+              const dragCount = selectedNodeIds.has(node.id) && selectedNodeIds.size > 1
+                ? selectedNodeIds.size
+                : 1;
+              if (dragCount > 1) {
+                setDraggingNodeIds(new Set(selectedNodeIds));
+              } else {
+                setDraggingNodeIds(new Set([node.id]));
+              }
+
+              // Create custom drag preview
+              if (dragPreviewRef.current) {
+                const preview = dragPreviewRef.current;
+                if (dragCount === 1) {
+                  // Single file: show filename in pill (blue border)
+                  preview.innerHTML = `<span style="
+                    display: inline-block;
+                    padding: 4px 12px;
+                    background: white;
+                    border: 1.5px solid #93c5fd;
+                    border-radius: 9999px;
+                    font-size: 13px;
+                    color: #374151;
+                    white-space: nowrap;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    max-width: 180px;
+                    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+                  ">${node.name}</span>`;
+                } else {
+                  // Multiple files: show count in circle
+                  preview.innerHTML = `<span style="
+                    display: inline-flex;
+                    align-items: center;
+                    justify-content: center;
+                    width: 28px;
+                    height: 28px;
+                    background: white;
+                    border: 1.5px solid #a5b4fc;
+                    border-radius: 50%;
+                    font-size: 13px;
+                    color: #6366f1;
+                    font-weight: 500;
+                    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+                  ">${dragCount}</span>`;
+                }
+                e.dataTransfer.setDragImage(preview, preview.offsetWidth / 2, preview.offsetHeight / 2);
+              }
             }}
             onDragEnd={handleDragEnd}
             onDragEnter={(e) => handleNodeDragEnter(e, node.id)}
@@ -984,13 +1039,16 @@ export function FileTree({
           setDragOverNodeId(null);
           setDragOverSubtreeId(null);
 
-          if (isInternal && draggingNodeId) {
+          if (isInternal && draggingNodeIds.size > 0) {
             // Internal move to root
-            const draggedNode = nodeMap.get(draggingNodeId);
-            if (draggedNode?.parent_id !== targetFolderId) {
-              onMoveNode?.(draggingNodeId, targetFolderId);
+            const nodesToMove = Array.from(draggingNodeIds).filter(id => {
+              const node = nodeMap.get(id);
+              return node && node.parent_id !== targetFolderId;
+            });
+            if (nodesToMove.length > 0) {
+              onMoveNodes?.(nodesToMove, targetFolderId);
             }
-            setDraggingNodeId(null);
+            setDraggingNodeIds(new Set());
           } else if (isExternal && onDropFiles) {
             if (targetFolderId) {
               setExpandedFolders(prev => new Set(prev).add(targetFolderId!));
@@ -1056,6 +1114,18 @@ export function FileTree({
         isDanger={true}
         onConfirm={handleDeleteConfirm}
         onCancel={() => setConfirmDialog({ isOpen: false, targetId: null, targetName: "" })}
+      />
+
+      {/* Hidden drag preview element */}
+      <div
+        ref={dragPreviewRef}
+        style={{
+          position: "fixed",
+          top: -1000,
+          left: -1000,
+          pointerEvents: "none",
+          zIndex: -1,
+        }}
       />
     </div>
   );
