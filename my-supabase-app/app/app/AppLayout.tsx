@@ -170,8 +170,6 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const [showCreateWorkspace, setShowCreateWorkspace] = useState(false);
   const [currentWorkspaces, setCurrentWorkspaces] = useState(workspaces);
   const [activeWorkspace, setActiveWorkspace] = useState(currentWorkspace);
-  const [showRenameWorkspace, setShowRenameWorkspace] = useState(false);
-  const [renameWorkspaceValue, setRenameWorkspaceValue] = useState("");
   const [showDeleteWorkspaceConfirm, setShowDeleteWorkspaceConfirm] = useState(false);
 
   // Resizable panel widths
@@ -2856,35 +2854,31 @@ ${diffs}`;
     }
   };
 
-  // ワークスペース名変更ダイアログを開く
-  const handleOpenRenameWorkspace = () => {
-    setRenameWorkspaceValue(activeWorkspace.name);
-    setShowRenameWorkspace(true);
-  };
+  // ワークスペース名変更を実行（optimistic update）
+  const handleRenameWorkspace = async (newName: string) => {
+    if (!newName.trim()) return;
 
-  // ワークスペース名変更を実行
-  const handleRenameWorkspace = async () => {
-    if (!renameWorkspaceValue.trim()) return;
+    const oldName = activeWorkspace.name;
+
+    // Optimistic update - 即座にUI更新
+    setCurrentWorkspaces(prev => prev.map(w => w.id === activeWorkspace.id ? { ...w, name: newName } : w));
+    setActiveWorkspace(prev => ({ ...prev, name: newName }));
 
     try {
       const res = await fetch("/api/workspaces", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ workspaceId: activeWorkspace.id, name: renameWorkspaceValue }),
+        body: JSON.stringify({ workspaceId: activeWorkspace.id, name: newName }),
       });
 
       if (!res.ok) {
         const error = await res.json();
         throw new Error(error.error);
       }
-
-      const { workspace } = await res.json();
-
-      // ワークスペース一覧を更新
-      setCurrentWorkspaces(prev => prev.map(w => w.id === workspace.id ? { ...w, name: workspace.name } : w));
-      setActiveWorkspace(prev => ({ ...prev, name: workspace.name }));
-      setShowRenameWorkspace(false);
     } catch (error: any) {
+      // Revert on error - エラー時に元に戻す
+      setCurrentWorkspaces(prev => prev.map(w => w.id === activeWorkspace.id ? { ...w, name: oldName } : w));
+      setActiveWorkspace(prev => ({ ...prev, name: oldName }));
       alert(`Error: ${error.message}`);
     }
   };
@@ -2943,7 +2937,7 @@ ${diffs}`;
             projectName={activeWorkspace.name}
             userEmail={userEmail}
             onOpenSettings={() => setActiveActivity("settings")}
-            onRenameWorkspace={handleOpenRenameWorkspace}
+            onRenameWorkspace={handleRenameWorkspace}
             onDeleteWorkspace={() => setShowDeleteWorkspaceConfirm(true)}
           />
         );
@@ -3039,40 +3033,6 @@ ${diffs}`;
             onClose={() => setShowCreateWorkspace(false)}
             onCreate={handleCreateWorkspace}
           />
-        )}
-
-        {/* ワークスペース名変更ダイアログ */}
-        {showRenameWorkspace && (
-          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-            <div className="bg-white rounded-lg shadow-xl w-96 p-6">
-              <h2 className="text-lg font-semibold mb-4">ワークスペース名を変更</h2>
-              <input
-                type="text"
-                value={renameWorkspaceValue}
-                onChange={(e) => setRenameWorkspaceValue(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") handleRenameWorkspace();
-                  if (e.key === "Escape") setShowRenameWorkspace(false);
-                }}
-                className="w-full px-3 py-2 border border-zinc-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                autoFocus
-              />
-              <div className="mt-4 flex justify-end gap-2">
-                <button
-                  onClick={() => setShowRenameWorkspace(false)}
-                  className="px-4 py-2 text-zinc-600 hover:bg-zinc-100 rounded-md"
-                >
-                  キャンセル
-                </button>
-                <button
-                  onClick={handleRenameWorkspace}
-                  className="px-4 py-2 bg-blue-500 text-white rounded-md hover:bg-blue-600"
-                >
-                  変更
-                </button>
-              </div>
-            </div>
-          </div>
         )}
 
         {/* ワークスペース削除確認ダイアログ */}

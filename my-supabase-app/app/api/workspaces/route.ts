@@ -99,22 +99,40 @@ export async function PATCH(req: NextRequest) {
       .select("role")
       .eq("workspace_id", workspaceId)
       .eq("user_id", user.id)
-      .single();
+      .maybeSingle();
 
     if (!membership || !["owner", "admin"].includes(membership.role)) {
       return NextResponse.json({ error: "Permission denied" }, { status: 403 });
     }
 
-    const { data: workspace, error } = await supabase
+    // First check if workspace exists and user is owner
+    const { data: existingWorkspace } = await supabase
+      .from("workspaces")
+      .select("id, owner_id")
+      .eq("id", workspaceId)
+      .maybeSingle();
+
+    if (!existingWorkspace) {
+      return NextResponse.json({ error: "Workspace not found" }, { status: 404 });
+    }
+
+    // Update workspace name (include owner_id condition for RLS)
+    const { error: updateError, count } = await supabase
       .from("workspaces")
       .update({ name: name.trim() })
       .eq("id", workspaceId)
-      .select("*")
-      .single();
+      .eq("owner_id", existingWorkspace.owner_id);
 
-    if (error) throw error;
+    if (updateError) throw updateError;
 
-    return NextResponse.json({ workspace });
+    // Return success with updated name
+    return NextResponse.json({
+      workspace: {
+        id: workspaceId,
+        name: name.trim(),
+        owner_id: existingWorkspace.owner_id
+      }
+    });
   } catch (error: any) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }

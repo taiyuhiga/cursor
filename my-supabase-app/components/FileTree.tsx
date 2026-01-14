@@ -41,7 +41,7 @@ type FileTreeProps = {
   userName?: string;
   planName?: string;
   onOpenSettings?: () => void;
-  onRenameWorkspace?: () => void;
+  onRenameWorkspace?: (newName: string) => Promise<void>;
   onDeleteWorkspace?: () => void;
 };
 
@@ -128,6 +128,11 @@ export function FileTree({
     nodeIds: string[];
     operation: "cut" | "copy";
   } | null>(null);
+
+  // Workspace name editing state
+  const [isEditingWorkspaceName, setIsEditingWorkspaceName] = useState(false);
+  const [workspaceNameValue, setWorkspaceNameValue] = useState("");
+  const workspaceNameInputRef = useRef<HTMLInputElement>(null);
 
   const nodeMap = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
 
@@ -245,6 +250,17 @@ export function FileTree({
       }, 0);
     }
   }, [editingState]);
+
+  // Focus workspace name input when editing starts
+  useEffect(() => {
+    if (isEditingWorkspaceName && workspaceNameInputRef.current) {
+      setTimeout(() => {
+        if (!workspaceNameInputRef.current) return;
+        workspaceNameInputRef.current.focus();
+        workspaceNameInputRef.current.select();
+      }, 0);
+    }
+  }, [isEditingWorkspaceName]);
 
   // Keyboard shortcuts for cut/copy/paste
   useEffect(() => {
@@ -385,6 +401,42 @@ export function FileTree({
       setEditingState(null);
       setInputValue("");
       setValidationError(null);
+    }
+  };
+
+  // Workspace name editing handlers
+  const startEditingWorkspaceName = () => {
+    setWorkspaceNameValue(projectName || "");
+    setIsEditingWorkspaceName(true);
+    setDropdownMenu(null);
+  };
+
+  const handleWorkspaceNameComplete = () => {
+    const trimmedValue = workspaceNameValue.trim();
+    if (!trimmedValue || trimmedValue === projectName) {
+      setIsEditingWorkspaceName(false);
+      setWorkspaceNameValue("");
+      return;
+    }
+
+    // Close editing immediately for instant feedback
+    setIsEditingWorkspaceName(false);
+    setWorkspaceNameValue("");
+
+    // Call API in background (optimistic update)
+    if (onRenameWorkspace) {
+      onRenameWorkspace(trimmedValue).catch(() => {
+        // Error handling is done in the parent component
+      });
+    }
+  };
+
+  const handleWorkspaceNameKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") {
+      handleWorkspaceNameComplete();
+    } else if (e.key === "Escape") {
+      setIsEditingWorkspaceName(false);
+      setWorkspaceNameValue("");
     }
   };
 
@@ -1061,17 +1113,41 @@ export function FileTree({
         setContextMenu({ x: e.clientX, y: e.clientY, targetId: null });
       }}
     >
-      {/* Project name header - Cursor style */}
+      {/* Project name header */}
       {projectName && (
-        <div
-          className="flex items-center justify-between px-3 py-2 cursor-pointer hover:bg-zinc-100 border-b border-zinc-200"
-          onClick={() => setIsProjectExpanded(!isProjectExpanded)}
-        >
-          <div className="flex items-center gap-1 min-w-0">
-            <ChevronIcon isOpen={isProjectExpanded} className="w-4 h-4 text-zinc-500" />
-            <span className="text-[12px] font-semibold text-zinc-700 uppercase tracking-wide truncate">
-              {projectName}
-            </span>
+        <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-200">
+          <div className="flex items-center gap-2 min-w-0 flex-1">
+            {/* Workspace icon with first character */}
+            <div className="w-6 h-6 rounded bg-blue-100 flex items-center justify-center flex-shrink-0">
+              <span className="text-xs font-bold text-blue-600">
+                {(isEditingWorkspaceName ? workspaceNameValue : projectName).charAt(0).toUpperCase()}
+              </span>
+            </div>
+            {isEditingWorkspaceName ? (
+              <input
+                ref={workspaceNameInputRef}
+                type="text"
+                value={workspaceNameValue}
+                onChange={(e) => setWorkspaceNameValue(e.target.value)}
+                onKeyDown={handleWorkspaceNameKeyDown}
+                onBlur={handleWorkspaceNameComplete}
+                onClick={(e) => e.stopPropagation()}
+                className="flex-1 min-w-0 px-1.5 py-0.5 text-sm font-semibold text-zinc-800 border border-blue-500 rounded outline-none bg-white"
+              />
+            ) : (
+              <>
+                <span
+                  className="text-sm font-semibold text-zinc-800 truncate cursor-pointer"
+                  onDoubleClick={(e) => {
+                    e.stopPropagation();
+                    startEditingWorkspaceName();
+                  }}
+                >
+                  {projectName}
+                </span>
+                <ChevronIcon isOpen={isProjectExpanded} className="w-4 h-4 text-zinc-400 flex-shrink-0" />
+              </>
+            )}
           </div>
           <div className="flex items-center gap-0.5">
             <button
@@ -1113,6 +1189,7 @@ export function FileTree({
             <ActionIcons.Note className="w-4 h-4" />
             新規ノート
           </button>
+          <div className="border-t border-zinc-200 my-1" />
           <button
             className="w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-100 flex items-center gap-2"
             onClick={() => handleDropdownAction("share")}
@@ -1146,10 +1223,7 @@ export function FileTree({
           <div className="border-t border-zinc-200 my-1" />
           <button
             className="w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-100 flex items-center gap-2"
-            onClick={() => {
-              setDropdownMenu(null);
-              onRenameWorkspace?.();
-            }}
+            onClick={() => startEditingWorkspaceName()}
           >
             <ActionIcons.Rename className="w-4 h-4" />
             ワークスペース名を変更
@@ -1302,10 +1376,16 @@ export function FileTree({
                 { label: "新規ファイル", icon: <ActionIcons.FilePlus className="w-4 h-4" />, action: () => handleContextMenuAction("new_file") },
                 { label: "新規フォルダ", icon: <ActionIcons.FolderPlus className="w-4 h-4" />, action: () => handleContextMenuAction("new_folder") },
                 { label: "新規ノート", icon: <ActionIcons.Note className="w-4 h-4" />, action: () => handleContextMenuAction("new_note") },
+                { separator: true, label: "", action: () => {} },
                 { label: "共有", icon: <ActionIcons.Share className="w-4 h-4" />, action: () => handleContextMenuAction("share") },
                 { separator: true, label: "", action: () => {} },
                 { label: "ファイルをアップロード", icon: <ActionIcons.Upload className="w-4 h-4" />, action: () => handleContextMenuAction("upload_files") },
                 { label: "フォルダをアップロード", icon: <ActionIcons.FolderUpload className="w-4 h-4" />, action: () => handleContextMenuAction("upload_folder") },
+                { separator: true, label: "", action: () => {} },
+              ] : []),
+              // Show share for files at the top (for folders it's already in the block above)
+              ...(isFile ? [
+                { label: "共有", icon: <ActionIcons.Share className="w-4 h-4" />, action: () => handleContextMenuAction("share") },
                 { separator: true, label: "", action: () => {} },
               ] : []),
               { label: selectedNodeIds.size > 0 || contextMenu.targetId ? "選択項目をダウンロード" : "すべてダウンロード", icon: <ActionIcons.Download className="w-4 h-4" />, action: () => handleContextMenuAction("download") },
@@ -1325,7 +1405,7 @@ export function FileTree({
               ] : [
                 // Workspace actions when no file/folder is selected
                 { separator: true, label: "", action: () => {} },
-                { label: "ワークスペース名を変更", icon: <ActionIcons.Rename className="w-4 h-4" />, action: () => { setContextMenu(null); onRenameWorkspace?.(); } },
+                { label: "ワークスペース名を変更", icon: <ActionIcons.Rename className="w-4 h-4" />, action: () => { setContextMenu(null); startEditingWorkspaceName(); } },
                 { label: "ワークスペースを削除", icon: <ActionIcons.Trash className="w-4 h-4" />, action: () => { setContextMenu(null); onDeleteWorkspace?.(); }, danger: true },
               ])
             ]}
