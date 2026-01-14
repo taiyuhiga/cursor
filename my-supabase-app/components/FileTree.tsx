@@ -1157,7 +1157,7 @@ export function FileTree({
             </button>
             <button
               onClick={handleHeaderNewFolder}
-              className="p-0.5 rounded text-zinc-700 hover:text-zinc-900 bg-transparent hover:bg-transparent"
+              className="p-0.5 rounded text-zinc-700 hover:text-zinc-900 bg-transparent hover:bg-transparent ml-1"
               title="新規フォルダ"
             >
               <ActionIcons.FolderPlus className="w-5 h-5" />
