@@ -170,6 +170,9 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const [showCreateWorkspace, setShowCreateWorkspace] = useState(false);
   const [currentWorkspaces, setCurrentWorkspaces] = useState(workspaces);
   const [activeWorkspace, setActiveWorkspace] = useState(currentWorkspace);
+  const [showRenameWorkspace, setShowRenameWorkspace] = useState(false);
+  const [renameWorkspaceValue, setRenameWorkspaceValue] = useState("");
+  const [showDeleteWorkspaceConfirm, setShowDeleteWorkspaceConfirm] = useState(false);
 
   // Resizable panel widths
   const [leftPanelWidth, setLeftPanelWidth] = useState(256);
@@ -253,21 +256,36 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   // ノード一覧を取得
   const fetchNodes = useCallback(async () => {
     setIsLoading(true);
-    const { data, error } = await supabase
-      .from("nodes")
-      .select("*")
-      .eq("project_id", projectId)
-      .order("type", { ascending: false })
-      .order("name", { ascending: true });
+    // Supabase REST defaults to 1000 rows; paginate to load everything.
+    const pageSize = 1000;
+    const allNodes: Node[] = [];
+    let page = 0;
+    while (true) {
+      const from = page * pageSize;
+      const to = from + pageSize - 1;
+      const { data, error } = await supabase
+        .from("nodes")
+        .select("*")
+        .eq("project_id", projectId)
+        .order("type", { ascending: false })
+        .order("name", { ascending: true })
+        .order("id", { ascending: true })
+        .range(from, to);
 
-    if (error) {
-      console.error("Error fetching nodes:", error);
-      setIsLoading(false);
-      return data || [];
+      if (error) {
+        console.error("Error fetching nodes:", error);
+        setIsLoading(false);
+        return [];
+      }
+
+      const pageData = data || [];
+      allNodes.push(...pageData);
+      if (pageData.length < pageSize) break;
+      page += 1;
     }
 
     setNodes((prev) => {
-      const serverNodes = data || [];
+      const serverNodes = allNodes;
       const serverKeys = new Set(serverNodes.map(getNodeKey));
       const serverIds = new Set(serverNodes.map((node) => node.id));
       for (const id of Array.from(pendingNodeIdsRef.current)) {
@@ -285,7 +303,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       return [...serverNodes, ...pendingNodes];
     });
     setIsLoading(false);
-    return data || [];
+    return allNodes;
   }, [projectId, supabase]);
 
   useEffect(() => {
@@ -2838,6 +2856,65 @@ ${diffs}`;
     }
   };
 
+  // ワークスペース名変更ダイアログを開く
+  const handleOpenRenameWorkspace = () => {
+    setRenameWorkspaceValue(activeWorkspace.name);
+    setShowRenameWorkspace(true);
+  };
+
+  // ワークスペース名変更を実行
+  const handleRenameWorkspace = async () => {
+    if (!renameWorkspaceValue.trim()) return;
+
+    try {
+      const res = await fetch("/api/workspaces", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspaceId: activeWorkspace.id, name: renameWorkspaceValue }),
+      });
+
+      if (!res.ok) {
+        const error = await res.json();
+        throw new Error(error.error);
+      }
+
+      const { workspace } = await res.json();
+
+      // ワークスペース一覧を更新
+      setCurrentWorkspaces(prev => prev.map(w => w.id === workspace.id ? { ...w, name: workspace.name } : w));
+      setActiveWorkspace(prev => ({ ...prev, name: workspace.name }));
+      setShowRenameWorkspace(false);
+    } catch (error: any) {
+      alert(`Error: ${error.message}`);
+    }
+  };
+
+  // ワークスペース削除を実行
+  const handleDeleteWorkspace = async () => {
+    try {
+      const res = await fetch(`/api/workspaces?workspaceId=${activeWorkspace.id}`, {
+        method: "DELETE",
+      });
+
+      if (!res.ok) {
+        const error = await res.json();
+        throw new Error(error.error);
+      }
+
+      setShowDeleteWorkspaceConfirm(false);
+
+      // 別のワークスペースに切り替え（または作成画面に）
+      const remainingWorkspaces = currentWorkspaces.filter(w => w.id !== activeWorkspace.id);
+      if (remainingWorkspaces.length > 0) {
+        window.location.href = `/app?workspace=${remainingWorkspaces[0].id}`;
+      } else {
+        window.location.href = "/app";
+      }
+    } catch (error: any) {
+      alert(`Error: ${error.message}`);
+    }
+  };
+
   const renderSidebarContent = () => {
     switch (activeActivity) {
       case "explorer":
@@ -2866,6 +2943,8 @@ ${diffs}`;
             projectName={activeWorkspace.name}
             userEmail={userEmail}
             onOpenSettings={() => setActiveActivity("settings")}
+            onRenameWorkspace={handleOpenRenameWorkspace}
+            onDeleteWorkspace={() => setShowDeleteWorkspaceConfirm(true)}
           />
         );
       case "git":
@@ -2960,6 +3039,66 @@ ${diffs}`;
             onClose={() => setShowCreateWorkspace(false)}
             onCreate={handleCreateWorkspace}
           />
+        )}
+
+        {/* ワークスペース名変更ダイアログ */}
+        {showRenameWorkspace && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+            <div className="bg-white rounded-lg shadow-xl w-96 p-6">
+              <h2 className="text-lg font-semibold mb-4">ワークスペース名を変更</h2>
+              <input
+                type="text"
+                value={renameWorkspaceValue}
+                onChange={(e) => setRenameWorkspaceValue(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleRenameWorkspace();
+                  if (e.key === "Escape") setShowRenameWorkspace(false);
+                }}
+                className="w-full px-3 py-2 border border-zinc-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                autoFocus
+              />
+              <div className="mt-4 flex justify-end gap-2">
+                <button
+                  onClick={() => setShowRenameWorkspace(false)}
+                  className="px-4 py-2 text-zinc-600 hover:bg-zinc-100 rounded-md"
+                >
+                  キャンセル
+                </button>
+                <button
+                  onClick={handleRenameWorkspace}
+                  className="px-4 py-2 bg-blue-500 text-white rounded-md hover:bg-blue-600"
+                >
+                  変更
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ワークスペース削除確認ダイアログ */}
+        {showDeleteWorkspaceConfirm && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+            <div className="bg-white rounded-lg shadow-xl w-96 p-6">
+              <h2 className="text-lg font-semibold mb-2">ワークスペースを削除</h2>
+              <p className="text-zinc-600 mb-4">
+                「{activeWorkspace.name}」を削除しますか？この操作は取り消せません。すべてのファイルとフォルダも削除されます。
+              </p>
+              <div className="mt-4 flex justify-end gap-2">
+                <button
+                  onClick={() => setShowDeleteWorkspaceConfirm(false)}
+                  className="px-4 py-2 text-zinc-600 hover:bg-zinc-100 rounded-md"
+                >
+                  キャンセル
+                </button>
+                <button
+                  onClick={handleDeleteWorkspace}
+                  className="px-4 py-2 bg-red-500 text-white rounded-md hover:bg-red-600"
+                >
+                  削除
+                </button>
+              </div>
+            </div>
+          </div>
         )}
 
         <main className="flex-1 flex flex-col min-w-0 bg-white">

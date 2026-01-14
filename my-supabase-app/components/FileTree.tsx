@@ -41,6 +41,8 @@ type FileTreeProps = {
   userName?: string;
   planName?: string;
   onOpenSettings?: () => void;
+  onRenameWorkspace?: () => void;
+  onDeleteWorkspace?: () => void;
 };
 
 type EditingState = {
@@ -85,6 +87,8 @@ export function FileTree({
   userName,
   planName,
   onOpenSettings,
+  onRenameWorkspace,
+  onDeleteWorkspace,
 }: FileTreeProps) {
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [contextMenu, setContextMenu] = useState<{
@@ -1139,6 +1143,27 @@ export function FileTree({
             <ActionIcons.Download className="w-4 h-4" />
             {selectedNodeIds.size > 0 ? "選択項目をダウンロード" : "すべてダウンロード"}
           </button>
+          <div className="border-t border-zinc-200 my-1" />
+          <button
+            className="w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-100 flex items-center gap-2"
+            onClick={() => {
+              setDropdownMenu(null);
+              onRenameWorkspace?.();
+            }}
+          >
+            <ActionIcons.Rename className="w-4 h-4" />
+            ワークスペース名を変更
+          </button>
+          <button
+            className="w-full px-3 py-1.5 text-left text-sm text-red-600 hover:bg-zinc-100 flex items-center gap-2"
+            onClick={() => {
+              setDropdownMenu(null);
+              onDeleteWorkspace?.();
+            }}
+          >
+            <ActionIcons.Trash className="w-4 h-4" />
+            ワークスペースを削除
+          </button>
         </div>
       )}
 
@@ -1282,7 +1307,7 @@ export function FileTree({
                 { label: "フォルダをアップロード", icon: <ActionIcons.FolderUpload className="w-4 h-4" />, action: () => handleContextMenuAction("upload_folder") },
                 { separator: true, label: "", action: () => {} },
               ] : []),
-              { label: "ダウンロード", icon: <ActionIcons.Download className="w-4 h-4" />, action: () => handleContextMenuAction("download") },
+              { label: selectedNodeIds.size > 0 || contextMenu.targetId ? "選択項目をダウンロード" : "すべてダウンロード", icon: <ActionIcons.Download className="w-4 h-4" />, action: () => handleContextMenuAction("download") },
               { label: "共有", icon: <ActionIcons.Share className="w-4 h-4" />, action: () => handleContextMenuAction("share") },
               ...(contextMenu.targetId ? [
                 { separator: true, label: "", action: () => {} },
@@ -1297,7 +1322,12 @@ export function FileTree({
                 { separator: true, label: "", action: () => {} },
                 { label: "名前を変更", icon: <ActionIcons.Rename className="w-4 h-4" />, action: () => handleContextMenuAction("rename") },
                 { label: "削除", icon: <ActionIcons.Trash className="w-4 h-4" />, action: () => handleContextMenuAction("delete"), danger: true },
-              ] : [])
+              ] : [
+                // Workspace actions when no file/folder is selected
+                { separator: true, label: "", action: () => {} },
+                { label: "ワークスペース名を変更", icon: <ActionIcons.Rename className="w-4 h-4" />, action: () => { setContextMenu(null); onRenameWorkspace?.(); } },
+                { label: "ワークスペースを削除", icon: <ActionIcons.Trash className="w-4 h-4" />, action: () => { setContextMenu(null); onDeleteWorkspace?.(); }, danger: true },
+              ])
             ]}
           />
         );

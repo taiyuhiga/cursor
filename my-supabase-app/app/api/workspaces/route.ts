@@ -77,6 +77,91 @@ export async function POST(req: NextRequest) {
   }
 }
 
+// ワークスペース名変更
+export async function PATCH(req: NextRequest) {
+  const supabase = await createClient();
+
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const { workspaceId, name } = await req.json();
+
+  if (!workspaceId || !name || typeof name !== "string") {
+    return NextResponse.json({ error: "workspaceId and name are required" }, { status: 400 });
+  }
+
+  try {
+    // Check if user is owner or admin
+    const { data: membership } = await supabase
+      .from("workspace_members")
+      .select("role")
+      .eq("workspace_id", workspaceId)
+      .eq("user_id", user.id)
+      .single();
+
+    if (!membership || !["owner", "admin"].includes(membership.role)) {
+      return NextResponse.json({ error: "Permission denied" }, { status: 403 });
+    }
+
+    const { data: workspace, error } = await supabase
+      .from("workspaces")
+      .update({ name: name.trim() })
+      .eq("id", workspaceId)
+      .select("*")
+      .single();
+
+    if (error) throw error;
+
+    return NextResponse.json({ workspace });
+  } catch (error: any) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+}
+
+// ワークスペース削除
+export async function DELETE(req: NextRequest) {
+  const supabase = await createClient();
+
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const { searchParams } = new URL(req.url);
+  const workspaceId = searchParams.get("workspaceId");
+
+  if (!workspaceId) {
+    return NextResponse.json({ error: "workspaceId is required" }, { status: 400 });
+  }
+
+  try {
+    // Check if user is owner
+    const { data: workspace } = await supabase
+      .from("workspaces")
+      .select("owner_id")
+      .eq("id", workspaceId)
+      .single();
+
+    if (!workspace || workspace.owner_id !== user.id) {
+      return NextResponse.json({ error: "Only the owner can delete the workspace" }, { status: 403 });
+    }
+
+    // Delete workspace (cascade will handle related data)
+    const { error } = await supabase
+      .from("workspaces")
+      .delete()
+      .eq("id", workspaceId);
+
+    if (error) throw error;
+
+    return NextResponse.json({ success: true });
+  } catch (error: any) {
+    return NextResponse.json({ error: error.message }, { status: 500 });
+  }
+}
+
 // ワークスペース一覧取得
 export async function GET() {
   const supabase = await createClient();
