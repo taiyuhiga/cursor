@@ -1115,61 +1115,59 @@ export function FileTree({
     >
       {/* Project name header */}
       {projectName && (
-        <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-200">
-          <div className="flex items-center gap-2 min-w-0 flex-1">
-            {/* Workspace icon with first character */}
-            <div className="w-6 h-6 rounded bg-blue-100 flex items-center justify-center flex-shrink-0">
-              <span className="text-xs font-bold text-blue-600">
-                {(isEditingWorkspaceName ? workspaceNameValue : projectName).charAt(0).toUpperCase()}
-              </span>
-            </div>
-            {isEditingWorkspaceName ? (
-              <input
-                ref={workspaceNameInputRef}
-                type="text"
-                value={workspaceNameValue}
-                onChange={(e) => setWorkspaceNameValue(e.target.value)}
-                onKeyDown={handleWorkspaceNameKeyDown}
-                onBlur={handleWorkspaceNameComplete}
-                onClick={(e) => e.stopPropagation()}
-                className="flex-1 min-w-0 px-1.5 py-0.5 text-sm font-semibold text-zinc-800 border border-blue-500 rounded outline-none bg-white"
-              />
-            ) : (
-              <>
-                <span
-                  className="text-sm font-semibold text-zinc-800 truncate cursor-pointer"
-                  onDoubleClick={(e) => {
-                    e.stopPropagation();
-                    startEditingWorkspaceName();
-                  }}
-                >
-                  {projectName}
-                </span>
-                <ChevronIcon isOpen={isProjectExpanded} className="w-4 h-4 text-zinc-400 flex-shrink-0" />
-              </>
-            )}
+        <div className="flex items-center px-3 py-2 border-b border-zinc-200 gap-0.5">
+          {/* Workspace icon with first character */}
+          <div className="w-8 h-8 rounded bg-blue-100 flex items-center justify-center flex-shrink-0 mr-1.5">
+            <span className="text-sm font-bold text-blue-600">
+              {(isEditingWorkspaceName ? workspaceNameValue : projectName).charAt(0).toUpperCase()}
+            </span>
           </div>
-          <div className="flex items-center gap-0.5">
+          {isEditingWorkspaceName ? (
+            <input
+              ref={workspaceNameInputRef}
+              type="text"
+              value={workspaceNameValue}
+              onChange={(e) => setWorkspaceNameValue(e.target.value)}
+              onKeyDown={handleWorkspaceNameKeyDown}
+              onBlur={handleWorkspaceNameComplete}
+              onClick={(e) => e.stopPropagation()}
+              className="flex-1 min-w-0 px-1.5 py-0.5 text-base font-semibold text-zinc-800 border border-blue-500 rounded outline-none bg-white"
+            />
+          ) : (
+            <div
+              className="flex items-center min-w-0 flex-1 cursor-pointer"
+              onDoubleClick={(e) => {
+                e.stopPropagation();
+                startEditingWorkspaceName();
+              }}
+            >
+              <span className="text-base font-semibold text-zinc-800 truncate min-w-[24px]">
+                {projectName}
+              </span>
+              <ChevronIcon isOpen={isProjectExpanded} className="w-4 h-4 text-zinc-400 flex-shrink-0 ml-1" />
+            </div>
+          )}
+          <div className="flex items-center flex-shrink-0 ml-auto -mr-0.5">
             <button
               onClick={handleHeaderNewFile}
-              className="p-1 rounded text-zinc-700 hover:text-zinc-900 bg-transparent hover:bg-transparent"
+              className="p-0.5 rounded text-zinc-700 hover:text-zinc-900 bg-transparent hover:bg-transparent"
               title="新規ファイル"
             >
-              <ActionIcons.FilePlus className="w-[18px] h-[18px]" />
+              <ActionIcons.FilePlus className="w-5 h-5" />
             </button>
             <button
               onClick={handleHeaderNewFolder}
-              className="p-1 rounded text-zinc-700 hover:text-zinc-900 bg-transparent hover:bg-transparent"
+              className="p-0.5 rounded text-zinc-700 hover:text-zinc-900 bg-transparent hover:bg-transparent"
               title="新規フォルダ"
             >
-              <ActionIcons.FolderPlus className="w-[18px] h-[18px]" />
+              <ActionIcons.FolderPlus className="w-5 h-5" />
             </button>
             <button
               onClick={handleMoreClick}
-              className="p-1 rounded text-zinc-700 hover:text-zinc-900 bg-transparent hover:bg-transparent"
+              className="p-0.5 rounded text-zinc-700 hover:text-zinc-900 bg-transparent hover:bg-transparent -mr-2"
               title="その他"
             >
-              <ActionIcons.More className="w-[18px] h-[18px]" />
+              <ActionIcons.More className="w-5 h-5" />
             </button>
           </div>
         </div>
