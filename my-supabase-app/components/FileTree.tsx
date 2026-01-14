@@ -33,6 +33,9 @@ type FileTreeProps = {
   onShare?: () => void;
   onDropFiles?: (dataTransfer: DataTransfer, targetFolderId: string | null) => void;
   onMoveNodes?: (nodeIds: string[], newParentId: string | null) => void;
+  onCopyNodes?: (nodeIds: string[], newParentId: string | null) => void;
+  onUndo?: () => void;
+  onRedo?: () => void;
   projectName?: string;
   userEmail?: string;
   userName?: string;
@@ -74,6 +77,9 @@ export function FileTree({
   onShare,
   onDropFiles,
   onMoveNodes,
+  onCopyNodes,
+  onUndo,
+  onRedo,
   projectName,
   userEmail,
   userName,
@@ -112,6 +118,12 @@ export function FileTree({
     targetId: null,
     targetName: "",
   });
+
+  // Clipboard state for cut/copy/paste
+  const [clipboard, setClipboard] = useState<{
+    nodeIds: string[];
+    operation: "cut" | "copy";
+  } | null>(null);
 
   const nodeMap = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
 
@@ -204,12 +216,97 @@ export function FileTree({
 
   useEffect(() => {
     if (editingState && inputRef.current) {
-      inputRef.current.focus();
-      inputRef.current.select();
-      setInputValue(editingState.initialValue || "");
+      const value = editingState.initialValue || "";
+      setInputValue(value);
       setValidationError(null);
+
+      // Wait for DOM to update with the new value, then focus and select
+      setTimeout(() => {
+        if (!inputRef.current) return;
+        inputRef.current.focus();
+
+        // For rename operation on files, select only the basename (before extension)
+        if (editingState.type === "rename" && editingState.nodeType === "file") {
+          const lastDotIndex = value.lastIndexOf(".");
+          // Only select basename if there's an extension (dot not at start or end)
+          if (lastDotIndex > 0 && lastDotIndex < value.length - 1) {
+            inputRef.current.setSelectionRange(0, lastDotIndex);
+          } else {
+            inputRef.current.select();
+          }
+        } else {
+          // For folders or new files, select all
+          inputRef.current.select();
+        }
+      }, 0);
     }
   }, [editingState]);
+
+  // Keyboard shortcuts for cut/copy/paste
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Only handle if Cmd (Mac) or Ctrl (Windows) is pressed
+      if (!(e.metaKey || e.ctrlKey)) return;
+
+      // Don't handle if focus is in an input or textarea
+      const activeElement = document.activeElement;
+      if (activeElement instanceof HTMLInputElement || activeElement instanceof HTMLTextAreaElement) {
+        return;
+      }
+
+      // Check if we have selected nodes
+      const hasSelection = selectedNodeIds.size > 0;
+
+      switch (e.key.toLowerCase()) {
+        case "c": // Copy
+          if (hasSelection) {
+            e.preventDefault();
+            setClipboard({ nodeIds: Array.from(selectedNodeIds), operation: "copy" });
+          }
+          break;
+        case "x": // Cut
+          if (hasSelection) {
+            e.preventDefault();
+            setClipboard({ nodeIds: Array.from(selectedNodeIds), operation: "cut" });
+          }
+          break;
+        case "v": // Paste
+          if (clipboard && clipboard.nodeIds.length > 0) {
+            e.preventDefault();
+            // Determine target folder: if a folder is selected, paste there; otherwise paste to root
+            let targetParentId: string | null = null;
+            if (selectedNodeIds.size === 1) {
+              const selectedId = Array.from(selectedNodeIds)[0];
+              const selectedNode = nodeMap.get(selectedId);
+              if (selectedNode?.type === "folder") {
+                targetParentId = selectedId;
+              } else if (selectedNode) {
+                targetParentId = selectedNode.parent_id;
+              }
+            }
+
+            if (clipboard.operation === "cut") {
+              onMoveNodes?.(clipboard.nodeIds, targetParentId);
+              setClipboard(null);
+            } else {
+              onCopyNodes?.(clipboard.nodeIds, targetParentId);
+            }
+          }
+          break;
+        case "z": // Undo or Redo
+          e.preventDefault();
+          if (e.shiftKey) {
+            onRedo?.();
+          } else {
+            onUndo?.();
+          }
+          break;
+      }
+    };
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [selectedNodeIds, clipboard, nodeMap, onMoveNodes, onCopyNodes, onUndo, onRedo]);
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
@@ -318,6 +415,12 @@ export function FileTree({
       case "new_folder":
         setEditingState({ type: "create", nodeType: "folder", parentId });
         break;
+      case "new_note":
+        onNewNote?.();
+        break;
+      case "share":
+        onShare?.();
+        break;
       case "upload_files":
         onUploadFiles?.(parentId);
         break;
@@ -350,6 +453,27 @@ export function FileTree({
             targetId,
             targetName: targetNode.name,
           });
+        }
+        break;
+      case "cut":
+        if (targetId) {
+          setClipboard({ nodeIds: [targetId], operation: "cut" });
+        }
+        break;
+      case "copy":
+        if (targetId) {
+          setClipboard({ nodeIds: [targetId], operation: "copy" });
+        }
+        break;
+      case "paste":
+        if (clipboard && clipboard.nodeIds.length > 0) {
+          if (clipboard.operation === "cut") {
+            onMoveNodes?.(clipboard.nodeIds, parentId);
+            setClipboard(null); // Clear clipboard after cut-paste
+          } else {
+            onCopyNodes?.(clipboard.nodeIds, parentId);
+            // Keep clipboard for copy (can paste multiple times)
+          }
         }
         break;
     }
@@ -704,7 +828,6 @@ export function FileTree({
               }`}
               onBlur={handleInputBlur}
               onKeyDown={handleKeyDown}
-              placeholder={editingState.nodeType === "file" ? "filename" : "folder name"}
             />
           </div>
           {validationError && (
@@ -764,6 +887,7 @@ export function FileTree({
       const isExpanded = expandedFolders.has(node.id);
       const isSelected = selectedNodeIds.has(node.id);
       const isBeingDragged = draggingNodeIds.has(node.id);
+      const isCut = clipboard?.operation === "cut" && clipboard.nodeIds.includes(node.id);
       const isRootDragOver = dragOverNodeId === "root";
       const isDragOver = !isRootDragOver && dragOverNodeId === node.id;
       const isDragOverSubtree =
@@ -852,7 +976,7 @@ export function FileTree({
             className={`
               group/item flex items-center gap-1 px-2 py-1 text-[14px] leading-5 cursor-pointer select-none
               transition-colors duration-75
-              ${isBeingDragged
+              ${isBeingDragged || isCut
                 ? "opacity-50"
                 : isDragOver || isDragOverSubtree
                   ? "bg-green-600/10 text-zinc-900"
@@ -949,21 +1073,21 @@ export function FileTree({
             <button
               onClick={handleHeaderNewFile}
               className="p-1 rounded text-zinc-700 hover:text-zinc-900 bg-transparent hover:bg-transparent"
-              title="New File"
+              title="新規ファイル"
             >
               <ActionIcons.FilePlus className="w-[18px] h-[18px]" />
             </button>
             <button
               onClick={handleHeaderNewFolder}
               className="p-1 rounded text-zinc-700 hover:text-zinc-900 bg-transparent hover:bg-transparent"
-              title="New Folder"
+              title="新規フォルダ"
             >
               <ActionIcons.FolderPlus className="w-[18px] h-[18px]" />
             </button>
             <button
               onClick={handleMoreClick}
               className="p-1 rounded text-zinc-700 hover:text-zinc-900 bg-transparent hover:bg-transparent"
-              title="More Actions"
+              title="その他"
             >
               <ActionIcons.More className="w-[18px] h-[18px]" />
             </button>
@@ -1099,14 +1223,14 @@ export function FileTree({
         {(!projectName || isProjectExpanded) && (
           nodes.length === 0 && !editingState ? (
             <div className="text-zinc-400 text-sm p-4 text-center">
-              No files.<br/>Right click to create.
+              ファイルがありません<br/>右クリックで作成
             </div>
           ) : (
             <>
               {renderTree(null)}
               {/* Clickable gap at bottom to clear selection */}
               <div
-                className="min-h-[40px] cursor-pointer"
+                className="min-h-[40px] flex-1 cursor-pointer"
                 onClick={(e) => {
                   e.stopPropagation();
                   onClearSelection();
@@ -1114,6 +1238,7 @@ export function FileTree({
                 onContextMenu={(e) => {
                   e.preventDefault();
                   e.stopPropagation();
+                  setContextMenu({ x: e.clientX, y: e.clientY, targetId: null });
                 }}
               />
             </>
@@ -1136,34 +1261,54 @@ export function FileTree({
         />
       </div>
 
-      {contextMenu && (
-        <ContextMenu
-          x={contextMenu.x}
-          y={contextMenu.y}
-          onClose={() => setContextMenu(null)}
-          items={[
-            { label: "New File", action: () => handleContextMenuAction("new_file") },
-            { label: "New Folder", action: () => handleContextMenuAction("new_folder") },
-            { separator: true, label: "", action: () => {} },
-            { label: "Upload Files", action: () => handleContextMenuAction("upload_files") },
-            { label: "Upload Folder", action: () => handleContextMenuAction("upload_folder") },
-            { separator: true, label: "", action: () => {} },
-            { label: "Download", action: () => handleContextMenuAction("download") },
-            ...(contextMenu.targetId ? [
-              { separator: true, label: "", action: () => {} },
-              { label: "Rename", action: () => handleContextMenuAction("rename") },
-              { label: "Delete", action: () => handleContextMenuAction("delete"), danger: true },
-            ] : [])
-          ]}
-        />
-      )}
+      {contextMenu && (() => {
+        const targetNode = contextMenu.targetId ? nodeMap.get(contextMenu.targetId) : null;
+        const isFile = targetNode?.type === "file";
+        const hasClipboard = clipboard && clipboard.nodeIds.length > 0;
+
+        return (
+          <ContextMenu
+            x={contextMenu.x}
+            y={contextMenu.y}
+            onClose={() => setContextMenu(null)}
+            items={[
+              // Show create/upload options only for folders or empty space
+              ...(!isFile ? [
+                { label: "新規ファイル", icon: <ActionIcons.FilePlus className="w-4 h-4" />, action: () => handleContextMenuAction("new_file") },
+                { label: "新規フォルダ", icon: <ActionIcons.FolderPlus className="w-4 h-4" />, action: () => handleContextMenuAction("new_folder") },
+                { label: "新規ノート", icon: <ActionIcons.Note className="w-4 h-4" />, action: () => handleContextMenuAction("new_note") },
+                { separator: true, label: "", action: () => {} },
+                { label: "ファイルをアップロード", icon: <ActionIcons.Upload className="w-4 h-4" />, action: () => handleContextMenuAction("upload_files") },
+                { label: "フォルダをアップロード", icon: <ActionIcons.FolderUpload className="w-4 h-4" />, action: () => handleContextMenuAction("upload_folder") },
+                { separator: true, label: "", action: () => {} },
+              ] : []),
+              { label: "ダウンロード", icon: <ActionIcons.Download className="w-4 h-4" />, action: () => handleContextMenuAction("download") },
+              { label: "共有", icon: <ActionIcons.Share className="w-4 h-4" />, action: () => handleContextMenuAction("share") },
+              ...(contextMenu.targetId ? [
+                { separator: true, label: "", action: () => {} },
+                { label: "切り取り", icon: <ActionIcons.Cut className="w-4 h-4" />, action: () => handleContextMenuAction("cut") },
+                { label: "コピー", icon: <ActionIcons.Copy className="w-4 h-4" />, action: () => handleContextMenuAction("copy") },
+              ] : []),
+              // Show paste only for folders or empty space, and when clipboard has content
+              ...(!isFile && hasClipboard ? [
+                { label: "貼り付け", icon: <ActionIcons.Paste className="w-4 h-4" />, action: () => handleContextMenuAction("paste") },
+              ] : []),
+              ...(contextMenu.targetId ? [
+                { separator: true, label: "", action: () => {} },
+                { label: "名前を変更", icon: <ActionIcons.Rename className="w-4 h-4" />, action: () => handleContextMenuAction("rename") },
+                { label: "削除", icon: <ActionIcons.Trash className="w-4 h-4" />, action: () => handleContextMenuAction("delete"), danger: true },
+              ] : [])
+            ]}
+          />
+        );
+      })()}
 
       {/* Confirm Dialog */}
       <ConfirmDialog
         isOpen={confirmDialog.isOpen}
-        title="Delete File?"
-        message={`Are you sure you want to delete '${confirmDialog.targetName}'? This action cannot be undone.`}
-        confirmLabel="Delete"
+        title="削除の確認"
+        message={`「${confirmDialog.targetName}」を削除しますか？この操作は取り消せません。`}
+        confirmLabel="削除"
         isDanger={true}
         onConfirm={handleDeleteConfirm}
         onCancel={() => setConfirmDialog({ isOpen: false, targetId: null, targetName: "" })}

@@ -184,7 +184,33 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const [uploadProgress, setUploadProgress] = useState<Record<string, number>>({});
   const [revealNodeId, setRevealNodeId] = useState<string | null>(null);
   const prefetchedMediaIdsRef = useRef<Set<string>>(new Set());
+  const pendingNodeIdsRef = useRef<Set<string>>(new Set());
   const supabase = createClient();
+
+  const getNodeKey = (node: Node) => `${node.type}:${node.parent_id ?? "root"}:${node.name}`;
+
+  // Undo/Redo stack for file operations
+  type UndoAction =
+    | { type: "delete"; nodeId: string; node: Node; content?: string; children?: { node: Node; content?: string }[] }
+    | { type: "create"; nodeId: string; node?: Node; content?: string }
+    | { type: "rename"; nodeId: string; oldName: string; newName: string }
+    | { type: "move"; nodeIds: string[]; oldParentIds: (string | null)[]; newParentId: string | null }
+    | { type: "copy"; nodeIds: string[] };
+  const [undoStack, setUndoStack] = useState<UndoAction[]>([]);
+  const [redoStack, setRedoStack] = useState<UndoAction[]>([]);
+  const MAX_UNDO_STACK = 50;
+
+  const pushUndoAction = useCallback((action: UndoAction) => {
+    setUndoStack(prev => {
+      const newStack = [...prev, action];
+      if (newStack.length > MAX_UNDO_STACK) {
+        return newStack.slice(-MAX_UNDO_STACK);
+      }
+      return newStack;
+    });
+    // Clear redo stack when a new action is performed
+    setRedoStack([]);
+  }, []);
 
   const runWithConcurrency = useCallback(async <T,>(items: T[], limit: number, worker: (item: T) => Promise<void>) => {
     if (items.length === 0) return;
@@ -236,9 +262,28 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
 
     if (error) {
       console.error("Error fetching nodes:", error);
-    } else {
-      setNodes(data || []);
+      setIsLoading(false);
+      return data || [];
     }
+
+    setNodes((prev) => {
+      const serverNodes = data || [];
+      const serverKeys = new Set(serverNodes.map(getNodeKey));
+      const serverIds = new Set(serverNodes.map((node) => node.id));
+      for (const id of Array.from(pendingNodeIdsRef.current)) {
+        if (serverIds.has(id)) {
+          pendingNodeIdsRef.current.delete(id);
+        }
+      }
+      const pendingNodes = prev.filter((node) => {
+        const isTemp = String(node.id).startsWith("temp-");
+        if (isTemp) {
+          return !serverKeys.has(getNodeKey(node));
+        }
+        return pendingNodeIdsRef.current.has(node.id) && !serverIds.has(node.id);
+      });
+      return [...serverNodes, ...pendingNodes];
+    });
     setIsLoading(false);
     return data || [];
   }, [projectId, supabase]);
@@ -246,6 +291,273 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   useEffect(() => {
     fetchNodes();
   }, [fetchNodes]);
+
+  // Undo/Redo handlers (must be after fetchNodes)
+  const handleUndo = useCallback(async () => {
+    if (undoStack.length === 0) return;
+
+    const action = undoStack[undoStack.length - 1];
+    setUndoStack(prev => prev.slice(0, -1));
+
+    try {
+      switch (action.type) {
+        case "delete": {
+          // Restore deleted node and its children
+          const { node, content, children } = action;
+
+          // First restore the parent node
+          const res = await fetch("/api/files", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              action: node.type === "file" ? "create_file" : "create_folder",
+              path: node.name,
+              content: content || "",
+              projectId: node.project_id,
+              parentId: node.parent_id,
+            }),
+          });
+          const json = await res.json();
+          if (!res.ok) throw new Error(json?.error || "Failed to restore");
+
+          // Restore children if any
+          if (children && children.length > 0) {
+            const newParentId = json.nodeId;
+            for (const child of children) {
+              await fetch("/api/files", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  action: child.node.type === "file" ? "create_file" : "create_folder",
+                  path: child.node.name,
+                  content: child.content || "",
+                  projectId: child.node.project_id,
+                  parentId: child.node.parent_id === node.id ? newParentId : child.node.parent_id,
+                }),
+              });
+            }
+          }
+
+          // Push to redo stack (create action to redo = delete again)
+          setRedoStack(prev => [...prev, { type: "create", nodeId: json.nodeId, node, content }]);
+          fetchNodes();
+          break;
+        }
+        case "create": {
+          // Get node info before deleting (for redo)
+          const nodeToDelete = nodes.find(n => n.id === action.nodeId);
+          let contentToSave: string | undefined;
+          if (nodeToDelete?.type === "file") {
+            try {
+              const { data } = await supabase
+                .from("file_contents")
+                .select("text")
+                .eq("node_id", action.nodeId)
+                .single();
+              contentToSave = data?.text;
+            } catch {
+              // ignore
+            }
+          }
+
+          // Delete the created node
+          const res = await fetch("/api/files", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "delete_node", id: action.nodeId }),
+          });
+          if (!res.ok) throw new Error("Failed to undo create");
+
+          // Push to redo stack (delete action to redo = create again)
+          if (nodeToDelete) {
+            setRedoStack(prev => [...prev, { type: "delete", nodeId: action.nodeId, node: nodeToDelete, content: contentToSave }]);
+          }
+
+          setNodes(prev => prev.filter(n => n.id !== action.nodeId));
+          setOpenTabs(prev => prev.filter(id => id !== action.nodeId));
+          if (activeNodeId === action.nodeId) {
+            setActiveNodeId(null);
+          }
+          break;
+        }
+        case "rename": {
+          // Rename back to old name
+          const res = await fetch("/api/files", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "rename_node", id: action.nodeId, newName: action.oldName }),
+          });
+          if (!res.ok) throw new Error("Failed to undo rename");
+
+          // Push to redo stack (swap old and new names)
+          setRedoStack(prev => [...prev, { type: "rename", nodeId: action.nodeId, oldName: action.newName, newName: action.oldName }]);
+
+          setNodes(prev => prev.map(n => n.id === action.nodeId ? { ...n, name: action.oldName } : n));
+          break;
+        }
+        case "move": {
+          // Move back to original parent
+          await Promise.all(action.nodeIds.map(async (nodeId, index) => {
+            const res = await fetch("/api/files", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: "move_node", id: nodeId, newParentId: action.oldParentIds[index] }),
+            });
+            if (!res.ok) throw new Error(`Failed to undo move for ${nodeId}`);
+          }));
+
+          // Push to redo stack (swap old and new parent IDs)
+          const currentParentIds = action.nodeIds.map(() => action.newParentId);
+          setRedoStack(prev => [...prev, { type: "move", nodeIds: action.nodeIds, oldParentIds: currentParentIds, newParentId: action.oldParentIds[0] }]);
+
+          setNodes(prev => prev.map(n => {
+            const index = action.nodeIds.indexOf(n.id);
+            if (index >= 0) {
+              return { ...n, parent_id: action.oldParentIds[index] };
+            }
+            return n;
+          }));
+          break;
+        }
+        case "copy": {
+          // Delete the copied nodes
+          for (const nodeId of action.nodeIds) {
+            await fetch("/api/files", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: "delete_node", id: nodeId }),
+            });
+          }
+          // Push to redo stack (copy action - but we can't easily redo copy, so skip)
+          fetchNodes();
+          break;
+        }
+      }
+    } catch (error: any) {
+      alert(`元に戻せませんでした: ${error.message}`);
+      // Put the action back on the stack if it failed
+      setUndoStack(prev => [...prev, action]);
+    }
+  }, [undoStack, nodes, activeNodeId, fetchNodes, supabase]);
+
+  const handleRedo = useCallback(async () => {
+    if (redoStack.length === 0) return;
+
+    const action = redoStack[redoStack.length - 1];
+    setRedoStack(prev => prev.slice(0, -1));
+
+    try {
+      switch (action.type) {
+        case "delete": {
+          // Redo delete = restore deleted node
+          const { node, content } = action;
+
+          const res = await fetch("/api/files", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              action: node.type === "file" ? "create_file" : "create_folder",
+              path: node.name,
+              content: content || "",
+              projectId: node.project_id,
+              parentId: node.parent_id,
+            }),
+          });
+          const json = await res.json();
+          if (!res.ok) throw new Error(json?.error || "Failed to redo");
+
+          // Push back to undo stack
+          setUndoStack(prev => [...prev, { type: "create", nodeId: json.nodeId, node, content }]);
+          fetchNodes();
+          break;
+        }
+        case "create": {
+          // Redo create = delete the node again
+          const nodeToDelete = nodes.find(n => n.id === action.nodeId);
+          let contentToSave: string | undefined;
+          if (action.node?.type === "file" || nodeToDelete?.type === "file") {
+            try {
+              const { data } = await supabase
+                .from("file_contents")
+                .select("text")
+                .eq("node_id", action.nodeId)
+                .single();
+              contentToSave = data?.text;
+            } catch {
+              contentToSave = action.content;
+            }
+          }
+
+          const res = await fetch("/api/files", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "delete_node", id: action.nodeId }),
+          });
+          if (!res.ok) throw new Error("Failed to redo delete");
+
+          // Push back to undo stack
+          const nodeInfo = nodeToDelete || action.node;
+          if (nodeInfo) {
+            setUndoStack(prev => [...prev, { type: "delete", nodeId: action.nodeId, node: nodeInfo, content: contentToSave }]);
+          }
+
+          setNodes(prev => prev.filter(n => n.id !== action.nodeId));
+          setOpenTabs(prev => prev.filter(id => id !== action.nodeId));
+          if (activeNodeId === action.nodeId) {
+            setActiveNodeId(null);
+          }
+          break;
+        }
+        case "rename": {
+          // Redo rename = rename back to the "new" name (which is now oldName in redo action)
+          const res = await fetch("/api/files", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "rename_node", id: action.nodeId, newName: action.oldName }),
+          });
+          if (!res.ok) throw new Error("Failed to redo rename");
+
+          // Push back to undo stack (swap names again)
+          setUndoStack(prev => [...prev, { type: "rename", nodeId: action.nodeId, oldName: action.newName, newName: action.oldName }]);
+
+          setNodes(prev => prev.map(n => n.id === action.nodeId ? { ...n, name: action.oldName } : n));
+          break;
+        }
+        case "move": {
+          // Redo move = move to the "new" parent (which is now in oldParentIds)
+          await Promise.all(action.nodeIds.map(async (nodeId, index) => {
+            const res = await fetch("/api/files", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: "move_node", id: nodeId, newParentId: action.oldParentIds[index] }),
+            });
+            if (!res.ok) throw new Error(`Failed to redo move for ${nodeId}`);
+          }));
+
+          // Push back to undo stack
+          const currentParentIds = action.nodeIds.map(() => action.newParentId);
+          setUndoStack(prev => [...prev, { type: "move", nodeIds: action.nodeIds, oldParentIds: currentParentIds, newParentId: action.oldParentIds[0] }]);
+
+          setNodes(prev => prev.map(n => {
+            const index = action.nodeIds.indexOf(n.id);
+            if (index >= 0) {
+              return { ...n, parent_id: action.oldParentIds[index] };
+            }
+            return n;
+          }));
+          break;
+        }
+        case "copy": {
+          // Cannot redo copy easily, skip
+          break;
+        }
+      }
+    } catch (error: any) {
+      alert(`やり直せませんでした: ${error.message}`);
+      // Put the action back on the redo stack if it failed
+      setRedoStack(prev => [...prev, action]);
+    }
+  }, [redoStack, nodes, activeNodeId, fetchNodes, supabase]);
 
   // --- Source Control helpers ---
   const scBaselineStorageKey = useMemo(() => `cursor_sc_baseline_${projectId}`, [projectId]);
@@ -437,23 +749,58 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "create_file", path, projectId, parentId }),
       });
-      const json = await res.json();
+      const raw = await res.text();
+      let json: any = {};
+      try {
+        json = raw ? JSON.parse(raw) : {};
+      } catch {
+        throw new Error("Failed to parse server response.");
+      }
       if (!res.ok) throw new Error(json?.error || "Failed to create file");
       if (json?.nodeId) {
-        setNodes(prev => prev.map(n => n.id === tempId ? { ...n, id: json.nodeId } : n));
+        pendingNodeIdsRef.current.add(json.nodeId);
+        setNodes(prev => {
+          const hasReal = prev.some(n => n.id === json.nodeId);
+          if (hasReal) {
+            return prev.filter(n => n.id !== tempId);
+          }
+          return prev.map(n => n.id === tempId ? { ...n, id: json.nodeId } : n);
+        });
         setOpenTabs(prev => prev.map(id => id === tempId ? json.nodeId : id));
         setActiveNodeId(json.nodeId);
         setSelectedNodeIds(new Set([json.nodeId]));
+        // Push undo action for create
+        pushUndoAction({ type: "create", nodeId: json.nodeId });
       }
       // 成功したら正式なデータで更新
       fetchNodes();
     } catch (error: any) {
-      // 失敗したらロールバック
-      setNodes(prev => prev.filter(n => n.id !== tempId));
-      setOpenTabs(prev => prev.filter(id => id !== tempId));
-      setActiveNodeId(prevActiveId ?? null);
-      setSelectedNodeIds(new Set(prevSelectedIds));
-      alert(`Error: ${error.message}`);
+      console.error("Failed to create file:", error);
+      let recovered = false;
+      try {
+        const refreshedNodes = await fetchNodes();
+        const recoveredNode = refreshedNodes.find(
+          (node: Node) => node.type === "file" && node.name === name && node.parent_id === parentId
+        );
+        if (recoveredNode) {
+          recovered = true;
+          setOpenTabs(prev => prev.map(id => id === tempId ? recoveredNode.id : id));
+          if (activeNodeId === tempId) {
+            setActiveNodeId(recoveredNode.id);
+          }
+          setSelectedNodeIds(new Set([recoveredNode.id]));
+        }
+      } catch (refreshError) {
+        console.error("Failed to refresh nodes after create error:", refreshError);
+      }
+      if (!recovered) {
+        // 失敗したらロールバック
+        setNodes(prev => prev.filter(n => n.id !== tempId));
+        setOpenTabs(prev => prev.filter(id => id !== tempId));
+        setActiveNodeId(prevActiveId ?? null);
+        setSelectedNodeIds(new Set(prevSelectedIds));
+        alert(`Error: ${error.message}`);
+      }
     }
   };
 
@@ -488,17 +835,48 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "create_folder", path, projectId, parentId }),
       });
-      const json = await res.json();
+      const raw = await res.text();
+      let json: any = {};
+      try {
+        json = raw ? JSON.parse(raw) : {};
+      } catch {
+        throw new Error("Failed to parse server response.");
+      }
       if (!res.ok) throw new Error(json?.error || "Failed to create folder");
       if (json?.nodeId) {
-        setNodes(prev => prev.map(n => n.id === tempId ? { ...n, id: json.nodeId } : n));
+        pendingNodeIdsRef.current.add(json.nodeId);
+        setNodes(prev => {
+          const hasReal = prev.some(n => n.id === json.nodeId);
+          if (hasReal) {
+            return prev.filter(n => n.id !== tempId);
+          }
+          return prev.map(n => n.id === tempId ? { ...n, id: json.nodeId } : n);
+        });
         setSelectedNodeIds(new Set([json.nodeId]));
+        // Push undo action for create
+        pushUndoAction({ type: "create", nodeId: json.nodeId });
       }
       fetchNodes();
     } catch (error: any) {
-      setNodes(prev => prev.filter(n => n.id !== tempId));
-      setSelectedNodeIds(new Set(prevSelectedIds));
-      alert(`Error: ${error.message}`);
+      console.error("Failed to create folder:", error);
+      let recovered = false;
+      try {
+        const refreshedNodes = await fetchNodes();
+        const recoveredNode = refreshedNodes.find(
+          (node: Node) => node.type === "folder" && node.name === name && node.parent_id === parentId
+        );
+        if (recoveredNode) {
+          recovered = true;
+          setSelectedNodeIds(new Set([recoveredNode.id]));
+        }
+      } catch (refreshError) {
+        console.error("Failed to refresh nodes after create error:", refreshError);
+      }
+      if (!recovered) {
+        setNodes(prev => prev.filter(n => n.id !== tempId));
+        setSelectedNodeIds(new Set(prevSelectedIds));
+        alert(`Error: ${error.message}`);
+      }
     }
   };
 
@@ -507,6 +885,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     const oldNode = nodes.find(n => n.id === id);
     if (!oldNode) return;
 
+    const oldName = oldNode.name;
     setNodes(prev => prev.map(n => n.id === id ? { ...n, name: newName } : n));
 
     try {
@@ -516,7 +895,8 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         body: JSON.stringify({ action: "rename_node", id, newName }),
       });
       if (!res.ok) throw new Error("Failed to rename");
-      // 成功 - 再取得は不要（既にローカル更新済み）
+      // Push undo action for rename
+      pushUndoAction({ type: "rename", nodeId: id, oldName, newName });
     } catch (error: any) {
       // 失敗したらロールバック
       setNodes(prev => prev.map(n => n.id === id ? oldNode : n));
@@ -534,6 +914,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     if (nodesToMove.length === 0) return;
 
     const idsToMove = nodesToMove.map(n => n.id);
+    const oldParentIds = nodesToMove.map(n => n.parent_id);
     setNodes(prev => prev.map(n => idsToMove.includes(n.id) ? { ...n, parent_id: newParentId } : n));
 
     try {
@@ -546,6 +927,8 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         });
         if (!res.ok) throw new Error(`Failed to move node ${id}`);
       }));
+      // Push undo action for move
+      pushUndoAction({ type: "move", nodeIds: idsToMove, oldParentIds, newParentId });
     } catch (error: any) {
       // 失敗したらロールバック
       const oldNodeMap = new Map(oldNodes.map(n => [n.id, n]));
@@ -554,10 +937,44 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     }
   };
 
+  const handleCopyNodes = async (nodeIds: string[], newParentId: string | null) => {
+    try {
+      // Copy each node using the API
+      const newNodeIds: string[] = [];
+      for (const nodeId of nodeIds) {
+        const res = await fetch("/api/files", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "copy_node", id: nodeId, newParentId }),
+        });
+        if (!res.ok) {
+          const error = await res.json();
+          throw new Error(error.error || `Failed to copy node`);
+        }
+        const json = await res.json();
+        if (json.nodeId) {
+          newNodeIds.push(json.nodeId);
+        }
+      }
+      // Push undo action for copy
+      if (newNodeIds.length > 0) {
+        pushUndoAction({ type: "copy", nodeIds: newNodeIds });
+      }
+      // Refresh the node list
+      fetchNodes();
+    } catch (error: any) {
+      alert(`コピーエラー: ${error.message}`);
+    }
+  };
+
   const handleDeleteNode = async (id: string) => {
     // Optimistic: 即座にUIから削除
     const oldNodes = [...nodes];
-    
+
+    // 削除するノード情報を保存（undo用）
+    const nodeToDelete = nodes.find(n => n.id === id);
+    if (!nodeToDelete) return;
+
     // 子ノードも含めて削除
     const idsToDelete = new Set<string>();
     const collectChildren = (parentId: string) => {
@@ -565,9 +982,48 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       nodes.filter(n => n.parent_id === parentId).forEach(child => collectChildren(child.id));
     };
     collectChildren(id);
-    
+
+    // ファイルのコンテンツを取得（undo用）
+    let content: string | undefined;
+    const children: { node: Node; content?: string }[] = [];
+
+    if (nodeToDelete.type === "file") {
+      try {
+        const { data } = await supabase
+          .from("file_contents")
+          .select("text")
+          .eq("node_id", id)
+          .single();
+        content = data?.text;
+      } catch {
+        // コンテンツ取得に失敗しても削除は続行
+      }
+    }
+
+    // 子ノードのコンテンツも取得
+    for (const nodeId of idsToDelete) {
+      if (nodeId === id) continue;
+      const childNode = nodes.find(n => n.id === nodeId);
+      if (childNode) {
+        let childContent: string | undefined;
+        if (childNode.type === "file") {
+          try {
+            const { data } = await supabase
+              .from("file_contents")
+              .select("text")
+              .eq("node_id", nodeId)
+              .single();
+            childContent = data?.text;
+          } catch {
+            // ignore
+          }
+        }
+        children.push({ node: childNode, content: childContent });
+      }
+    }
+
     setNodes(prev => prev.filter(n => !idsToDelete.has(n.id)));
-    
+
     // タブからも削除
     setOpenTabs(prev => prev.filter(tabId => !idsToDelete.has(tabId)));
     if (activeNodeId && idsToDelete.has(activeNodeId)) {
@@ -586,6 +1042,14 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         body: JSON.stringify({ action: "delete_node", id }),
       });
       if (!res.ok) throw new Error("Failed to delete");
+      // Push undo action for delete
+      pushUndoAction({
+        type: "delete",
+        nodeId: id,
+        node: nodeToDelete,
+        content,
+        children: children.length > 0 ? children : undefined,
+      });
     } catch (error: any) {
       // 失敗したらロールバック
       setNodes(oldNodes);
@@ -2396,6 +2860,9 @@ ${diffs}`;
             onDownload={handleDownload}
             onDropFiles={handleDropFilesOnFolder}
             onMoveNodes={handleMoveNodes}
+            onCopyNodes={handleCopyNodes}
+            onUndo={handleUndo}
+            onRedo={handleRedo}
             projectName={activeWorkspace.name}
             userEmail={userEmail}
             onOpenSettings={() => setActiveActivity("settings")}
@@ -2551,7 +3018,7 @@ ${diffs}`;
                   onSave={() => handleSavePlanToWorkspace(activeVirtual.id)}
                 />
               ) : activeNode ? (
-                activeNode.id.startsWith("temp-") ? (
+                activeNode.id.startsWith("temp-") && typeof activeUploadProgress === "number" ? (
                   <div className="absolute inset-0 flex items-center justify-center text-zinc-500">
                     <div className="flex flex-col items-center gap-3">
                       <div className="flex items-center gap-3">
@@ -2573,19 +3040,17 @@ ${diffs}`;
                         </svg>
                         <span>Uploading...</span>
                       </div>
-                      {typeof activeUploadProgress === "number" && (
-                        <div className="w-64">
-                          <div className="h-1.5 w-full rounded-full bg-zinc-200 overflow-hidden">
-                            <div
-                              className="h-1.5 bg-blue-500"
-                              style={{ width: `${activeUploadProgress}%` }}
-                            />
-                          </div>
-                          <div className="mt-2 text-xs text-zinc-500 text-center">
-                            {activeUploadProgress}%
-                          </div>
+                      <div className="w-64">
+                        <div className="h-1.5 w-full rounded-full bg-zinc-200 overflow-hidden">
+                          <div
+                            className="h-1.5 bg-blue-500"
+                            style={{ width: `${activeUploadProgress}%` }}
+                          />
                         </div>
-                      )}
+                        <div className="mt-2 text-xs text-zinc-500 text-center">
+                          {activeUploadProgress}%
+                        </div>
+                      </div>
                     </div>
                   </div>
                 ) : isMediaFile(activeNode.name) ? (

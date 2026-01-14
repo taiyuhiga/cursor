@@ -377,6 +377,82 @@ export const ActionIcons = {
       <path d="M10 4.5L6 7" />
     </svg>
   ),
+  Cut: ({ className }: IconProps) => (
+    <svg
+      viewBox="0 0 16 16"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <circle cx="4" cy="4" r="2" />
+      <circle cx="4" cy="12" r="2" />
+      <path d="M5.5 5.5L12 12" />
+      <path d="M12 4L5.5 10.5" />
+    </svg>
+  ),
+  Copy: ({ className }: IconProps) => (
+    <svg
+      viewBox="0 0 16 16"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="5" y="5" width="9" height="10" rx="1.5" />
+      <path d="M11 5V3.5A1.5 1.5 0 009.5 2h-7A1.5 1.5 0 001 3.5v7A1.5 1.5 0 002.5 12H5" />
+    </svg>
+  ),
+  Paste: ({ className }: IconProps) => (
+    <svg
+      viewBox="0 0 16 16"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="3" y="4" width="10" height="11" rx="1.5" />
+      <path d="M6 4V2.5A1.5 1.5 0 017.5 1h1A1.5 1.5 0 0110 2.5V4" />
+      <rect x="6" y="1" width="4" height="3" rx="0.5" />
+    </svg>
+  ),
+  Rename: ({ className }: IconProps) => (
+    <svg
+      viewBox="0 0 16 16"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M11.5 2.5l2 2-8 8H3.5v-2l8-8z" />
+      <path d="M10 4l2 2" />
+    </svg>
+  ),
+  Trash: ({ className }: IconProps) => (
+    <svg
+      viewBox="0 0 16 16"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M2 4h12" />
+      <path d="M5 4V2.5a1 1 0 011-1h4a1 1 0 011 1V4" />
+      <path d="M12.5 4v9a1.5 1.5 0 01-1.5 1.5H5A1.5 1.5 0 013.5 13V4" />
+      <path d="M6.5 7v5" />
+      <path d="M9.5 7v5" />
+    </svg>
+  ),
 };
 
 // Get file icon based on extension

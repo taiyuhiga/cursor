@@ -75,7 +75,7 @@ export async function POST(req: NextRequest) {
     }, { status: 400 });
   }
 
-  const { action, path, content, id, newName, projectId } = body;
+  const { action, path, content, id, newName, projectId, parentId: explicitParentId } = body;
 
   // projectIdが必須の操作の場合はチェック
   if ((action === "create_file" || action === "create_folder") && !projectId) {
@@ -87,8 +87,10 @@ export async function POST(req: NextRequest) {
     
     switch (action) {
       case "create_file": {
-        // 親フォルダを確保（なければ作成）
-        const parentId = await ensureParentFolders(supabase, projectId, path);
+        // 明示的なparentIdが渡された場合はそれを使用、なければパスから推測
+        const parentId = explicitParentId !== undefined
+          ? explicitParentId
+          : await ensureParentFolders(supabase, projectId, path);
         const fileName = path.split("/").pop()!;
 
         // ノード作成
@@ -120,10 +122,27 @@ export async function POST(req: NextRequest) {
       }
       
       case "create_folder": {
-        // フォルダ作成（パス全体をフォルダとして作成）
-        // ensureParentFolders + 最後の要素を作る
-        const parentId = await ensureParentFolders(supabase, projectId, path + "/dummy");
-        result = { success: true, nodeId: parentId };
+        const folderName = path.split("/").pop()!;
+
+        // 明示的なparentIdが渡された場合はそれを使用、なければパスから推測
+        const parentId = explicitParentId !== undefined
+          ? explicitParentId
+          : await ensureParentFolders(supabase, projectId, path);
+
+        // フォルダを作成
+        const { data: folder, error: folderError } = await supabase
+          .from("nodes")
+          .insert({
+            project_id: projectId,
+            type: "folder",
+            name: folderName,
+            parent_id: parentId,
+          })
+          .select()
+          .single();
+
+        if (folderError) throw new Error(`Failed to create folder: ${folderError.message}`);
+        result = { success: true, nodeId: folder.id };
         break;
       }
       
@@ -152,6 +171,107 @@ export async function POST(req: NextRequest) {
           .eq("id", id);
         if (error) throw new Error(error.message);
         result = { success: true };
+        break;
+      }
+
+      case "copy_node": {
+        const { newParentId } = body;
+
+        // Get source node
+        const { data: sourceNode, error: sourceError } = await supabase
+          .from("nodes")
+          .select("*")
+          .eq("id", id)
+          .single();
+
+        if (sourceError || !sourceNode) {
+          throw new Error("Source node not found");
+        }
+
+        // Helper function to recursively copy nodes
+        const copyNodeRecursive = async (
+          node: any,
+          targetParentId: string | null
+        ): Promise<string> => {
+          // Generate a unique name if copying to the same folder
+          let newName = node.name;
+          if (node.parent_id === targetParentId) {
+            // Check if name already ends with " - コピー" pattern
+            const copyPattern = / - コピー( \(\d+\))?$/;
+            if (copyPattern.test(newName)) {
+              // Extract base name and increment counter
+              const baseName = newName.replace(copyPattern, "");
+              let counter = 2;
+
+              // Find existing copies and get the next number
+              const { data: existingNodes } = await supabase
+                .from("nodes")
+                .select("name")
+                .eq("parent_id", targetParentId)
+                .like("name", `${baseName} - コピー%`);
+
+              if (existingNodes && existingNodes.length > 0) {
+                const numbers = existingNodes.map((n: any) => {
+                  const match = n.name.match(/ - コピー \((\d+)\)$/);
+                  return match ? parseInt(match[1], 10) : 1;
+                });
+                counter = Math.max(...numbers) + 1;
+              }
+              newName = `${baseName} - コピー (${counter})`;
+            } else {
+              newName = `${newName} - コピー`;
+            }
+          }
+
+          // Create new node
+          const { data: newNode, error: createError } = await supabase
+            .from("nodes")
+            .insert({
+              project_id: node.project_id,
+              type: node.type,
+              name: newName,
+              parent_id: targetParentId,
+            })
+            .select()
+            .single();
+
+          if (createError) throw new Error(`Failed to copy: ${createError.message}`);
+
+          // If it's a file, copy the content
+          if (node.type === "file") {
+            const { data: content } = await supabase
+              .from("file_contents")
+              .select("text")
+              .eq("node_id", node.id)
+              .single();
+
+            if (content) {
+              await supabase.from("file_contents").insert({
+                node_id: newNode.id,
+                text: content.text,
+              });
+            }
+          }
+
+          // If it's a folder, recursively copy children
+          if (node.type === "folder") {
+            const { data: children } = await supabase
+              .from("nodes")
+              .select("*")
+              .eq("parent_id", node.id);
+
+            if (children) {
+              for (const child of children) {
+                await copyNodeRecursive(child, newNode.id);
+              }
+            }
+          }
+
+          return newNode.id;
+        };
+
+        const newNodeId = await copyNodeRecursive(sourceNode, newParentId);
+        result = { success: true, nodeId: newNodeId };
         break;
       }
 
