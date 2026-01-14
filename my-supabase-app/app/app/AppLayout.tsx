@@ -4,6 +4,7 @@ import { createClient } from "@/lib/supabase/client";
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { diffLines } from "diff";
+import JSZip from "jszip";
 import { AiPanel, AiPanelHandle } from "@/components/AiPanel";
 import { TabBar } from "@/components/TabBar";
 import { MainEditor } from "@/components/MainEditor";
@@ -1217,17 +1218,22 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
 
   // Download handler
   const handleDownload = useCallback(async (nodeIds: string[]) => {
-    // Collect all file nodes to download
-    const collectFiles = (ids: string[]): Node[] => {
-      const result: Node[] = [];
+    // Collect all nodes (files and folders) to download
+    const collectNodes = (ids: string[]): { files: Node[], folders: Node[] } => {
+      const files: Node[] = [];
+      const folders: Node[] = [];
+
       const collectRecursive = (id: string) => {
         const node = nodeById.get(id);
         if (!node) return;
+
         if (node.type === "file") {
-          result.push(node);
+          files.push(node);
         } else {
-          // Folder - collect all children
-          nodes.filter(n => n.parent_id === id).forEach(child => collectRecursive(child.id));
+          // Folder - add it and collect children
+          folders.push(node);
+          const children = nodes.filter(n => n.parent_id === id);
+          children.forEach(child => collectRecursive(child.id));
         }
       };
 
@@ -1237,18 +1243,11 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       } else {
         ids.forEach(collectRecursive);
       }
-      return result;
+      return { files, folders };
     };
 
-    const fileNodes = collectFiles(nodeIds);
-
-    if (fileNodes.length === 0) {
-      alert("No files to download");
-      return;
-    }
-
-    // Helper to download a single file
-    const downloadSingleFile = async (node: Node) => {
+    // Helper to get file content as Blob
+    const getFileBlob = async (node: Node): Promise<Blob> => {
       const { data } = await supabase
         .from("file_contents")
         .select("text")
@@ -1259,98 +1258,151 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
 
       // Check if it's a storage file
       if (content.startsWith("storage:")) {
-        // Download from Supabase Storage via API
         const response = await fetch(`/api/storage/download?nodeId=${node.id}`);
         if (!response.ok) {
           const error = await response.json();
           throw new Error(error.error || "Failed to download");
         }
-        const blob = await response.blob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = node.name;
-        a.click();
-        URL.revokeObjectURL(url);
-        return;
+        return await response.blob();
       }
 
       // Check if it's a data URL (legacy binary file)
       if (content.startsWith("data:")) {
         const response = await fetch(content);
-        const blob = await response.blob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = node.name;
-        a.click();
-        URL.revokeObjectURL(url);
-        return;
+        return await response.blob();
       }
 
       // Text file
-      const blob = new Blob([content], { type: "text/plain" });
+      return new Blob([content], { type: "text/plain" });
+    };
+
+    // Helper to download a blob directly
+    const downloadBlob = (blob: Blob, filename: string) => {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = node.name;
+      a.download = filename;
       a.click();
       URL.revokeObjectURL(url);
     };
 
-    // Single file download
-    if (fileNodes.length === 1) {
+    const { files: fileNodes, folders: folderNodes } = collectNodes(nodeIds);
+
+    if (fileNodes.length === 0 && folderNodes.length === 0) {
+      alert("ダウンロードするファイルがありません");
+      return;
+    }
+
+    // Single file download (no ZIP needed)
+    if (fileNodes.length === 1 && folderNodes.length === 0) {
       try {
-        await downloadSingleFile(fileNodes[0]);
+        const blob = await getFileBlob(fileNodes[0]);
+        downloadBlob(blob, fileNodes[0].name);
       } catch (error: any) {
-        alert(`Download error: ${error.message}`);
+        alert(`ダウンロードエラー: ${error.message}`);
       }
       return;
     }
 
-    // Multiple files - combine text files, download storage files separately
-    const textContents: string[] = [];
-    const storageFiles: Node[] = [];
+    // Multiple files or folders - create ZIP with directory structure
+    const zip = new JSZip();
 
-    for (const node of fileNodes) {
-      const path = pathByNodeId.get(node.id) || node.name;
-      const { data } = await supabase
-        .from("file_contents")
-        .select("text")
-        .eq("node_id", node.id)
-        .maybeSingle();
+    // Determine the base path for relative paths in ZIP
+    // If downloading specific nodes, find their common ancestor
+    let basePath = "";
+    if (nodeIds.length > 0) {
+      // Get paths of selected nodes (not their contents)
+      const selectedPaths = nodeIds.map(id => {
+        const node = nodeById.get(id);
+        if (!node) return "";
+        // Get path up to but not including this node
+        const fullPath = pathByNodeId.get(id) || node.name;
+        return fullPath;
+      }).filter(Boolean);
 
-      const content = data?.text || "";
-
-      if (content.startsWith("storage:")) {
-        storageFiles.push(node);
-        textContents.push(`// === ${path} === (storage file, downloading separately)\n`);
-      } else if (content.startsWith("data:")) {
-        textContents.push(`// === ${path} === (binary file, skipped)\n`);
-      } else {
-        textContents.push(`// === ${path} ===\n${content}\n`);
+      // Find common prefix directory
+      if (selectedPaths.length === 1) {
+        // Single folder selected - use its path as the root
+        const selectedNode = nodeById.get(nodeIds[0]);
+        if (selectedNode?.type === "folder") {
+          basePath = selectedPaths[0] + "/";
+        }
       }
     }
 
-    // Download text files combined
-    if (textContents.length > 0) {
-      const combined = textContents.join("\n");
-      const blob = new Blob([combined], { type: "text/plain" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${activeWorkspace.name}-export.txt`;
-      a.click();
-      URL.revokeObjectURL(url);
+    // Sort folders and files alphabetically (folders first, then files - like FileTree)
+    const rootFolderIds = new Set(nodeIds.filter(id => nodeById.get(id)?.type === "folder"));
+
+    // Filter and sort folders (excluding root selected folders)
+    const sortedFolders = folderNodes
+      .filter(folder => !rootFolderIds.has(folder.id))
+      .sort((a, b) => {
+        const pathA = pathByNodeId.get(a.id) || a.name;
+        const pathB = pathByNodeId.get(b.id) || b.name;
+        return pathA.localeCompare(pathB);
+      });
+
+    // Sort files alphabetically
+    const sortedFiles = [...fileNodes].sort((a, b) => {
+      const pathA = pathByNodeId.get(a.id) || a.name;
+      const pathB = pathByNodeId.get(b.id) || b.name;
+      return pathA.localeCompare(pathB);
+    });
+
+    // Add folders to ZIP first (including empty ones)
+    for (const folder of sortedFolders) {
+      const fullPath = pathByNodeId.get(folder.id) || folder.name;
+      let zipPath = fullPath;
+      if (basePath && fullPath.startsWith(basePath)) {
+        zipPath = fullPath.slice(basePath.length);
+      }
+      // Add folder entry (trailing slash indicates directory)
+      if (zipPath) {
+        zip.folder(zipPath);
+      }
     }
 
-    // Download storage files separately
-    for (const node of storageFiles) {
+    // Add files to ZIP
+    let successCount = 0;
+    let errorCount = 0;
+
+    for (const node of sortedFiles) {
       try {
-        await downloadSingleFile(node);
+        const fullPath = pathByNodeId.get(node.id) || node.name;
+        // Calculate relative path within ZIP
+        let zipPath = fullPath;
+        if (basePath && fullPath.startsWith(basePath)) {
+          zipPath = fullPath.slice(basePath.length);
+        }
+
+        const blob = await getFileBlob(node);
+        zip.file(zipPath, blob);
+        successCount++;
       } catch (error: any) {
-        console.error(`Failed to download ${node.name}: ${error.message}`);
+        console.error(`Failed to add ${node.name} to ZIP: ${error.message}`);
+        errorCount++;
       }
+    }
+
+    // Even if no files, we might have empty folders
+    if (successCount === 0 && folderNodes.length === 0) {
+      alert("ダウンロードできるファイルがありませんでした");
+      return;
+    }
+
+    // Generate and download ZIP
+    try {
+      const zipBlob = await zip.generateAsync({ type: "blob" });
+      const zipName = nodeIds.length === 1 && nodeById.get(nodeIds[0])?.type === "folder"
+        ? `${nodeById.get(nodeIds[0])?.name}.zip`
+        : `${activeWorkspace.name}.zip`;
+      downloadBlob(zipBlob, zipName);
+
+      if (errorCount > 0) {
+        console.warn(`${errorCount}個のファイルをZIPに追加できませんでした`);
+      }
+    } catch (error: any) {
+      alert(`ZIPファイルの作成に失敗しました: ${error.message}`);
     }
   }, [nodes, nodeById, supabase, pathByNodeId, activeWorkspace.name]);
 

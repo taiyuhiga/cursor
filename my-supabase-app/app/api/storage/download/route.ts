@@ -51,11 +51,12 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: `Failed to download: ${downloadError.message}` }, { status: 500 });
     }
 
-    // Return the file
+    // Return the file with properly encoded filename for non-ASCII characters
+    const encodedFilename = encodeURIComponent(node.name);
     return new NextResponse(fileData, {
       headers: {
         "Content-Type": fileData.type || "application/octet-stream",
-        "Content-Disposition": `attachment; filename="${node.name}"`,
+        "Content-Disposition": `attachment; filename="${encodedFilename}"; filename*=UTF-8''${encodedFilename}`,
       },
     });
   } catch (error: any) {

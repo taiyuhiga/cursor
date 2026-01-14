@@ -203,9 +203,12 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
   const isInputFromUserRef = useRef(false); // Track if change came from user input
   const lastSegmentsRef = useRef<InputSegment[]>([]); // Track last rendered segments
 
+  const ZERO_WIDTH_SPACE = "\u200B";
+  const ZERO_WIDTH_SPACE_REGEX = /\u200B/g;
+
   // Helper: Get plain text from segments (removes zero-width spaces used for cursor positioning)
   const getTextFromSegments = (segments: InputSegment[]): string => {
-    return segments.map(s => s.type === 'text' ? s.content.replace(/\u200B/g, '') : `@${s.name}`).join('');
+    return segments.map(s => s.type === 'text' ? s.content.replace(ZERO_WIDTH_SPACE_REGEX, "") : `@${s.name}`).join('');
   };
 
   // Helper: Get file references from segments
@@ -1344,7 +1347,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
     const newSegments: InputSegment[] = [];
     el.childNodes.forEach(node => {
       if (node.nodeType === Node.TEXT_NODE) {
-        const text = node.textContent || '';
+        const text = (node.textContent || "").replace(ZERO_WIDTH_SPACE_REGEX, "");
         if (text) {
           newSegments.push({ type: 'text', content: text });
         }
@@ -1417,13 +1420,48 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
       return;
     }
 
+    // Backspace to delete file pill when cursor is right next to it
+    if (e.key === "Backspace") {
+      const selection = window.getSelection();
+      if (selection && selection.rangeCount > 0 && selection.isCollapsed) {
+        const range = selection.getRangeAt(0);
+        const container = range.startContainer;
+        const offset = range.startOffset;
+
+        // Check if cursor is right after a file pill
+        if (container.nodeType === Node.ELEMENT_NODE) {
+          const element = container as HTMLElement;
+          const childBefore = element.childNodes[offset - 1] as HTMLElement;
+          if (childBefore?.classList?.contains('file-pill')) {
+            e.preventDefault();
+            const fileId = childBefore.dataset.fileId;
+            if (fileId) {
+              removeFileSegment(fileId);
+            }
+            return;
+          }
+        } else if (container.nodeType === Node.TEXT_NODE && offset === 0) {
+          // Cursor at start of text node, check previous sibling
+          const prevSibling = container.previousSibling as HTMLElement;
+          if (prevSibling?.classList?.contains('file-pill')) {
+            e.preventDefault();
+            const fileId = prevSibling.dataset.fileId;
+            if (fileId) {
+              removeFileSegment(fileId);
+            }
+            return;
+          }
+        }
+      }
+    }
+
     // Handle other keyboard shortcuts
     handleKeyDown(e);
   };
 
   // Render segments to contenteditable HTML
   const renderSegmentsToHTML = (segments: InputSegment[]): string => {
-    return segments.map(seg => {
+    return segments.map((seg, index) => {
       if (seg.type === 'text') {
         return seg.content.replace(/</g, '&lt;').replace(/>/g, '&gt;');
       } else {
@@ -1433,7 +1471,13 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
           <svg class="file-pill-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
           <span class="file-pill-delete" data-delete-file="${seg.id}" style="display: none; position: absolute; top: 0; left: 0; width: 14px; height: 14px; cursor: pointer; font-size: 14px; font-weight: 500; color: #64748b; line-height: 14px; text-align: center;">&times;</span>
         </span>`;
-        return `<span contenteditable="false" data-file-id="${seg.id}" data-file-name="${seg.name}" data-file-type="${seg.fileType}" class="file-pill" style="display: inline-flex; align-items: center; gap: 4px; padding: 2px 10px; margin: 2px 6px 2px 0; background: #dbeafe; border: 1px solid #93c5fd; border-radius: 9999px; font-size: 12px; color: #1e40af; cursor: default; vertical-align: middle; user-select: all; max-width: 180px;">${iconContainer}<span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${seg.name}</span></span>\u200B`;
+        const filePill = `<span contenteditable="false" data-file-id="${seg.id}" data-file-name="${seg.name}" data-file-type="${seg.fileType}" class="file-pill" style="display: inline-flex; align-items: center; gap: 4px; padding: 2px 10px; margin: 2px 6px 2px 0; background: #dbeafe; border: 1px solid #93c5fd; border-radius: 9999px; font-size: 12px; color: #1e40af; cursor: default; vertical-align: middle; user-select: all; max-width: 180px;">${iconContainer}<span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${seg.name}</span></span>`;
+        const isFirst = index === 0;
+        const isLast = index === segments.length - 1;
+        const nextIsFile = !isLast && segments[index + 1].type === "file";
+        const leadingAnchor = isFirst ? ZERO_WIDTH_SPACE : "";
+        const trailingAnchor = (nextIsFile || isLast) ? ZERO_WIDTH_SPACE : "";
+        return `${leadingAnchor}${filePill}${trailingAnchor}`;
       }
     }).join('');
   };
@@ -1483,6 +1527,53 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
     }
   };
 
+  const isZeroWidthTextNode = (node: Node | null): node is Text => {
+    if (!node || node.nodeType !== Node.TEXT_NODE) return false;
+    const text = node.textContent || "";
+    return text.replace(ZERO_WIDTH_SPACE_REGEX, "") === "";
+  };
+
+  // Keep caret inside a text node so it stays normal-sized near file pills.
+  const normalizeCollapsedSelectionNearPills = () => {
+    const el = contentEditableRef.current;
+    if (!el) return;
+
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0 || !selection.isCollapsed) return;
+
+    const range = selection.getRangeAt(0);
+    const container = range.startContainer;
+    if (!el.contains(container)) return;
+
+    if (container.nodeType === Node.TEXT_NODE) {
+      return;
+    }
+
+    if (container !== el) return;
+
+    const offset = range.startOffset;
+    const afterNode = el.childNodes[offset] ?? null;
+    const beforeNode = el.childNodes[offset - 1] ?? null;
+
+    if (isZeroWidthTextNode(afterNode)) {
+      const newRange = document.createRange();
+      newRange.setStart(afterNode, 0);
+      newRange.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(newRange);
+      return;
+    }
+
+    if (isZeroWidthTextNode(beforeNode)) {
+      const textLength = beforeNode.textContent?.length ?? 0;
+      const newRange = document.createRange();
+      newRange.setStart(beforeNode, textLength);
+      newRange.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(newRange);
+    }
+  };
+
   // Handle selection change to show/hide delete button on selected pills
   useEffect(() => {
     const handleSelectionChange = () => {
@@ -1519,6 +1610,8 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
           pill.classList.remove('cursor-on-pill');
         }
       });
+
+      normalizeCollapsedSelectionNearPills();
     };
 
     document.addEventListener('selectionchange', handleSelectionChange);

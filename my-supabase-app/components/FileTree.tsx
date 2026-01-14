@@ -29,6 +29,8 @@ type FileTreeProps = {
   onUploadFiles?: (parentId: string | null) => void;
   onUploadFolder?: (parentId: string | null) => void;
   onDownload?: (nodeIds: string[]) => void;
+  onNewNote?: () => void;
+  onShare?: () => void;
   onDropFiles?: (dataTransfer: DataTransfer, targetFolderId: string | null) => void;
   onMoveNodes?: (nodeIds: string[], newParentId: string | null) => void;
   projectName?: string;
@@ -68,6 +70,8 @@ export function FileTree({
   onUploadFiles,
   onUploadFolder,
   onDownload,
+  onNewNote,
+  onShare,
   onDropFiles,
   onMoveNodes,
   projectName,
@@ -630,6 +634,12 @@ export function FileTree({
     const parentId = getSelectedParentId();
 
     switch (action) {
+      case "new_note":
+        onNewNote?.();
+        break;
+      case "share":
+        onShare?.();
+        break;
       case "upload_files":
         onUploadFiles?.(parentId);
         break;
@@ -970,17 +980,32 @@ export function FileTree({
         >
           <button
             className="w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-100 flex items-center gap-2"
+            onClick={() => handleDropdownAction("new_note")}
+          >
+            <ActionIcons.Note className="w-4 h-4" />
+            新規ノート
+          </button>
+          <button
+            className="w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-100 flex items-center gap-2"
+            onClick={() => handleDropdownAction("share")}
+          >
+            <ActionIcons.Share className="w-4 h-4" />
+            共有
+          </button>
+          <div className="border-t border-zinc-200 my-1" />
+          <button
+            className="w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-100 flex items-center gap-2"
             onClick={() => handleDropdownAction("upload_files")}
           >
             <ActionIcons.Upload className="w-4 h-4" />
-            Upload Files
+            ファイルをアップロード
           </button>
           <button
             className="w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-100 flex items-center gap-2"
             onClick={() => handleDropdownAction("upload_folder")}
           >
             <ActionIcons.FolderUpload className="w-4 h-4" />
-            Upload Folder
+            フォルダをアップロード
           </button>
           <div className="border-t border-zinc-200 my-1" />
           <button
@@ -988,7 +1013,7 @@ export function FileTree({
             onClick={() => handleDropdownAction("download")}
           >
             <ActionIcons.Download className="w-4 h-4" />
-            {selectedNodeIds.size > 0 ? "Download Selected" : "Download All"}
+            {selectedNodeIds.size > 0 ? "選択項目をダウンロード" : "すべてダウンロード"}
           </button>
         </div>
       )}

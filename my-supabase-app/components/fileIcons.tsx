@@ -344,6 +344,39 @@ export const ActionIcons = {
       <circle cx="8" cy="13" r="1.5" />
     </svg>
   ),
+  Note: ({ className }: IconProps) => (
+    <svg
+      viewBox="0 0 16 16"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M9.5 1.5H4.5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h7a2 2 0 0 0 2-2V6.5L9.5 1.5z" />
+      <path d="M9.5 1.5v5h5" />
+      <path d="M5 8h6" />
+      <path d="M5 10.5h6" />
+    </svg>
+  ),
+  Share: ({ className }: IconProps) => (
+    <svg
+      viewBox="0 0 16 16"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <circle cx="12" cy="3.5" r="2" />
+      <circle cx="4" cy="8" r="2" />
+      <circle cx="12" cy="12.5" r="2" />
+      <path d="M6 9l4 2.5" />
+      <path d="M10 4.5L6 7" />
+    </svg>
+  ),
 };
 
 // Get file icon based on extension
