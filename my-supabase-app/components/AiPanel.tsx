@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect, useMemo, forwardRef, useImperativeHandle, useCallback } from "react";
 import { Icons } from "./Icons";
+import { getFileIcon, FileIcons } from "./fileIcons";
 import { ChatMarkdown } from "./ChatMarkdown";
 import { ReviewChangesCard } from "./ReviewChangesCard";
 import { createClient } from "@/lib/supabase/client";
@@ -192,7 +193,27 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
   
   // Image upload state
   const [attachedImages, setAttachedImages] = useState<{ file: File; preview: string }[]>([]);
-  
+
+  // Input segments - mixed text and file references (inline)
+  type InputSegment =
+    | { type: 'text'; content: string }
+    | { type: 'file'; id: string; name: string; fileType: 'file' | 'folder' };
+  const [inputSegments, setInputSegments] = useState<InputSegment[]>([]);
+  const contentEditableRef = useRef<HTMLDivElement>(null);
+  const isInputFromUserRef = useRef(false); // Track if change came from user input
+  const lastSegmentsRef = useRef<InputSegment[]>([]); // Track last rendered segments
+
+  // Helper: Get plain text from segments (removes zero-width spaces used for cursor positioning)
+  const getTextFromSegments = (segments: InputSegment[]): string => {
+    return segments.map(s => s.type === 'text' ? s.content.replace(/\u200B/g, '') : `@${s.name}`).join('');
+  };
+
+  // Helper: Get file references from segments
+  const getFilesFromSegments = (segments: InputSegment[]): { id: string; name: string; type: 'file' | 'folder' }[] => {
+    return segments.filter((s): s is Extract<InputSegment, { type: 'file' }> => s.type === 'file')
+      .map(s => ({ id: s.id, name: s.name, type: s.fileType }));
+  };
+
   // Checkpoints (Cursor-like)
   const [messageHead, setMessageHead] = useState<number | null>(null);
   const [checkpoints, setCheckpoints] = useState<StoredCheckpoint[]>([]);
@@ -580,7 +601,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
         setEditingMessageIndex(null);
         setEditingImageUrls([]);
         setAttachedImages([]);
-        setPrompt(draftBeforeEdit || "");
+        setInputSegments(draftBeforeEdit ? [{ type: 'text', content: draftBeforeEdit }] : []);
         setDraftBeforeEdit("");
         setShowSubmitPrevDialog(false);
         setSubmitPrevDontAskAgain(false);
@@ -640,17 +661,14 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
     const msg = messages[messageIndex];
     if (!msg || msg.role !== "user") return;
     if (loading) return;
-    setDraftBeforeEdit(prompt);
+    setDraftBeforeEdit(getTextFromSegments(inputSegments));
     setEditingMessageIndex(messageIndex);
     setEditingImageUrls(msg.images || []);
     setAttachedImages([]);
-    setPrompt(msg.content || "");
+    // Set message content as a text segment
+    setInputSegments(msg.content ? [{ type: 'text', content: msg.content }] : []);
     setTimeout(() => {
-      textareaRef.current?.focus();
-      if (textareaRef.current) {
-        textareaRef.current.style.height = "auto";
-        textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 200) + "px";
-      }
+      contentEditableRef.current?.focus();
     }, 0);
   };
 
@@ -658,7 +676,8 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
     setEditingMessageIndex(null);
     setEditingImageUrls([]);
     setAttachedImages([]);
-    setPrompt(draftBeforeEdit || "");
+    // Restore draft as a text segment
+    setInputSegments(draftBeforeEdit ? [{ type: 'text', content: draftBeforeEdit }] : []);
     setDraftBeforeEdit("");
     setShowSubmitPrevDialog(false);
     setSubmitPrevDontAskAgain(false);
@@ -673,7 +692,8 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
       setMode(opts.mode);
     }
 
-    const promptToSend = customPrompt || prompt;
+    // Get text from inputSegments if no customPrompt
+    const promptToSend = customPrompt || getTextFromSegments(inputSegments);
     const imagesToSend = [...attachedImages];
     // テキストまたは画像がある場合に送信可能
     if ((!promptToSend.trim() && imagesToSend.length === 0) || loading) return;
@@ -724,6 +744,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
     
     // 画像をクリア
     setAttachedImages([]);
+    setInputSegments([]);
     setLoading(true);
 
     try {
@@ -954,7 +975,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
     const target = messages[editingMessageIndex];
     if (!target || target.role !== "user") return;
 
-    const promptToSend = prompt;
+    const promptToSend = getTextFromSegments(inputSegments);
     const hasAnyImages = attachedImages.length > 0 || editingImageUrls.length > 0;
     if ((!promptToSend.trim() && !hasAnyImages) || loading) return;
 
@@ -1047,6 +1068,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
       setEditingMessageIndex(null);
       setEditingImageUrls([]);
       setAttachedImages([]);
+    setInputSegments([]);
       setDraftBeforeEdit("");
       setShowSubmitPrevDialog(false);
       setSubmitPrevDontAskAgain(false);
@@ -1215,7 +1237,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
 
   const submitCurrent = () => {
     if (editingMessageIndex !== null) {
-      const hasEditContent = prompt.trim().length > 0 || attachedImages.length > 0 || editingImageUrls.length > 0;
+      const hasEditContent = inputSegments.length > 0 || attachedImages.length > 0 || editingImageUrls.length > 0;
       if (!hasEditContent || loading) return;
       const skipDialog = localStorage.getItem("submit_prev_dont_ask") === "true";
       if (skipDialog) {
@@ -1257,19 +1279,12 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
     setAtSymbolPosition(null);
   };
 
-  const insertFileReference = (fileName: string) => {
-    if (atSymbolPosition === null) return;
-    const beforeAt = prompt.substring(0, atSymbolPosition);
-    const afterCursor = prompt.substring(atSymbolPosition + 1 + filesSearchQuery.length);
-    setPrompt(`${beforeAt}@${fileName} ${afterCursor}`);
+  const insertFileReference = (file: { id: string; name: string; type: 'file' | 'folder' }) => {
+    // Insert file as a segment
+    insertFileSegment(file);
     setShowFilesPopup(false);
-    setTimeout(() => {
-      if (textareaRef.current) {
-        textareaRef.current.focus();
-        const newPos = beforeAt.length + fileName.length + 2;
-        textareaRef.current.setSelectionRange(newPos, newPos);
-      }
-    }, 0);
+    setFilesSearchQuery("");
+    setAtSymbolPosition(null);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -1303,7 +1318,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
       }
       if (e.key === "Enter" || e.key === "Tab") {
         e.preventDefault();
-        insertFileReference(filteredFiles[selectedFileIndex].name);
+        insertFileReference(filteredFiles[selectedFileIndex]);
         return;
       }
       if (e.key === "Escape") {
@@ -1320,6 +1335,195 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
         return;
     }
   };
+
+  // Contenteditable input handler - sync DOM to state
+  const handleContentEditableInput = () => {
+    const el = contentEditableRef.current;
+    if (!el) return;
+
+    const newSegments: InputSegment[] = [];
+    el.childNodes.forEach(node => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        const text = node.textContent || '';
+        if (text) {
+          newSegments.push({ type: 'text', content: text });
+        }
+      } else if (node.nodeType === Node.ELEMENT_NODE) {
+        const element = node as HTMLElement;
+        if (element.dataset.fileId) {
+          newSegments.push({
+            type: 'file',
+            id: element.dataset.fileId,
+            name: element.dataset.fileName || '',
+            fileType: (element.dataset.fileType as 'file' | 'folder') || 'file'
+          });
+        }
+      }
+    });
+
+    // Consolidate consecutive text segments
+    const consolidated: InputSegment[] = [];
+    for (const seg of newSegments) {
+      if (seg.type === 'text' && consolidated.length > 0) {
+        const last = consolidated[consolidated.length - 1];
+        if (last.type === 'text') {
+          last.content += seg.content;
+          continue;
+        }
+      }
+      consolidated.push(seg);
+    }
+
+    // Mark this as user input so we don't re-render
+    isInputFromUserRef.current = true;
+    lastSegmentsRef.current = consolidated;
+    setInputSegments(consolidated);
+  };
+
+  // Sync contenteditable DOM when segments change from external sources
+  useEffect(() => {
+    if (isInputFromUserRef.current) {
+      // Change came from user input, don't update DOM (would reset cursor)
+      isInputFromUserRef.current = false;
+      return;
+    }
+
+    // Only update if the contenteditable exists and segments have file elements
+    const el = contentEditableRef.current;
+    if (!el) return;
+
+    // Check if we actually need to update (different from last rendered)
+    const currentHTML = el.innerHTML;
+    const newHTML = renderSegmentsToHTML(inputSegments);
+    if (currentHTML !== newHTML) {
+      el.innerHTML = newHTML;
+      // Move cursor to end after updating
+      const range = document.createRange();
+      const sel = window.getSelection();
+      range.selectNodeContents(el);
+      range.collapse(false);
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+    }
+    lastSegmentsRef.current = inputSegments;
+  }, [inputSegments]);
+
+  // Contenteditable keydown handler
+  const handleContentEditableKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    // Enter to submit (Shift+Enter for newline)
+    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+      e.preventDefault();
+      submitCurrent();
+      return;
+    }
+
+    // Handle other keyboard shortcuts
+    handleKeyDown(e);
+  };
+
+  // Render segments to contenteditable HTML
+  const renderSegmentsToHTML = (segments: InputSegment[]): string => {
+    return segments.map(seg => {
+      if (seg.type === 'text') {
+        return seg.content.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      } else {
+        // File pill HTML - non-editable with blue styling, truncation, and delete button overlaying icon
+        // Icon container with fixed size, × overlays the icon without changing dimensions
+        const iconContainer = `<span class="file-pill-icon-container" style="position: relative; width: 14px; height: 14px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center;">
+          <svg class="file-pill-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
+          <span class="file-pill-delete" data-delete-file="${seg.id}" style="display: none; position: absolute; top: 0; left: 0; width: 14px; height: 14px; cursor: pointer; font-size: 14px; font-weight: 500; color: #64748b; line-height: 14px; text-align: center;">&times;</span>
+        </span>`;
+        return `<span contenteditable="false" data-file-id="${seg.id}" data-file-name="${seg.name}" data-file-type="${seg.fileType}" class="file-pill" style="display: inline-flex; align-items: center; gap: 4px; padding: 2px 10px; margin: 2px 6px 2px 0; background: #dbeafe; border: 1px solid #93c5fd; border-radius: 9999px; font-size: 12px; color: #1e40af; cursor: default; vertical-align: middle; user-select: all; max-width: 180px;">${iconContainer}<span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${seg.name}</span></span>\u200B`;
+      }
+    }).join('');
+  };
+
+  // Handle click on file pill delete button
+  const handleContentEditableClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement;
+    // Check if clicked on delete button
+    if (target.classList.contains('file-pill-delete')) {
+      const fileId = target.dataset.deleteFile;
+      if (fileId) {
+        e.preventDefault();
+        e.stopPropagation();
+        removeFileSegment(fileId);
+      }
+    }
+  };
+
+  // Handle mouse over/out for file pills to show/hide delete button
+  const handleContentEditableMouseOver = (e: React.MouseEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement;
+    const pill = target.closest('.file-pill') as HTMLElement;
+    if (pill) {
+      const deleteBtn = pill.querySelector('.file-pill-delete') as HTMLElement;
+      const fileIcon = pill.querySelector('.file-pill-icon') as SVGElement;
+      if (deleteBtn) deleteBtn.style.display = 'block';
+      if (fileIcon) fileIcon.style.visibility = 'hidden';
+    }
+  };
+
+  const handleContentEditableMouseOut = (e: React.MouseEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement;
+    const pill = target.closest('.file-pill') as HTMLElement;
+    if (pill) {
+      // Don't hide × if pill is selected
+      const selection = window.getSelection();
+      if (selection && selection.rangeCount > 0) {
+        const range = selection.getRangeAt(0);
+        if (pill.contains(range.startContainer) || pill.contains(range.endContainer) || range.intersectsNode(pill)) {
+          return; // Keep × visible if pill is selected
+        }
+      }
+      const deleteBtn = pill.querySelector('.file-pill-delete') as HTMLElement;
+      const fileIcon = pill.querySelector('.file-pill-icon') as SVGElement;
+      if (deleteBtn) deleteBtn.style.display = 'none';
+      if (fileIcon) fileIcon.style.visibility = 'visible';
+    }
+  };
+
+  // Handle selection change to show/hide delete button on selected pills
+  useEffect(() => {
+    const handleSelectionChange = () => {
+      const el = contentEditableRef.current;
+      if (!el) return;
+
+      const selection = window.getSelection();
+      const pills = el.querySelectorAll('.file-pill') as NodeListOf<HTMLElement>;
+
+      pills.forEach((pill) => {
+        const deleteBtn = pill.querySelector('.file-pill-delete') as HTMLElement;
+        const fileIcon = pill.querySelector('.file-pill-icon') as SVGElement;
+        if (!deleteBtn || !fileIcon) return;
+
+        let cursorOnPill = false;
+        if (selection && selection.rangeCount > 0) {
+          const range = selection.getRangeAt(0);
+          // Check if cursor/selection start or end is directly on/in the pill
+          cursorOnPill = pill.contains(range.startContainer) ||
+                         pill.contains(range.endContainer);
+        }
+
+        if (cursorOnPill) {
+          // Cursor is on the pill - show ×, hide selection highlight
+          deleteBtn.style.display = 'block';
+          fileIcon.style.visibility = 'hidden';
+          pill.style.userSelect = 'none';
+          pill.classList.add('cursor-on-pill');
+        } else {
+          // Cursor is not on the pill - show icon, allow selection highlight
+          deleteBtn.style.display = 'none';
+          fileIcon.style.visibility = 'visible';
+          pill.style.userSelect = 'all';
+          pill.classList.remove('cursor-on-pill');
+        }
+      });
+    };
+
+    document.addEventListener('selectionchange', handleSelectionChange);
+    return () => document.removeEventListener('selectionchange', handleSelectionChange);
+  }, []);
 
   const triggerAction = (action: "explain" | "fix" | "test" | "refactor") => {
     const prompts = {
@@ -1347,15 +1551,45 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
     e.preventDefault();
     setIsDragging(false);
   };
+  // Insert file segment at end of input (or could be enhanced for cursor position)
+  const insertFileSegment = (file: { id: string; name: string; type: 'file' | 'folder' }) => {
+    setInputSegments(prev => {
+      // Check if file already exists
+      const existingIds = new Set(
+        prev.filter((s): s is Extract<InputSegment, { type: 'file' }> => s.type === 'file').map(s => s.id)
+      );
+      if (existingIds.has(file.id)) return prev;
+
+      // Add file segment at end
+      return [...prev, { type: 'file', id: file.id, name: file.name, fileType: file.type }];
+    });
+    // Focus the contenteditable
+    setTimeout(() => contentEditableRef.current?.focus(), 0);
+  };
+
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
+
+    // Try to get node data (new format with full info)
+    const nodeDataStr = e.dataTransfer.getData("application/cursor-node-data");
+    if (nodeDataStr) {
+      try {
+        const nodesData = JSON.parse(nodeDataStr) as { id: string; name: string; type: "file" | "folder" }[];
+        if (Array.isArray(nodesData) && nodesData.length > 0) {
+          // Insert each file as a segment
+          nodesData.forEach(node => insertFileSegment(node));
+          return;
+        }
+      } catch {
+        // Fall through to legacy handling
+      }
+    }
+
+    // Legacy: just the node name - treat as text
     const fileName = e.dataTransfer.getData("application/cursor-node");
     if (fileName) {
-      setPrompt(prev => {
-        const prefix = prev.trim().length > 0 ? " " : "";
-        return `${prev}${prefix}@${fileName} `;
-      });
+      setInputSegments(prev => [...prev, { type: 'text', content: `@${fileName} ` }]);
     }
   };
 
@@ -1372,6 +1606,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
     setMessages([]);
     setPrompt("");
     setAttachedImages([]);
+    setInputSegments([]);
     
     // タブバーを右端までスクロール
     setTimeout(() => {
@@ -1509,6 +1744,10 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
       updated.splice(index, 1);
       return updated;
     });
+  };
+
+  const removeFileSegment = (fileId: string) => {
+    setInputSegments(prev => prev.filter(s => !(s.type === 'file' && s.id === fileId)));
   };
 
   // Handle paste for screenshots
@@ -1829,8 +2068,8 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
       setEditingMessageIndex(null);
       setEditingImageUrls([]);
       setAttachedImages([]);
+      setInputSegments([]);
       setDraftBeforeEdit("");
-      setPrompt("");
     } catch (e: any) {
       alert(`Error: ${e?.message || e}`);
     } finally {
@@ -2539,7 +2778,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
                     <button
                       key={file.id}
                       onMouseEnter={() => onHoverNode?.(file.id)}
-                      onClick={() => insertFileReference(file.name)}
+                      onClick={() => insertFileReference(file)}
                       className={`w-full text-left px-3 py-2 text-xs flex items-center gap-2 ${index === selectedFileIndex ? "bg-blue-50 text-blue-700" : "text-zinc-700 hover:bg-zinc-50"}`}
                     >
                       <Icons.File className="w-3.5 h-3.5 text-zinc-400" />
@@ -2570,8 +2809,8 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
                 <div className="flex gap-2 px-3 pt-3 pb-1 overflow-x-auto no-scrollbar">
                   {editingMessageIndex !== null && editingImageUrls.map((url, index) => (
                     <div key={`edit-url-${index}`} className="relative flex-shrink-0">
-                      <img 
-                        src={url} 
+                      <img
+                        src={url}
                         alt={`Attached ${index + 1}`}
                         className="h-14 w-14 object-cover rounded-lg border border-zinc-200"
                       />
@@ -2585,9 +2824,9 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
                   ))}
                   {attachedImages.map((img, index) => (
                     <div key={`new-${index}`} className="relative flex-shrink-0">
-                      <img 
-                        src={img.preview} 
-                        alt={`New ${index + 1}`} 
+                      <img
+                        src={img.preview}
+                        alt={`New ${index + 1}`}
                         className="h-14 w-14 object-cover rounded-lg border border-zinc-200"
                       />
                       <button
@@ -2601,16 +2840,20 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
                 </div>
               )}
 
-              <textarea
-                ref={textareaRef}
-                className={`w-full max-h-60 bg-transparent px-4 py-3 text-sm text-zinc-800 resize-none focus:outline-none placeholder:text-zinc-300 min-h-[44px] ${attachedImages.length > 0 ? "" : "rounded-t-xl"}`}
-                value={prompt}
-                onChange={handlePromptChange}
-                onKeyDown={handleKeyDown}
+              {/* Mixed Content Input - contenteditable */}
+              <div
+                ref={contentEditableRef}
+                contentEditable={!loading}
+                suppressContentEditableWarning
+                className={`w-full min-h-[44px] max-h-60 overflow-y-auto bg-transparent px-4 py-3 text-sm text-zinc-800 focus:outline-none empty:before:content-[attr(data-placeholder)] empty:before:text-zinc-300 ${attachedImages.length > 0 ? "" : "rounded-t-xl"}`}
+                style={{ lineHeight: '1.5', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}
+                data-placeholder={inputPlaceholder}
+                onInput={handleContentEditableInput}
+                onKeyDown={handleContentEditableKeyDown}
                 onPaste={handlePaste}
-                placeholder={inputPlaceholder}
-                rows={1}
-                disabled={loading}
+                onClick={handleContentEditableClick}
+                onMouseOver={handleContentEditableMouseOver}
+                onMouseOut={handleContentEditableMouseOut}
               />
               
               <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 gap-y-1 px-2 pr-3 py-1.5 border-t border-zinc-100 bg-zinc-50/30 rounded-b-xl">
@@ -2809,8 +3052,8 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
                   />
                   <button
                     onClick={() => submitCurrent()}
-                    disabled={loading || (!prompt.trim() && attachedImages.length === 0 && (editingMessageIndex === null || editingImageUrls.length === 0))}
-                    className={`p-1.5 rounded-full transition-all flex-shrink-0 flex items-center justify-center ${getSubmitButtonStyles(mode, prompt.trim().length > 0 || attachedImages.length > 0 || (editingMessageIndex !== null && editingImageUrls.length > 0))}`}
+                    disabled={loading || (inputSegments.length === 0 && attachedImages.length === 0 && (editingMessageIndex === null || editingImageUrls.length === 0))}
+                    className={`p-1.5 rounded-full transition-all flex-shrink-0 flex items-center justify-center ${getSubmitButtonStyles(mode, inputSegments.length > 0 || attachedImages.length > 0 || (editingMessageIndex !== null && editingImageUrls.length > 0))}`}
                   >
                     <Icons.ArrowUp className="w-3.5 h-3.5" />
                   </button>
@@ -3166,7 +3409,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
                     <button
                       key={file.id}
                       onMouseEnter={() => onHoverNode?.(file.id)}
-                      onClick={() => insertFileReference(file.name)}
+                      onClick={() => insertFileReference(file)}
                       className={`w-full text-left px-3 py-2 text-xs flex items-center gap-2 ${index === selectedFileIndex ? "bg-blue-50 text-blue-700" : "text-zinc-700 hover:bg-zinc-50"}`}
                     >
                   <Icons.File className="w-3.5 h-3.5 text-zinc-400" />
@@ -3197,8 +3440,8 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
             <div className="flex gap-2 px-3 pt-3 pb-1 overflow-x-auto no-scrollbar">
               {editingMessageIndex !== null && editingImageUrls.map((url, index) => (
                 <div key={`edit-url-${index}`} className="relative flex-shrink-0">
-                  <img 
-                    src={url} 
+                  <img
+                    src={url}
                     alt={`Attached ${index + 1}`}
                     className="h-14 w-14 object-cover rounded-lg border border-zinc-200"
                   />
@@ -3212,9 +3455,9 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
               ))}
               {attachedImages.map((img, index) => (
                 <div key={`new-${index}`} className="relative flex-shrink-0">
-                  <img 
-                    src={img.preview} 
-                    alt={`New ${index + 1}`} 
+                  <img
+                    src={img.preview}
+                    alt={`New ${index + 1}`}
                     className="h-14 w-14 object-cover rounded-lg border border-zinc-200"
                   />
                   <button
@@ -3228,16 +3471,20 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
             </div>
           )}
 
-          <textarea
-            ref={textareaRef}
-            className={`w-full max-h-60 bg-transparent px-4 py-3 text-sm text-zinc-800 resize-none focus:outline-none placeholder:text-zinc-300 min-h-[44px] ${(attachedImages.length > 0 || (editingMessageIndex !== null && editingImageUrls.length > 0)) ? "" : "rounded-t-xl"}`}
-            value={prompt}
-            onChange={handlePromptChange}
-            onKeyDown={handleKeyDown}
+          {/* Mixed Content Input - contenteditable */}
+          <div
+            ref={contentEditableRef}
+            contentEditable={!loading}
+            suppressContentEditableWarning
+            className={`w-full min-h-[44px] max-h-60 overflow-y-auto bg-transparent px-4 py-3 text-sm text-zinc-800 focus:outline-none empty:before:content-[attr(data-placeholder)] empty:before:text-zinc-300 ${(attachedImages.length > 0 || (editingMessageIndex !== null && editingImageUrls.length > 0)) ? "" : "rounded-t-xl"}`}
+            style={{ lineHeight: '1.5', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}
+            data-placeholder="Add a follow-up"
+            onInput={handleContentEditableInput}
+            onKeyDown={handleContentEditableKeyDown}
             onPaste={handlePaste}
-            placeholder="Add a follow-up"
-            rows={1}
-            disabled={loading}
+            onClick={handleContentEditableClick}
+            onMouseOver={handleContentEditableMouseOver}
+            onMouseOut={handleContentEditableMouseOut}
           />
           
           <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 gap-y-1 px-2 pr-3 py-1.5 border-t border-zinc-100 bg-zinc-50/30 rounded-b-xl">
@@ -3448,13 +3695,13 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
                    onClick={() => submitCurrent()}
                    disabled={
                      loading ||
-                     (!prompt.trim() &&
+                     (inputSegments.length === 0 &&
                        attachedImages.length === 0 &&
                        (editingMessageIndex === null || editingImageUrls.length === 0))
                    }
                    className={`p-1.5 rounded-full transition-all flex-shrink-0 flex items-center justify-center ${getSubmitButtonStyles(
                      mode,
-                     prompt.trim().length > 0 ||
+                     inputSegments.length > 0 ||
                        attachedImages.length > 0 ||
                        (editingMessageIndex !== null && editingImageUrls.length > 0)
                    )}`}

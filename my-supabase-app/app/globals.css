@@ -78,3 +78,9 @@
   -ms-overflow-style: none;
   scrollbar-width: none;
 }
+
+/* File pill selection highlight control */
+.file-pill.cursor-on-pill::selection,
+.file-pill.cursor-on-pill *::selection {
+  background: transparent;
+}

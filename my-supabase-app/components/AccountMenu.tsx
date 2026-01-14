@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Bug, Globe, LogOut, Mail, MessageSquare, Settings, Sparkles, ChevronDown, Check } from "lucide-react";
+import { Bug, Globe, LogOut, Mail, MessageSquare, Settings, Sparkles, Check } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import {
   DropdownMenu,
@@ -73,7 +73,7 @@ export function AccountMenu({ userEmail, displayName, planName = "Plus", onOpenS
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <button
-          className="w-full flex items-center gap-3 rounded-lg px-2 py-2 text-left transition-colors hover:bg-zinc-100 data-[state=open]:bg-zinc-100"
+          className="w-full flex items-center gap-3 rounded-lg px-2 py-1 text-left transition-colors hover:bg-zinc-100 data-[state=open]:bg-zinc-100 outline-none focus:outline-none focus-visible:outline-none"
           type="button"
         >
           <div className="h-8 w-8 rounded-full bg-zinc-200 text-zinc-600 flex items-center justify-center text-sm font-semibold">
@@ -87,7 +87,6 @@ export function AccountMenu({ userEmail, displayName, planName = "Plus", onOpenS
               {planName}
             </div>
           </div>
-          <ChevronDown className="h-4 w-4 text-zinc-400" />
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent

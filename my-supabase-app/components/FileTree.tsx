@@ -768,6 +768,12 @@ export function FileTree({
             draggable
             data-node-id={node.id}
             onDragStart={(e) => {
+              // Set node data for chat panel drops
+              const dragData = {
+                id: node.id,
+                name: node.name,
+                type: node.type,
+              };
               e.dataTransfer.setData("application/cursor-node", node.id);
               e.dataTransfer.effectAllowed = "move";
               // If the dragged node is selected, drag all selected nodes
@@ -775,9 +781,17 @@ export function FileTree({
               const dragCount = selectedNodeIds.has(node.id) && selectedNodeIds.size > 1
                 ? selectedNodeIds.size
                 : 1;
+
+              // Set data for all dragged nodes (for chat panel)
               if (dragCount > 1) {
+                const allDragData = Array.from(selectedNodeIds).map(id => {
+                  const n = nodeMap.get(id);
+                  return n ? { id: n.id, name: n.name, type: n.type } : null;
+                }).filter(Boolean);
+                e.dataTransfer.setData("application/cursor-node-data", JSON.stringify(allDragData));
                 setDraggingNodeIds(new Set(selectedNodeIds));
               } else {
+                e.dataTransfer.setData("application/cursor-node-data", JSON.stringify([dragData]));
                 setDraggingNodeIds(new Set([node.id]));
               }
 
@@ -1063,7 +1077,21 @@ export function FileTree({
               No files.<br/>Right click to create.
             </div>
           ) : (
-            renderTree(null)
+            <>
+              {renderTree(null)}
+              {/* Clickable gap at bottom to clear selection */}
+              <div
+                className="min-h-[40px] cursor-pointer"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onClearSelection();
+                }}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                }}
+              />
+            </>
           )
         )}
       </div>
