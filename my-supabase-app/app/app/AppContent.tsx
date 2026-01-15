@@ -10,6 +10,15 @@ type Workspace = {
   role: string;
 };
 
+type Node = {
+  id: string;
+  project_id: string;
+  parent_id: string | null;
+  type: "file" | "folder";
+  name: string;
+  created_at: string;
+};
+
 type Props = {
   searchParamsPromise: Promise<{ workspace?: string }>;
 };
@@ -146,12 +155,23 @@ export default async function AppContent({ searchParamsPromise }: Props) {
     });
   }
 
+  // Pre-fetch nodes for faster initial load
+  const { data: initialNodes } = await supabase
+    .from("nodes")
+    .select("*")
+    .eq("project_id", projectId!)
+    .order("type", { ascending: false })
+    .order("name", { ascending: true })
+    .order("id", { ascending: true })
+    .limit(1000);
+
   return (
     <AppLayout
       projectId={projectId!}
       workspaces={workspaces}
       currentWorkspace={ensuredWorkspace}
       userEmail={user.email || ""}
+      initialNodes={(initialNodes as Node[]) || []}
     />
   );
 }

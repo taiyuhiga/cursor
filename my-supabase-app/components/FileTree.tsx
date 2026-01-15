@@ -43,6 +43,7 @@ type FileTreeProps = {
   onOpenSettings?: () => void;
   onRenameWorkspace?: (newName: string) => Promise<void>;
   onDeleteWorkspace?: () => void;
+  isLoading?: boolean;
 };
 
 type EditingState = {
@@ -58,6 +59,44 @@ type DropdownMenu = {
   x: number;
   y: number;
 } | null;
+
+// Loading skeleton component
+function FileTreeSkeleton() {
+  return (
+    <div className="p-2 space-y-1 animate-pulse">
+      {/* Folder skeleton */}
+      <div className="flex items-center gap-2 px-2 py-1">
+        <div className="w-4 h-4 bg-zinc-200 rounded" />
+        <div className="h-4 bg-zinc-200 rounded w-24" />
+      </div>
+      {/* Nested files */}
+      <div className="pl-4 space-y-1">
+        <div className="flex items-center gap-2 px-2 py-1">
+          <div className="w-4 h-4 bg-zinc-200 rounded" />
+          <div className="h-4 bg-zinc-200 rounded w-20" />
+        </div>
+        <div className="flex items-center gap-2 px-2 py-1">
+          <div className="w-4 h-4 bg-zinc-200 rounded" />
+          <div className="h-4 bg-zinc-200 rounded w-28" />
+        </div>
+      </div>
+      {/* Another folder */}
+      <div className="flex items-center gap-2 px-2 py-1">
+        <div className="w-4 h-4 bg-zinc-200 rounded" />
+        <div className="h-4 bg-zinc-200 rounded w-20" />
+      </div>
+      {/* Files */}
+      <div className="flex items-center gap-2 px-2 py-1">
+        <div className="w-4 h-4 bg-zinc-200 rounded" />
+        <div className="h-4 bg-zinc-200 rounded w-32" />
+      </div>
+      <div className="flex items-center gap-2 px-2 py-1">
+        <div className="w-4 h-4 bg-zinc-200 rounded" />
+        <div className="h-4 bg-zinc-200 rounded w-16" />
+      </div>
+    </div>
+  );
+}
 
 export function FileTree({
   nodes,
@@ -89,6 +128,7 @@ export function FileTree({
   onOpenSettings,
   onRenameWorkspace,
   onDeleteWorkspace,
+  isLoading,
 }: FileTreeProps) {
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [contextMenu, setContextMenu] = useState<{
@@ -1115,7 +1155,7 @@ export function FileTree({
     >
       {/* Project name header */}
       {projectName && (
-        <div className="flex items-center px-3 py-2 border-b border-zinc-200 gap-0.5">
+        <div className="group flex items-center px-3 py-2 border-b border-zinc-200 gap-0.5">
           {/* Workspace icon with first character */}
           <div className="w-8 h-8 rounded bg-blue-100 flex items-center justify-center flex-shrink-0 mr-1.5">
             <span className="text-sm font-bold text-blue-600">
@@ -1144,7 +1184,7 @@ export function FileTree({
               <span className="text-base font-semibold text-zinc-800 truncate min-w-[24px]">
                 {projectName}
               </span>
-              <ChevronIcon isOpen={isProjectExpanded} className="w-4 h-4 text-zinc-400 flex-shrink-0 ml-1" />
+              <ChevronIcon isOpen={isProjectExpanded} className="w-4 h-4 text-zinc-400 flex-shrink-0 ml-1 transition-opacity opacity-0 group-hover:opacity-100" />
             </div>
           )}
           <div className="flex items-center flex-shrink-0 ml-auto -mr-0.5">
@@ -1318,7 +1358,9 @@ export function FileTree({
         }}
       >
         {(!projectName || isProjectExpanded) && (
-          nodes.length === 0 && !editingState ? (
+          isLoading ? (
+            <FileTreeSkeleton />
+          ) : nodes.length === 0 && !editingState ? (
             <div className="text-zinc-400 text-sm p-4 text-center">
               ファイルがありません<br/>右クリックで作成
             </div>

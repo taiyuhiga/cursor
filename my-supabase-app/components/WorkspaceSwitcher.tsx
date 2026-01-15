@@ -52,7 +52,7 @@ export function WorkspaceSwitcher({
       {/* トリガーボタン */}
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className="flex items-center gap-2 px-3 py-2 hover:bg-zinc-100 rounded-lg transition-colors w-full"
+        className="group flex items-center gap-2 px-3 py-2 hover:bg-zinc-100 rounded-lg transition-colors w-full"
       >
         {/* ワークスペースアイコン */}
         <div className="w-6 h-6 rounded bg-gradient-to-br from-blue-400 to-blue-600 flex items-center justify-center text-white text-xs font-bold">
@@ -65,7 +65,7 @@ export function WorkspaceSwitcher({
         </div>
         {/* 矢印 */}
         <svg
-          className={`w-4 h-4 text-zinc-400 transition-transform ${isOpen ? "rotate-180" : ""}`}
+          className={`w-4 h-4 text-zinc-400 transition-all ${isOpen ? "rotate-180 opacity-100" : "opacity-0 group-hover:opacity-100"}`}
           fill="none"
           stroke="currentColor"
           viewBox="0 0 24 24"

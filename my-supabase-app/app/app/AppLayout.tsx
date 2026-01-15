@@ -57,6 +57,7 @@ type Props = {
   workspaces: Workspace[];
   currentWorkspace: Workspace;
   userEmail: string;
+  initialNodes?: Node[];
 };
 
 function extractJsonCandidate(text: string): string | null {
@@ -135,16 +136,53 @@ type VirtualDoc = {
   created_at: string;
 };
 
-export default function AppLayout({ projectId, workspaces, currentWorkspace, userEmail }: Props) {
+// Helper to get/set localStorage cache for nodes
+const NODES_CACHE_KEY = "fileTreeCache";
+
+function getCachedNodes(projectId: string): Node[] | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const cached = localStorage.getItem(`${NODES_CACHE_KEY}:${projectId}`);
+    if (!cached) return null;
+    const { nodes } = JSON.parse(cached);
+    return nodes;
+  } catch {
+    return null;
+  }
+}
+
+function setCachedNodes(projectId: string, nodes: Node[]) {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.setItem(
+      `${NODES_CACHE_KEY}:${projectId}`,
+      JSON.stringify({ nodes })
+    );
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+export default function AppLayout({ projectId, workspaces, currentWorkspace, userEmail, initialNodes = [] }: Props) {
   const router = useRouter();
-  const [nodes, setNodes] = useState<Node[]>([]);
+  // Use initialNodes from server, or cached nodes, for instant display
+  const [nodes, setNodes] = useState<Node[]>(() => {
+    if (initialNodes.length > 0) return initialNodes;
+    const cached = getCachedNodes(projectId);
+    return cached || [];
+  });
   const [openTabs, setOpenTabs] = useState<string[]>([]);
   const [activeNodeId, setActiveNodeId] = useState<string | null>(null);
   const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(new Set());
   const [activeActivity, setActiveActivity] = useState<Activity>("explorer");
   const [fileContent, setFileContent] = useState<string>("");
   const [isSaving, setIsSaving] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
+  // Start with loading=false if we have initial data (server-side or cached)
+  const [isLoading, setIsLoading] = useState(() => {
+    if (initialNodes.length > 0) return false;
+    const cached = getCachedNodes(projectId);
+    return !cached || cached.length === 0;
+  });
   const [diffState, setDiffState] = useState<{
     show: boolean;
     newCode: string;
@@ -172,11 +210,21 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const [activeWorkspace, setActiveWorkspace] = useState(currentWorkspace);
   const [showDeleteWorkspaceConfirm, setShowDeleteWorkspaceConfirm] = useState(false);
 
-  // Resizable panel widths
+  // Resizable panel widths (persisted to localStorage)
   const [leftPanelWidth, setLeftPanelWidth] = useState(256);
   const [rightPanelWidth, setRightPanelWidth] = useState(320);
   const [isResizingLeft, setIsResizingLeft] = useState(false);
   const [isResizingRight, setIsResizingRight] = useState(false);
+  const [panelWidthsLoaded, setPanelWidthsLoaded] = useState(false);
+
+  // Load panel widths from localStorage after hydration
+  useEffect(() => {
+    const savedLeft = localStorage.getItem("leftPanelWidth");
+    const savedRight = localStorage.getItem("rightPanelWidth");
+    if (savedLeft) setLeftPanelWidth(parseInt(savedLeft, 10));
+    if (savedRight) setRightPanelWidth(parseInt(savedRight, 10));
+    setPanelWidthsLoaded(true);
+  }, []);
 
   const aiPanelRef = useRef<AiPanelHandle>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -252,8 +300,15 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   }, [nodeById, nodes]);
 
   // ノード一覧を取得
-  const fetchNodes = useCallback(async () => {
-    setIsLoading(true);
+  const fetchNodes = useCallback(async (showLoading = true) => {
+    // Only show loading skeleton if we don't have any data yet
+    if (showLoading) {
+      setIsLoading((prev) => prev);
+      setNodes((prev) => {
+        if (prev.length === 0) setIsLoading(true);
+        return prev;
+      });
+    }
     // Supabase REST defaults to 1000 rows; paginate to load everything.
     const pageSize = 1000;
     const allNodes: Node[] = [];
@@ -298,14 +353,26 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         }
         return pendingNodeIdsRef.current.has(node.id) && !serverIds.has(node.id);
       });
-      return [...serverNodes, ...pendingNodes];
+      const newNodes = [...serverNodes, ...pendingNodes];
+      // Cache nodes for faster reload
+      setCachedNodes(projectId, serverNodes);
+      return newNodes;
     });
     setIsLoading(false);
     return allNodes;
   }, [projectId, supabase]);
 
+  // Cache initial nodes from server on mount
   useEffect(() => {
-    fetchNodes();
+    if (initialNodes.length > 0) {
+      setCachedNodes(projectId, initialNodes);
+    }
+  }, [projectId, initialNodes]);
+
+  // Fetch nodes on mount - silent background refresh if we have initial data
+  const hasInitialDataRef = useRef(initialNodes.length > 0);
+  useEffect(() => {
+    fetchNodes(!hasInitialDataRef.current);
   }, [fetchNodes]);
 
   // Undo/Redo handlers (must be after fetchNodes)
@@ -2768,6 +2835,17 @@ ${diffs}`;
   }, [supabase]);
 
   // Panel resize handlers
+  const leftPanelWidthRef = useRef(leftPanelWidth);
+  const rightPanelWidthRef = useRef(rightPanelWidth);
+
+  useEffect(() => {
+    leftPanelWidthRef.current = leftPanelWidth;
+  }, [leftPanelWidth]);
+
+  useEffect(() => {
+    rightPanelWidthRef.current = rightPanelWidth;
+  }, [rightPanelWidth]);
+
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
       if (isResizingLeft) {
@@ -2781,6 +2859,13 @@ ${diffs}`;
     };
 
     const handleMouseUp = () => {
+      // Save to localStorage when resizing ends
+      if (isResizingLeft) {
+        localStorage.setItem("leftPanelWidth", String(leftPanelWidthRef.current));
+      }
+      if (isResizingRight) {
+        localStorage.setItem("rightPanelWidth", String(rightPanelWidthRef.current));
+      }
       setIsResizingLeft(false);
       setIsResizingRight(false);
       document.body.style.cursor = "";
@@ -2939,6 +3024,7 @@ ${diffs}`;
             onOpenSettings={() => setActiveActivity("settings")}
             onRenameWorkspace={handleRenameWorkspace}
             onDeleteWorkspace={() => setShowDeleteWorkspaceConfirm(true)}
+            isLoading={isLoading}
           />
         );
       case "git":
@@ -3013,7 +3099,7 @@ ${diffs}`;
 
       <div className="flex flex-1 min-w-0">
         <aside
-          className="bg-zinc-50 border-r border-zinc-200 flex flex-col flex-shrink-0"
+          className={`bg-zinc-50 border-r border-zinc-200 flex flex-col flex-shrink-0 transition-opacity duration-100 ${panelWidthsLoaded ? "opacity-100" : "opacity-0"}`}
           style={{ width: leftPanelWidth }}
         >
           {renderSidebarContent()}
@@ -3216,8 +3302,8 @@ ${diffs}`;
         <div className="w-full h-full group-hover:bg-blue-500" />
       </div>
 
-      <aside 
-        className="border-l border-zinc-200 flex-shrink-0 bg-zinc-50"
+      <aside
+        className={`border-l border-zinc-200 flex-shrink-0 bg-zinc-50 transition-opacity duration-100 ${panelWidthsLoaded ? "opacity-100" : "opacity-0"}`}
         style={{ width: rightPanelWidth }}
       >
           <AiPanel
