@@ -17,6 +17,7 @@ import { SettingsView } from "@/components/SettingsView";
 import { ReviewPanel } from "@/components/ReviewPanel";
 import { SourceControlPanel, type SourceControlChange } from "@/components/SourceControlPanel";
 import { MediaPreview, isMediaFile, prefetchMediaUrl } from "@/components/MediaPreview";
+import { ReplaceConfirmDialog } from "@/components/ReplaceConfirmDialog";
 import type { PendingChange, ReviewIssue } from "@/lib/review/types";
 import type { AgentCheckpointChange, AgentCheckpointRecordInput } from "@/lib/checkpoints/types";
 
@@ -32,6 +33,7 @@ type Node = {
 type UploadItem = {
   file: File;
   relativePath: string;
+  isDirectory?: boolean;
 };
 
 type WebkitEntry = {
@@ -232,8 +234,24 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const [uploadTargetParentId, setUploadTargetParentId] = useState<string | null>(null);
   const [uploadProgress, setUploadProgress] = useState<Record<string, number>>({});
   const [revealNodeId, setRevealNodeId] = useState<string | null>(null);
+
+  // Replace confirmation dialog state
+  const [replaceDialog, setReplaceDialog] = useState<{
+    isOpen: boolean;
+    fileName: string;
+    isFolder: boolean;
+    existingNodeId: string;
+    resolve: ((replace: boolean) => void) | null;
+  }>({
+    isOpen: false,
+    fileName: "",
+    isFolder: false,
+    existingNodeId: "",
+    resolve: null,
+  });
   const prefetchedMediaIdsRef = useRef<Set<string>>(new Set());
   const pendingNodeIdsRef = useRef<Set<string>>(new Set());
+  const pendingPathResolversRef = useRef<Map<string, { path: string; resolve: (id: string | null) => void; timeoutId: number }>>(new Map());
   const supabase = createClient();
 
   const getNodeKey = (node: Node) => `${node.type}:${node.parent_id ?? "root"}:${node.name}`;
@@ -299,6 +317,52 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     return cache;
   }, [nodeById, nodes]);
 
+  const nodeIdByPath = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const node of nodes) {
+      if (String(node.id).startsWith("temp-")) continue;
+      const path = pathByNodeId.get(node.id);
+      if (path) {
+        map.set(path, node.id);
+      }
+    }
+    return map;
+  }, [nodes, pathByNodeId]);
+
+  const waitForRealNodeIdByPath = useCallback((path: string, timeoutMs: number = 70000) => {
+    const existing = nodeIdByPath.get(path);
+    if (existing) {
+      return Promise.resolve(existing);
+    }
+    return new Promise<string | null>((resolve) => {
+      const key = `${path}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+      const timeoutId = window.setTimeout(() => {
+        pendingPathResolversRef.current.delete(key);
+        resolve(null);
+      }, timeoutMs);
+      pendingPathResolversRef.current.set(key, { path, resolve, timeoutId });
+    });
+  }, [nodeIdByPath]);
+
+  const resolveMaybeTempNodeId = useCallback(async (nodeId: string | null, timeoutMs: number = 70000) => {
+    if (!nodeId) return null;
+    if (!String(nodeId).startsWith("temp-")) return nodeId;
+    const path = pathByNodeId.get(nodeId);
+    if (!path) return null;
+    return await waitForRealNodeIdByPath(path, timeoutMs);
+  }, [pathByNodeId, waitForRealNodeIdByPath]);
+
+  useEffect(() => {
+    if (pendingPathResolversRef.current.size === 0) return;
+    for (const [key, pending] of pendingPathResolversRef.current) {
+      const resolvedId = nodeIdByPath.get(pending.path);
+      if (!resolvedId) continue;
+      window.clearTimeout(pending.timeoutId);
+      pending.resolve(resolvedId);
+      pendingPathResolversRef.current.delete(key);
+    }
+  }, [nodeIdByPath]);
+
   // ノード一覧を取得
   const fetchNodes = useCallback(async (showLoading = true) => {
     // Only show loading skeleton if we don't have any data yet
@@ -320,6 +384,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         .from("nodes")
         .select("*")
         .eq("project_id", projectId)
+        .order("parent_id", { ascending: true, nullsFirst: true })
         .order("type", { ascending: false })
         .order("name", { ascending: true })
         .order("id", { ascending: true })
@@ -1020,124 +1085,298 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     }
   };
 
-  const handleCopyNodes = async (nodeIds: string[], newParentId: string | null) => {
-    try {
-      // Copy each node using the API
-      const newNodeIds: string[] = [];
-      for (const nodeId of nodeIds) {
-        const res = await fetch("/api/files", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "copy_node", id: nodeId, newParentId }),
-        });
-        if (!res.ok) {
-          const error = await res.json();
-          throw new Error(error.error || `Failed to copy node`);
+  const handleCopyNodes = async (nodeIds: string[], newParentId: string | null): Promise<string[]> => {
+    if (nodeIds.length === 0) {
+      return []; // Nothing to copy
+    }
+
+    const resolvedNodeIdsPromise = Promise.all(nodeIds.map((id) => resolveMaybeTempNodeId(id)));
+    const resolvedParentIdPromise = resolveMaybeTempNodeId(newParentId);
+
+    // Helper to generate copy name
+    const generateCopyName = (originalName: string, existingNames: string[], isFile: boolean) => {
+      let baseName: string;
+      let extension: string;
+
+      if (isFile) {
+        const lastDotIndex = originalName.lastIndexOf(".");
+        if (lastDotIndex > 0) {
+          baseName = originalName.substring(0, lastDotIndex);
+          extension = originalName.substring(lastDotIndex);
+        } else {
+          baseName = originalName;
+          extension = "";
         }
-        const json = await res.json();
-        if (json.nodeId) {
-          newNodeIds.push(json.nodeId);
+      } else {
+        baseName = originalName;
+        extension = "";
+      }
+
+      const copyPattern = / copy( \d+)?$/;
+      const baseWithoutCopy = baseName.replace(copyPattern, "");
+
+      // Find existing copy numbers
+      const copyNames = existingNames.filter((name: string) => {
+        const expectedBase = `${baseWithoutCopy} copy`;
+        if (extension) {
+          const escapedBase = baseWithoutCopy.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const escapedExt = extension.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          return name === `${expectedBase}${extension}` ||
+                 name.match(new RegExp(`^${escapedBase} copy \\d+${escapedExt}$`));
+        } else {
+          const escapedBase = baseWithoutCopy.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          return name === expectedBase ||
+                 name.match(new RegExp(`^${escapedBase} copy \\d+$`));
+        }
+      });
+
+      let counter = 1;
+      if (copyNames.length > 0) {
+        const numbers = copyNames.map((name: string) => {
+          const nameWithoutExt = extension ? name.replace(extension, "") : name;
+          const match = nameWithoutExt.match(/ copy( (\d+))?$/);
+          if (match) {
+            return match[2] ? parseInt(match[2], 10) : 1;
+          }
+          return 0;
+        });
+        counter = Math.max(...numbers, 0) + 1;
+      }
+
+      if (counter === 1) {
+        return `${baseWithoutCopy} copy${extension}`;
+      } else {
+        return `${baseWithoutCopy} copy ${counter}${extension}`;
+      }
+    };
+
+    // Optimistic update: add temporary nodes immediately (including children for folders)
+    const tempNodes: Node[] = [];
+    const rootTempIds: string[] = [];
+    const existingNames = nodes
+      .filter(n => n.parent_id === newParentId)
+      .map(n => n.name);
+
+    // Recursive function to copy node tree locally
+    const copyNodeTreeLocally = (sourceId: string, targetParentId: string | null, isRoot: boolean) => {
+      const sourceNode = nodes.find(n => n.id === sourceId);
+      if (!sourceNode) return;
+
+      const isSameFolder = isRoot && sourceNode.parent_id === targetParentId;
+      const newName = isSameFolder
+        ? generateCopyName(sourceNode.name, [...existingNames, ...tempNodes.filter(t => t.parent_id === targetParentId).map(t => t.name)], sourceNode.type === "file")
+        : sourceNode.name;
+
+      const tempId = `temp-copy-${Date.now()}-${Math.random().toString(36).substr(2, 9)}-${sourceId}`;
+      const tempNode: Node = {
+        id: tempId,
+        project_id: projectId,
+        parent_id: targetParentId,
+        type: sourceNode.type,
+        name: newName,
+        created_at: new Date().toISOString(),
+      };
+      tempNodes.push(tempNode);
+
+      if (isRoot) {
+        rootTempIds.push(tempId);
+      }
+
+      // Recursively copy children if it's a folder
+      if (sourceNode.type === "folder") {
+        const children = nodes.filter(n => n.parent_id === sourceId);
+        for (const child of children) {
+          copyNodeTreeLocally(child.id, tempId, false);
         }
       }
+    };
+
+    for (const nodeId of nodeIds) {
+      copyNodeTreeLocally(nodeId, newParentId, true);
+    }
+
+    // Immediately update UI with temp nodes and select root nodes
+    setNodes(prev => [...prev, ...tempNodes]);
+    setSelectedNodeIds(new Set(rootTempIds));
+
+    try {
+      const resolvedNodeIds = await resolvedNodeIdsPromise;
+      const resolvedParentId = await resolvedParentIdPromise;
+
+      if (resolvedNodeIds.some((id) => !id)) {
+        throw new Error("コピーが完了してからもう一度お試しください。");
+      }
+
+      if (newParentId && !resolvedParentId) {
+        throw new Error("コピー先のフォルダがまだ作成中です。");
+      }
+
+      const realNodeIds = resolvedNodeIds as string[];
+      const serverParentId = resolvedParentId ?? null;
+
+      // Copy each node sequentially (to avoid overwhelming the server for large folders)
+      const newNodeIds: string[] = [];
+      for (const nodeId of realNodeIds) {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 second timeout
+
+        try {
+          const res = await fetch("/api/files", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "copy_node", id: nodeId, newParentId: serverParentId }),
+            signal: controller.signal,
+          });
+          clearTimeout(timeoutId);
+
+          if (!res.ok) {
+            const error = await res.json();
+            throw new Error(error.error || `Failed to copy node`);
+          }
+          const json = await res.json();
+          if (json.nodeId) {
+            newNodeIds.push(json.nodeId);
+          }
+        } catch (err: any) {
+          clearTimeout(timeoutId);
+          if (err.name === 'AbortError') {
+            throw new Error('コピーがタイムアウトしました。もう一度お試しください。');
+          }
+          throw err;
+        }
+      }
+
       // Push undo action for copy
       if (newNodeIds.length > 0) {
         pushUndoAction({ type: "copy", nodeIds: newNodeIds });
       }
-      // Refresh the node list
-      fetchNodes();
+
+      const ensureCopiedNodesVisible = async () => {
+        const maxAttempts = 3;
+        for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+          const refreshedNodes = await fetchNodes(attempt === 0);
+          const refreshedIds = new Set(refreshedNodes.map((node) => node.id));
+          if (newNodeIds.every((id) => refreshedIds.has(id))) {
+            return;
+          }
+          await new Promise((resolve) => window.setTimeout(resolve, 400 * (attempt + 1)));
+        }
+        throw new Error("コピー結果を取得できませんでした。もう一度お試しください。");
+      };
+
+      // Refresh to get the actual nodes (replaces temp nodes) and select the new nodes
+      await ensureCopiedNodesVisible();
+      setSelectedNodeIds(new Set(newNodeIds));
+      if (newNodeIds.length > 0) {
+        setRevealNodeId(newNodeIds[0]);
+      }
+      return newNodeIds;
     } catch (error: any) {
+      // Revert optimistic update on error
+      setNodes(prev => prev.filter(n => !tempNodes.some(t => t.id === n.id)));
+      setSelectedNodeIds(new Set());
       alert(`コピーエラー: ${error.message}`);
+      return [];
     }
   };
 
-  const handleDeleteNode = async (id: string) => {
-    // Optimistic: 即座にUIから削除
-    const oldNodes = [...nodes];
+  const handleDeleteNodes = async (ids: string[]) => {
+    if (ids.length === 0) return;
 
-    // 削除するノード情報を保存（undo用）
-    const nodeToDelete = nodes.find(n => n.id === id);
-    if (!nodeToDelete) return;
+    // 削除するノード情報を保存
+    const nodesToDelete = ids.map(id => nodes.find(n => n.id === id)).filter(Boolean) as Node[];
+    if (nodesToDelete.length === 0) return;
 
-    // 子ノードも含めて削除
-    const idsToDelete = new Set<string>();
+    // 子ノードも含めて削除対象を収集
+    const allIdsToDelete = new Set<string>();
     const collectChildren = (parentId: string) => {
-      idsToDelete.add(parentId);
+      allIdsToDelete.add(parentId);
       nodes.filter(n => n.parent_id === parentId).forEach(child => collectChildren(child.id));
     };
-    collectChildren(id);
+    ids.forEach(id => collectChildren(id));
 
-    // ファイルのコンテンツを取得（undo用）
-    let content: string | undefined;
-    const children: { node: Node; content?: string }[] = [];
+    // ロールバック用に現在のノードを保存
+    const oldNodes = [...nodes];
 
-    if (nodeToDelete.type === "file") {
-      try {
-        const { data } = await supabase
-          .from("file_contents")
-          .select("text")
-          .eq("node_id", id)
-          .single();
-        content = data?.text;
-      } catch {
-        // コンテンツ取得に失敗しても削除は続行
-      }
-    }
-
-    // 子ノードのコンテンツも取得
-    for (const nodeId of idsToDelete) {
-      if (nodeId === id) continue;
-      const childNode = nodes.find(n => n.id === nodeId);
-      if (childNode) {
-        let childContent: string | undefined;
-        if (childNode.type === "file") {
-          try {
-            const { data } = await supabase
-              .from("file_contents")
-              .select("text")
-              .eq("node_id", nodeId)
-              .single();
-            childContent = data?.text;
-          } catch {
-            // ignore
-          }
-        }
-        children.push({ node: childNode, content: childContent });
-      }
-    }
-
-    setNodes(prev => prev.filter(n => !idsToDelete.has(n.id)));
-
-    // タブからも削除
-    setOpenTabs(prev => prev.filter(tabId => !idsToDelete.has(tabId)));
-    if (activeNodeId && idsToDelete.has(activeNodeId)) {
+    // 即座にUIから削除（楽観的更新）
+    setNodes(prev => prev.filter(n => !allIdsToDelete.has(n.id)));
+    setOpenTabs(prev => prev.filter(tabId => !allIdsToDelete.has(tabId)));
+    if (activeNodeId && allIdsToDelete.has(activeNodeId)) {
       setActiveNodeId(null);
     }
     setSelectedNodeIds(prev => {
       const next = new Set(prev);
-      idsToDelete.forEach((nodeId) => next.delete(nodeId));
+      allIdsToDelete.forEach((nodeId) => next.delete(nodeId));
       return next;
     });
 
-    try {
-      const res = await fetch("/api/files", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "delete_node", id }),
-      });
-      if (!res.ok) throw new Error("Failed to delete");
-      // Push undo action for delete
-      pushUndoAction({
-        type: "delete",
-        nodeId: id,
-        node: nodeToDelete,
-        content,
-        children: children.length > 0 ? children : undefined,
-      });
-    } catch (error: any) {
-      // 失敗したらロールバック
-      setNodes(oldNodes);
-      alert(`Error: ${error.message}`);
-    }
+    // バックグラウンドでAPI削除を並列実行
+    (async () => {
+      try {
+        // 並列削除
+        await Promise.all(ids.map(id =>
+          fetch("/api/files", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "delete_node", id }),
+          })
+        ));
+
+        // undo用のコンテンツ取得（単一ノード削除の場合のみ）
+        if (nodesToDelete.length === 1) {
+          const nodeToDelete = nodesToDelete[0];
+          let content: string | undefined;
+          const allChildren: { node: Node; content?: string }[] = [];
+
+          if (nodeToDelete.type === "file") {
+            try {
+              const { data } = await supabase
+                .from("file_contents")
+                .select("text")
+                .eq("node_id", nodeToDelete.id)
+                .single();
+              content = data?.text;
+            } catch {
+              // ignore
+            }
+          }
+
+          // 子ノードのコンテンツも取得
+          for (const nodeId of allIdsToDelete) {
+            if (nodeId === nodeToDelete.id) continue;
+            const childNode = oldNodes.find(n => n.id === nodeId);
+            if (childNode) {
+              let childContent: string | undefined;
+              if (childNode.type === "file") {
+                try {
+                  const { data } = await supabase
+                    .from("file_contents")
+                    .select("text")
+                    .eq("node_id", nodeId)
+                    .single();
+                  childContent = data?.text;
+                } catch {
+                  // ignore
+                }
+              }
+              allChildren.push({ node: childNode, content: childContent });
+            }
+          }
+
+          pushUndoAction({
+            type: "delete",
+            nodeId: nodeToDelete.id,
+            node: nodeToDelete,
+            content,
+            children: allChildren.length > 0 ? allChildren : undefined,
+          });
+        }
+      } catch (error: any) {
+        // 失敗したらロールバック
+        setNodes(oldNodes);
+        console.error("Delete failed:", error);
+      }
+    })();
   };
 
   const handleOpenNode = (nodeId: string) => {
@@ -1248,6 +1487,17 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     return binaryExtensions.includes(ext);
   };
 
+  const shouldIgnoreUploadPath = (relativePath: string, isDirectory: boolean): boolean => {
+    const normalized = relativePath.replace(/\\/g, "/").replace(/^\/+/, "");
+    if (!normalized) return false;
+    const parts = normalized.split("/");
+    if (parts.some((part) => part === "__MACOSX")) return true;
+    const name = parts[parts.length - 1];
+    if (name === ".DS_Store") return true;
+    if (!isDirectory && name.startsWith("._")) return true;
+    return false;
+  };
+
   // Read file as base64 for binary files, text for others
   const readFileContent = async (file: File): Promise<string> => {
     if (isBinaryFile(file.name)) {
@@ -1265,7 +1515,24 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     }
   };
 
-  const uploadFileToSignedUrl = useCallback((uploadUrl: string, file: File, onProgress: (percent: number | null) => void) => {
+  const hasUnsupportedJsonUnicode = (text: string): boolean => {
+    for (let i = 0; i < text.length; i += 1) {
+      const code = text.charCodeAt(i);
+      if (code === 0x0000) return true;
+      if (code >= 0xD800 && code <= 0xDBFF) {
+        const next = text.charCodeAt(i + 1);
+        if (next >= 0xDC00 && next <= 0xDFFF) {
+          i += 1;
+          continue;
+        }
+        return true;
+      }
+      if (code >= 0xDC00 && code <= 0xDFFF) return true;
+    }
+    return false;
+  };
+
+  const uploadFileToSignedUrl = useCallback((uploadUrl: string, file: File | Blob, onProgress: (percent: number | null) => void) => {
     return new Promise<void>((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       xhr.open("PUT", uploadUrl);
@@ -1292,15 +1559,88 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     });
   }, []);
 
+  // Check if a file/folder with the same name exists in the target folder
+  const findExistingNode = useCallback((name: string, parentId: string | null): Node | undefined => {
+    return nodes.find(n => n.name === name && n.parent_id === parentId);
+  }, [nodes]);
+
+  // Prompt user for replace confirmation
+  const promptReplaceConfirmation = useCallback((fileName: string, isFolder: boolean, existingNodeId: string): Promise<boolean> => {
+    return new Promise((resolve) => {
+      setReplaceDialog({
+        isOpen: true,
+        fileName,
+        isFolder,
+        existingNodeId,
+        resolve,
+      });
+    });
+  }, []);
+
+  // Handle replace dialog response
+  const handleReplaceDialogResponse = useCallback(async (replace: boolean) => {
+    const { resolve, existingNodeId } = replaceDialog;
+
+    // Close dialog immediately
+    setReplaceDialog({
+      isOpen: false,
+      fileName: "",
+      isFolder: false,
+      existingNodeId: "",
+      resolve: null,
+    });
+
+    if (replace && existingNodeId) {
+      // Helper to get all descendant IDs recursively
+      const getDescendantIds = (parentId: string, allNodes: Node[]): string[] => {
+        const result: string[] = [];
+        const children = allNodes.filter(n => n.parent_id === parentId);
+        for (const child of children) {
+          result.push(child.id);
+          result.push(...getDescendantIds(child.id, allNodes));
+        }
+        return result;
+      };
+
+      // Get all IDs to remove (existing node + all descendants)
+      const idsToRemove = new Set([existingNodeId, ...getDescendantIds(existingNodeId, nodes)]);
+
+      // Optimistic: Update local state immediately (including all descendants)
+      setNodes(prev => prev.filter(n => !idsToRemove.has(n.id)));
+      setOpenTabs(prev => prev.filter(id => !idsToRemove.has(id)));
+      if (activeNodeId && idsToRemove.has(activeNodeId)) {
+        setActiveNodeId(null);
+      }
+
+      // Wait for delete to complete before resolving
+      try {
+        await fetch("/api/files", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "delete_node",
+            id: existingNodeId,
+          }),
+        });
+      } catch (error) {
+        console.error("Error deleting existing file:", error);
+      }
+    }
+
+    // Resolve after delete is complete
+    resolve?.(replace);
+  }, [replaceDialog, activeNodeId, nodes]);
+
   const uploadFiles = useCallback(async (files: File[], parentId: string | null) => {
-    if (!files.length) return;
+    const filteredFiles = files.filter((file) => !shouldIgnoreUploadPath(file.name, false));
+    if (!filteredFiles.length) return;
     const parentPath = parentId ? pathByNodeId.get(parentId) || "" : "";
 
     // Threshold for using Storage (2MB for binary, 5MB for text)
     const STORAGE_THRESHOLD_BINARY = 2 * 1024 * 1024;
     const STORAGE_THRESHOLD_TEXT = 5 * 1024 * 1024;
 
-    const filesArray = Array.from(files);
+    const filesArray = Array.from(filteredFiles);
     const lastFile = filesArray[filesArray.length - 1];
     let lastTempId: string | null = null;
     let lastFinalId: string | null = null;
@@ -1317,7 +1657,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       const useStorage = isBinary || file.size > (isBinary ? STORAGE_THRESHOLD_BINARY : STORAGE_THRESHOLD_TEXT);
       const shouldFocus = file === lastFile;
 
-      // Create the file node optimistically
+      // Create the file node optimistically FIRST (before any dialog)
       const tempId = `temp-${Date.now()}-${Math.random()}`;
       if (file === lastFile) {
         lastTempId = tempId;
@@ -1331,13 +1671,61 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         created_at: new Date().toISOString(),
       };
 
-      setNodes(prev => [...prev, tempNode]);
-      uploadSelection.add(tempId);
-      syncSelection();
-      setOpenTabs(prev => (prev.includes(tempId) ? prev : [...prev, tempId]));
-      if (shouldFocus) {
-        setActiveNodeId(tempId);
-        setRevealNodeId(tempId);
+      // Check for existing file with same name
+      const existingNode = findExistingNode(fileName, parentId);
+      if (existingNode) {
+        // Immediately update UI: remove existing, add temp (instant feedback)
+        setNodes(prev => [...prev.filter(n => n.id !== existingNode.id), tempNode]);
+        uploadSelection.add(tempId);
+        syncSelection();
+        setOpenTabs(prev => {
+          const filtered = prev.filter(id => id !== existingNode.id);
+          return filtered.includes(tempId) ? filtered : [...filtered, tempId];
+        });
+        if (shouldFocus) {
+          setActiveNodeId(tempId);
+          setRevealNodeId(tempId);
+        }
+
+        // Now show dialog (UI already updated)
+        const shouldReplace = await promptReplaceConfirmation(fileName, existingNode.type === "folder", existingNode.id);
+        if (!shouldReplace) {
+          // Restore existing node and remove temp
+          setNodes(prev => [...prev.filter(n => n.id !== tempId), existingNode]);
+          uploadSelection.delete(tempId);
+          syncSelection();
+          setOpenTabs(prev => prev.filter(id => id !== tempId));
+          if (activeNodeId === tempId) {
+            setActiveNodeId(null);
+          }
+          return; // Skip this file
+        }
+        // Continue with upload (temp node already in place)
+      } else {
+        // No existing node, just add temp
+        setNodes(prev => [...prev, tempNode]);
+        uploadSelection.add(tempId);
+        syncSelection();
+        setOpenTabs(prev => (prev.includes(tempId) ? prev : [...prev, tempId]));
+        if (shouldFocus) {
+          setActiveNodeId(tempId);
+          setRevealNodeId(tempId);
+        }
+      }
+
+      let uploadToStorage = useStorage;
+      let textContent: string | null = null;
+      if (!uploadToStorage) {
+        try {
+          const contentCandidate = await readFileContent(file);
+          if (hasUnsupportedJsonUnicode(contentCandidate)) {
+            uploadToStorage = true;
+          } else {
+            textContent = contentCandidate;
+          }
+        } catch {
+          uploadToStorage = true;
+        }
       }
 
       let createdNodeId: string | null = null;
@@ -1345,7 +1733,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       try {
         let newId: string;
 
-        if (useStorage) {
+        if (uploadToStorage) {
           // Use signed URL approach for large/binary files
           // Step 1: Get signed upload URL
           const createUrlRes = await fetch("/api/storage/create-upload-url", {
@@ -1395,7 +1783,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
           newId = createUrlResult.nodeId;
         } else {
           // Use regular JSON API for small text files
-          const content = await readFileContent(file);
+          const content = textContent ?? "";
           const fullPath = parentPath ? `${parentPath}/${fileName}` : fileName;
 
           const res = await fetch("/api/files", {
@@ -1490,7 +1878,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         setRevealNodeId(finalId);
       }
     }
-  }, [projectId, supabase, pathByNodeId, uploadFileToSignedUrl, runWithConcurrency]);
+  }, [projectId, supabase, pathByNodeId, uploadFileToSignedUrl, runWithConcurrency, findExistingNode, promptReplaceConfirmation]);
 
   const uploadFolderItems = useCallback(async (items: UploadItem[], parentId: string | null) => {
     if (items.length === 0) return;
@@ -1535,7 +1923,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
             action: "create_folder",
             path: fullPath,
             projectId,
-            parentId,
+            // Don't pass parentId - let API use ensureParentFolders to resolve from path
           }),
         });
         const result = await res.json().catch(() => ({}));
@@ -1564,18 +1952,188 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       return aDepth - bDepth;
     });
 
-    const uploadOne = async (item: UploadItem) => {
+    // Pre-read all file contents BEFORE showing any dialogs to avoid file reference expiration
+    const preReadContents = new Map<string, { content: string; blob: Blob | null; useStorage: boolean; contentType: string }>();
+    await Promise.all(sortedItems.filter(item => !item.isDirectory && item.file).map(async (item) => {
       const normalized = item.relativePath.replace(/\\/g, "/").replace(/^\/+/, "");
-      const parts = normalized.split("/");
-      const fileName = parts.pop() || item.file.name;
-      const folderPath = parts.join("/");
-      const fullPath = baseParentPath ? `${baseParentPath}/${normalized}` : normalized;
+      const fileName = normalized.split("/").pop() || item.file.name;
       const isBinary = isBinaryFile(fileName);
       const useStorage = isBinary || item.file.size > (isBinary ? STORAGE_THRESHOLD_BINARY : STORAGE_THRESHOLD_TEXT);
-      let createdNodeId: string | null = null;
+      const contentType = item.file.type || "application/octet-stream";
 
       try {
         if (useStorage) {
+          // Read file as blob for storage uploads
+          const arrayBuffer = await item.file.arrayBuffer();
+          const blob = new Blob([arrayBuffer], { type: contentType });
+          preReadContents.set(normalized, { content: "", blob, useStorage: true, contentType });
+        } else {
+          // Try to read text content, fall back to storage if it fails
+          try {
+            const content = await readFileContent(item.file);
+            if (hasUnsupportedJsonUnicode(content)) {
+              throw new Error("Unsupported Unicode in text content");
+            }
+            preReadContents.set(normalized, { content, blob: null, useStorage: false, contentType });
+          } catch {
+            // Text reading failed (invalid encoding), use storage instead
+            const arrayBuffer = await item.file.arrayBuffer();
+            const blob = new Blob([arrayBuffer], { type: contentType });
+            preReadContents.set(normalized, { content: "", blob, useStorage: true, contentType });
+          }
+        }
+      } catch (error) {
+        console.error(`Failed to pre-read file ${normalized}:`, error);
+      }
+    }));
+
+    // Create temp nodes immediately for instant UI feedback (BEFORE replace dialog)
+    const tempIdByPath = new Map<string, string>();
+    const tempNodes: Node[] = [];
+
+    for (const item of sortedItems) {
+      const normalized = item.relativePath.replace(/\\/g, "/").replace(/^\/+/, "");
+      const tempId = `temp-folder-${Date.now()}-${Math.random()}`;
+      tempIdByPath.set(normalized, tempId);
+
+      // Determine parent temp ID
+      const parts = normalized.split("/");
+      const name = parts.pop() || "";
+      const parentPath = parts.join("/");
+      const tempParentId = parentPath ? tempIdByPath.get(parentPath) || parentId : parentId;
+
+      tempNodes.push({
+        id: tempId,
+        project_id: projectId,
+        parent_id: tempParentId,
+        type: item.isDirectory ? "folder" : "file",
+        name,
+        created_at: new Date().toISOString(),
+      });
+    }
+
+    // Find existing nodes that will be replaced
+    const existingNodesToReplace: Node[] = [];
+    for (const rootName of rootNames) {
+      const existingNode = findExistingNode(rootName, parentId);
+      if (existingNode) {
+        existingNodesToReplace.push(existingNode);
+      }
+    }
+
+    // Helper to get all descendant IDs recursively
+    const getDescendantIds = (parentId: string, allNodes: Node[]): string[] => {
+      const result: string[] = [];
+      const children = allNodes.filter(n => n.parent_id === parentId);
+      for (const child of children) {
+        result.push(child.id);
+        result.push(...getDescendantIds(child.id, allNodes));
+      }
+      return result;
+    };
+
+    // Remove existing nodes AND all their descendants, then add temp nodes
+    const existingRootIds = new Set(existingNodesToReplace.map(n => n.id));
+    setNodes(prev => {
+      // Calculate all IDs to remove (root nodes + all descendants)
+      const idsToRemove = new Set<string>();
+      for (const existingNode of existingNodesToReplace) {
+        idsToRemove.add(existingNode.id);
+        for (const descId of getDescendantIds(existingNode.id, prev)) {
+          idsToRemove.add(descId);
+        }
+      }
+      return [...prev.filter(n => !idsToRemove.has(n.id)), ...tempNodes];
+    });
+
+    // Also remove any open tabs for replaced items and their descendants
+    if (existingNodesToReplace.length > 0) {
+      setOpenTabs(prev => {
+        const idsToRemove = new Set<string>();
+        for (const existingNode of existingNodesToReplace) {
+          idsToRemove.add(existingNode.id);
+          for (const descId of getDescendantIds(existingNode.id, nodes)) {
+            idsToRemove.add(descId);
+          }
+        }
+        return prev.filter(id => !idsToRemove.has(id));
+      });
+      // Check if active node is being removed
+      const allIdsToRemove = new Set<string>();
+      for (const existingNode of existingNodesToReplace) {
+        allIdsToRemove.add(existingNode.id);
+        for (const descId of getDescendantIds(existingNode.id, nodes)) {
+          allIdsToRemove.add(descId);
+        }
+      }
+      if (activeNodeId && allIdsToRemove.has(activeNodeId)) {
+        setActiveNodeId(null);
+      }
+    }
+
+    // Check for existing root folders/files with the same names (UI already updated)
+    const tempIdsSet = new Set(tempIdByPath.values());
+    for (const existingNode of existingNodesToReplace) {
+      const shouldReplace = await promptReplaceConfirmation(existingNode.name, existingNode.type === "folder", existingNode.id);
+      if (!shouldReplace) {
+        // Restore all existing nodes and remove all temp nodes
+        setNodes(prev => [...prev.filter(n => !tempIdsSet.has(n.id)), ...existingNodesToReplace]);
+        return; // Cancel entire folder upload
+      }
+      // Clear deleted folder paths from cache to ensure new folders are created
+      const existingPath = pathByNodeId.get(existingNode.id);
+      if (existingPath) {
+        // Remove the deleted folder and all its child paths from cache
+        for (const [path] of folderIdByPath) {
+          if (path === existingPath || path.startsWith(existingPath + "/")) {
+            folderIdByPath.delete(path);
+          }
+        }
+      }
+    }
+
+    // Select and reveal the root folder
+    if (rootFolderName) {
+      const rootPath = rootFolderName;
+      const rootTempId = tempIdByPath.get(rootPath);
+      if (rootTempId) {
+        setSelectedNodeIds(new Set([rootTempId]));
+        setRevealNodeId(rootTempId);
+      }
+    }
+
+    // Track temp IDs to remove later
+    const tempIdsToRemove = new Set(tempIdByPath.values());
+
+    const uploadOne = async (item: UploadItem) => {
+      const normalized = item.relativePath.replace(/\\/g, "/").replace(/^\/+/, "");
+      const fullPath = baseParentPath ? `${baseParentPath}/${normalized}` : normalized;
+
+      // Handle directory entries - just ensure the folder exists
+      if (item.isDirectory) {
+        try {
+          await ensureFolderId(fullPath);
+        } catch (error: any) {
+          console.error(`Folder creation error: ${error.message}`);
+        }
+        return;
+      }
+
+      const parts = normalized.split("/");
+      const fileName = parts.pop() || item.file.name;
+      const folderPath = parts.join("/");
+
+      // Get pre-read content
+      const preRead = preReadContents.get(normalized);
+      if (!preRead) {
+        console.error(`No pre-read content for ${normalized}`);
+        return;
+      }
+
+      let createdNodeId: string | null = null;
+
+      try {
+        if (preRead.useStorage) {
           let targetParentId = parentId;
           if (folderPath) {
             const fullFolderPath = baseParentPath ? `${baseParentPath}/${folderPath}` : folderPath;
@@ -1589,7 +2147,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
               projectId,
               parentId: targetParentId || null,
               fileName,
-              contentType: item.file.type || "application/octet-stream",
+              contentType: preRead.contentType,
             }),
           });
 
@@ -1602,7 +2160,10 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
             throw new Error("Invalid upload URL response");
           }
 
-          await uploadFileToSignedUrl(createUrlResult.uploadUrl, item.file, () => {});
+          // Use pre-read blob instead of original file
+          if (preRead.blob) {
+            await uploadFileToSignedUrl(createUrlResult.uploadUrl, preRead.blob, () => {});
+          }
 
           const confirmRes = await fetch("/api/storage/confirm-upload", {
             method: "POST",
@@ -1619,14 +2180,14 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
           }
           lastCreatedNodeId = createUrlResult.nodeId;
         } else {
-          const content = await readFileContent(item.file);
+          // Use pre-read text content
           const res = await fetch("/api/files", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               action: "create_file",
               path: fullPath,
-              content,
+              content: preRead.content,
               projectId,
             }),
           });
@@ -1653,7 +2214,10 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
 
     await runWithConcurrency(sortedItems, sortedItems.length, uploadOne);
 
+    // Remove temp nodes and fetch real nodes
     const refreshedNodes = await fetchNodes();
+    setNodes(prev => prev.filter(n => !tempIdsToRemove.has(n.id)));
+
     if (rootFolderName) {
       const folderNode = refreshedNodes.find((node: Node) =>
         node.type === "folder" &&
@@ -1672,7 +2236,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     if (lastCreatedNodeId) {
       handleOpenNode(lastCreatedNodeId);
     }
-  }, [activeActivity, fetchNodes, handleOpenNode, nodes, pathByNodeId, projectId, runWithConcurrency, supabase, uploadFileToSignedUrl]);
+  }, [activeActivity, fetchNodes, handleOpenNode, nodes, pathByNodeId, projectId, runWithConcurrency, supabase, uploadFileToSignedUrl, findExistingNode, promptReplaceConfirmation]);
 
   const handleFileInputChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -1692,10 +2256,40 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     if (!files || files.length === 0) return;
 
     const parentId = uploadTargetParentId;
-    const items: UploadItem[] = Array.from(files).map((file) => ({
-      file,
-      relativePath: file.webkitRelativePath || file.name,
+
+    // Collect all unique folder paths from file paths
+    const folderPaths = new Set<string>();
+    const fileItems: UploadItem[] = [];
+
+    Array.from(files).forEach((file) => {
+      const relativePath = file.webkitRelativePath || file.name;
+      if (shouldIgnoreUploadPath(relativePath, false)) {
+        return;
+      }
+      fileItems.push({ file, relativePath });
+
+      // Extract folder paths
+      const parts = relativePath.replace(/\\/g, "/").split("/");
+      parts.pop(); // Remove filename
+      let currentPath = "";
+      for (const part of parts) {
+        currentPath = currentPath ? `${currentPath}/${part}` : part;
+        folderPaths.add(currentPath);
+      }
+    });
+
+    // Create folder entries (sorted by depth so parents are created first)
+    const sortedFolderPaths = Array.from(folderPaths).sort((a, b) =>
+      a.split("/").length - b.split("/").length
+    );
+    const folderItems: UploadItem[] = sortedFolderPaths.map((path) => ({
+      file: new File([], path.split("/").pop() || ""),
+      relativePath: path,
+      isDirectory: true,
     }));
+
+    // Combine folder and file items (folders first, sorted by depth)
+    const items = [...folderItems, ...fileItems];
     await uploadFolderItems(items, parentId);
 
     if (folderInputRef.current) {
@@ -1709,9 +2303,13 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     let hasDirectories = false;
 
     const traverseEntry = async (entry: WebkitEntry, pathPrefix: string): Promise<UploadItem[]> => {
+      const entryPath = pathPrefix ? `${pathPrefix}/${entry.name}` : entry.name;
+      if (shouldIgnoreUploadPath(entryPath, entry.isDirectory)) {
+        return [];
+      }
       if (entry.isFile && entry.file) {
         const file = await new Promise<File>((resolve, reject) => entry.file?.(resolve, reject));
-        const relativePath = pathPrefix ? `${pathPrefix}/${file.name}` : file.name;
+        const relativePath = entryPath || file.name;
         return [{ file, relativePath }];
       }
       if (entry.isDirectory && entry.createReader) {
@@ -1727,9 +2325,15 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
           entries.push(...batch);
         }
 
-        const nextPrefix = pathPrefix ? `${pathPrefix}/${entry.name}` : entry.name;
+        const nextPrefix = entryPath;
         const nested = await Promise.all(entries.map((child) => traverseEntry(child, nextPrefix)));
-        return nested.flat();
+        const result = nested.flat();
+
+        // Include directory entry (even if empty) so folder structure is preserved
+        const dummyFile = new File([], entry.name);
+        result.unshift({ file: dummyFile, relativePath: nextPrefix, isDirectory: true });
+
+        return result;
       }
       return [];
     };
@@ -1744,8 +2348,9 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     }
 
     const files = Array.from(dataTransfer.files || []);
+    const filteredFiles = files.filter((file) => !shouldIgnoreUploadPath(file.name, false));
     return {
-      items: files.map((file) => ({ file, relativePath: file.name })),
+      items: filteredFiles.map((file) => ({ file, relativePath: file.name })),
       hasDirectories: false,
     };
   }, []);
@@ -3010,7 +3615,7 @@ ${diffs}`;
               onCreateFile={handleCreateFile}
             onCreateFolder={handleCreateFolder}
             onRenameNode={handleRenameNode}
-            onDeleteNode={handleDeleteNode}
+            onDeleteNodes={handleDeleteNodes}
             onUploadFiles={handleUploadFiles}
             onUploadFolder={handleUploadFolder}
             onDownload={handleDownload}
@@ -3146,6 +3751,15 @@ ${diffs}`;
             </div>
           </div>
         )}
+
+        {/* ファイル/フォルダ置換確認ダイアログ */}
+        <ReplaceConfirmDialog
+          isOpen={replaceDialog.isOpen}
+          fileName={replaceDialog.fileName}
+          isFolder={replaceDialog.isFolder}
+          onReplace={() => handleReplaceDialogResponse(true)}
+          onCancel={() => handleReplaceDialogResponse(false)}
+        />
 
         <main className="flex-1 flex flex-col min-w-0 bg-white">
           <TabBar

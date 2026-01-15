@@ -44,6 +44,10 @@ create table if not exists public.file_contents (
   updated_at timestamp with time zone default timezone('utc'::text, now()) not null
 );
 
+-- Performance indexes
+create index if not exists nodes_project_id_id_idx on public.nodes (project_id, id);
+create index if not exists nodes_parent_id_idx on public.nodes (parent_id);
+
 -- New tables for Chat History
 create table if not exists public.chat_sessions (
   id uuid default uuid_generate_v4() primary key,

@@ -14,22 +14,45 @@ export async function POST(req: NextRequest) {
       }, { status: 400 });
     }
 
-    // Create the node first
-    const { data: node, error: nodeError } = await supabase
+    // Check for existing file with same name and parent
+    let existingFileQuery = supabase
       .from("nodes")
-      .insert({
-        project_id: projectId,
-        type: "file",
-        name: fileName,
-        parent_id: parentId || null,
-      })
-      .select()
-      .single();
+      .select("id")
+      .eq("project_id", projectId)
+      .eq("type", "file")
+      .eq("name", fileName);
 
-    if (nodeError) {
-      return NextResponse.json({
-        error: `Failed to create node: ${nodeError.message}`
-      }, { status: 500 });
+    if (parentId) {
+      existingFileQuery = existingFileQuery.eq("parent_id", parentId);
+    } else {
+      existingFileQuery = existingFileQuery.is("parent_id", null);
+    }
+
+    const { data: existingFile } = await existingFileQuery.maybeSingle();
+
+    let node;
+    if (existingFile) {
+      // Use existing file node
+      node = existingFile;
+    } else {
+      // Create the node first
+      const { data: newNode, error: nodeError } = await supabase
+        .from("nodes")
+        .insert({
+          project_id: projectId,
+          type: "file",
+          name: fileName,
+          parent_id: parentId || null,
+        })
+        .select()
+        .single();
+
+      if (nodeError) {
+        return NextResponse.json({
+          error: `Failed to create node: ${nodeError.message}`
+        }, { status: 500 });
+      }
+      node = newNode;
     }
 
     // Create the storage path
@@ -41,8 +64,10 @@ export async function POST(req: NextRequest) {
       .createSignedUploadUrl(storagePath);
 
     if (urlError) {
-      // Rollback - delete the node
-      await supabase.from("nodes").delete().eq("id", node.id);
+      // Rollback - delete the node only if we created it
+      if (!existingFile) {
+        await supabase.from("nodes").delete().eq("id", node.id);
+      }
       return NextResponse.json({
         error: `Failed to create upload URL: ${urlError.message}`
       }, { status: 500 });

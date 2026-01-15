@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { ContextMenu } from "./ContextMenu";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { ActionIcons, ChevronIcon, FileIcons, getFileIcon, getFolderColor } from "./fileIcons";
@@ -25,7 +25,7 @@ type FileTreeProps = {
   onCreateFile: (path: string, parentId: string | null) => void;
   onCreateFolder: (path: string, parentId: string | null) => void;
   onRenameNode: (id: string, newName: string) => void;
-  onDeleteNode: (id: string) => void;
+  onDeleteNodes: (ids: string[]) => void;
   onUploadFiles?: (parentId: string | null) => void;
   onUploadFolder?: (parentId: string | null) => void;
   onDownload?: (nodeIds: string[]) => void;
@@ -33,7 +33,7 @@ type FileTreeProps = {
   onShare?: () => void;
   onDropFiles?: (dataTransfer: DataTransfer, targetFolderId: string | null) => void;
   onMoveNodes?: (nodeIds: string[], newParentId: string | null) => void;
-  onCopyNodes?: (nodeIds: string[], newParentId: string | null) => void;
+  onCopyNodes?: (nodeIds: string[], newParentId: string | null) => Promise<string[]> | void;
   onUndo?: () => void;
   onRedo?: () => void;
   projectName?: string;
@@ -59,6 +59,14 @@ type DropdownMenu = {
   x: number;
   y: number;
 } | null;
+
+type VisibleRow =
+  | { kind: "node"; node: Node; depth: number }
+  | { kind: "create"; nodeType: "file" | "folder"; depth: number; parentId: string | null };
+
+const ROW_HEIGHT = 28;
+const OVERSCAN = 8;
+const BOTTOM_GAP = 40;
 
 // Loading skeleton component
 function FileTreeSkeleton() {
@@ -110,7 +118,7 @@ export function FileTree({
   onCreateFile,
   onCreateFolder,
   onRenameNode,
-  onDeleteNode,
+  onDeleteNodes,
   onUploadFiles,
   onUploadFolder,
   onDownload,
@@ -155,11 +163,11 @@ export function FileTree({
   // Delete confirmation dialog state
   const [confirmDialog, setConfirmDialog] = useState<{
     isOpen: boolean;
-    targetId: string | null;
+    targetIds: string[];
     targetName: string;
   }>({
     isOpen: false,
-    targetId: null,
+    targetIds: [],
     targetName: "",
   });
 
@@ -173,8 +181,152 @@ export function FileTree({
   const [isEditingWorkspaceName, setIsEditingWorkspaceName] = useState(false);
   const [workspaceNameValue, setWorkspaceNameValue] = useState("");
   const workspaceNameInputRef = useRef<HTMLInputElement>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(0);
+  const scrollRafRef = useRef<number | null>(null);
 
   const nodeMap = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
+  const nameCollator = useMemo(
+    () => new Intl.Collator(undefined, { numeric: true, sensitivity: "base" }),
+    []
+  );
+  const nodesByParentId = useMemo(() => {
+    const map = new Map<string | null, Node[]>();
+    for (const node of nodes) {
+      const key = node.parent_id ?? null;
+      const list = map.get(key);
+      if (list) {
+        list.push(node);
+      } else {
+        map.set(key, [node]);
+      }
+    }
+    for (const list of map.values()) {
+      list.sort((a, b) => {
+        if (a.type !== b.type) return a.type === "folder" ? -1 : 1;
+        return nameCollator.compare(a.name, b.name);
+      });
+    }
+    return map;
+  }, [nodes, nameCollator]);
+
+  const handleScroll = useCallback(() => {
+    const container = treeScrollRef.current;
+    if (!container) return;
+    const nextTop = container.scrollTop;
+    if (scrollRafRef.current !== null) {
+      cancelAnimationFrame(scrollRafRef.current);
+    }
+    scrollRafRef.current = requestAnimationFrame(() => {
+      scrollRafRef.current = null;
+      setScrollTop(nextTop);
+    });
+  }, []);
+
+  useEffect(() => {
+    const container = treeScrollRef.current;
+    if (!container) return;
+    const updateSize = () => {
+      setViewportHeight(container.clientHeight);
+    };
+    updateSize();
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, []);
+
+  const visibleRows = useMemo<VisibleRow[]>(() => {
+    if (projectName && !isProjectExpanded) return [];
+    const rows: VisibleRow[] = [];
+    const buildRows = (parentId: string | null, depth: number) => {
+      const children = nodesByParentId.get(parentId ?? null) ?? [];
+      const folders: Node[] = [];
+      const files: Node[] = [];
+      for (const child of children) {
+        if (child.type === "folder") {
+          folders.push(child);
+        } else {
+          files.push(child);
+        }
+      }
+
+      const isCreatingHere =
+        editingState?.type === "create" && editingState.parentId === parentId;
+
+      if (isCreatingHere && editingState?.nodeType === "folder") {
+        rows.push({ kind: "create", nodeType: "folder", depth, parentId });
+      }
+
+      for (const folder of folders) {
+        rows.push({ kind: "node", node: folder, depth });
+        if (expandedFolders.has(folder.id)) {
+          buildRows(folder.id, depth + 1);
+        }
+      }
+
+      if (isCreatingHere && editingState?.nodeType === "file") {
+        rows.push({ kind: "create", nodeType: "file", depth, parentId });
+      }
+
+      for (const file of files) {
+        rows.push({ kind: "node", node: file, depth });
+      }
+    };
+
+    buildRows(null, 0);
+    return rows;
+  }, [editingState, expandedFolders, nodesByParentId, projectName, isProjectExpanded]);
+
+  const rowIndexByNodeId = useMemo(() => {
+    const map = new Map<string, number>();
+    visibleRows.forEach((row, index) => {
+      if (row.kind === "node") {
+        map.set(row.node.id, index);
+      }
+    });
+    return map;
+  }, [visibleRows]);
+
+  const editRowIndex = useMemo(() => {
+    if (!editingState || editingState.type !== "create") return null;
+    for (let i = 0; i < visibleRows.length; i += 1) {
+      const row = visibleRows[i];
+      if (
+        row.kind === "create" &&
+        row.parentId === editingState.parentId &&
+        row.nodeType === editingState.nodeType
+      ) {
+        return i;
+      }
+    }
+    return null;
+  }, [editingState, visibleRows]);
+
+  const scrollToRowIndex = useCallback((index: number) => {
+    const container = treeScrollRef.current;
+    if (!container) return;
+    const rowTop = index * ROW_HEIGHT;
+    const rowBottom = rowTop + ROW_HEIGHT;
+    const viewTop = container.scrollTop;
+    const viewBottom = viewTop + container.clientHeight;
+    if (rowTop < viewTop) {
+      container.scrollTop = rowTop;
+    } else if (rowBottom > viewBottom) {
+      container.scrollTop = Math.max(0, rowBottom - container.clientHeight);
+    }
+  }, []);
+
+  const totalRowsHeight = visibleRows.length * ROW_HEIGHT;
+  const maxScrollTop = Math.max(0, totalRowsHeight - viewportHeight);
+  const clampedScrollTop = Math.min(scrollTop, maxScrollTop);
+  const startIndex = Math.max(0, Math.floor(clampedScrollTop / ROW_HEIGHT) - OVERSCAN);
+  const endIndex = Math.min(
+    visibleRows.length,
+    Math.ceil((clampedScrollTop + viewportHeight) / ROW_HEIGHT) + OVERSCAN
+  );
+  const visibleSlice = visibleRows.slice(startIndex, endIndex);
+  const topPadding = startIndex * ROW_HEIGHT;
+  const bottomPadding = Math.max(0, totalRowsHeight - endIndex * ROW_HEIGHT);
 
   useEffect(() => {
     if (!revealNodeId) return;
@@ -190,27 +342,14 @@ export function FileTree({
       }
       return next;
     });
-    let cancelled = false;
-    let attempts = 0;
-    const tryScroll = () => {
-      if (cancelled) return;
-      const container = treeScrollRef.current;
-      if (!container) return;
-      const el = container.querySelector<HTMLElement>(`[data-node-id="${revealNodeId}"]`);
-      if (el) {
-        el.scrollIntoView({ block: "nearest" });
-        return;
-      }
-      if (attempts < 6) {
-        attempts += 1;
-        requestAnimationFrame(tryScroll);
-      }
-    };
-    requestAnimationFrame(tryScroll);
-    return () => {
-      cancelled = true;
-    };
   }, [revealNodeId, nodeMap]);
+
+  useEffect(() => {
+    if (!revealNodeId) return;
+    const index = rowIndexByNodeId.get(revealNodeId);
+    if (index === undefined) return;
+    scrollToRowIndex(index);
+  }, [revealNodeId, rowIndexByNodeId, scrollToRowIndex]);
 
   // Get the selected folder (for creating files/folders in it)
   const getSelectedParentId = (): string | null => {
@@ -234,10 +373,9 @@ export function FileTree({
     const trimmedName = name.trim().toLowerCase();
     if (!trimmedName) return false;
 
-    return nodes.some(n =>
-      n.parent_id === parentId &&
-      n.name.toLowerCase() === trimmedName &&
-      n.id !== excludeId
+    const siblings = nodesByParentId.get(parentId ?? null) ?? [];
+    return siblings.some(
+      (n) => n.name.toLowerCase() === trimmedName && n.id !== excludeId
     );
   };
 
@@ -264,32 +402,53 @@ export function FileTree({
   }, []);
 
   useEffect(() => {
-    if (editingState && inputRef.current) {
-      const value = editingState.initialValue || "";
-      setInputValue(value);
-      setValidationError(null);
+    if (!editingState) return;
+    const value = editingState.initialValue || "";
+    setInputValue(value);
+    setValidationError(null);
 
-      // Wait for DOM to update with the new value, then focus and select
-      setTimeout(() => {
-        if (!inputRef.current) return;
-        inputRef.current.focus();
+    let attempts = 0;
+    const tryFocus = () => {
+      if (!inputRef.current) {
+        if (attempts < 30) {
+          attempts += 1;
+          requestAnimationFrame(tryFocus);
+        }
+        return;
+      }
 
-        // For rename operation on files, select only the basename (before extension)
-        if (editingState.type === "rename" && editingState.nodeType === "file") {
-          const lastDotIndex = value.lastIndexOf(".");
-          // Only select basename if there's an extension (dot not at start or end)
-          if (lastDotIndex > 0 && lastDotIndex < value.length - 1) {
-            inputRef.current.setSelectionRange(0, lastDotIndex);
-          } else {
-            inputRef.current.select();
-          }
+      inputRef.current.focus();
+
+      // For rename operation on files, select only the basename (before extension)
+      if (editingState.type === "rename" && editingState.nodeType === "file") {
+        const lastDotIndex = value.lastIndexOf(".");
+        // Only select basename if there's an extension (dot not at start or end)
+        if (lastDotIndex > 0 && lastDotIndex < value.length - 1) {
+          inputRef.current.setSelectionRange(0, lastDotIndex);
         } else {
-          // For folders or new files, select all
           inputRef.current.select();
         }
-      }, 0);
-    }
+      } else {
+        // For folders or new files, select all
+        inputRef.current.select();
+      }
+    };
+
+    requestAnimationFrame(tryFocus);
   }, [editingState]);
+
+  useEffect(() => {
+    if (!editingState) return;
+    let index: number | null = null;
+    if (editingState.type === "rename" && editingState.targetId) {
+      index = rowIndexByNodeId.get(editingState.targetId) ?? null;
+    } else if (editingState.type === "create") {
+      index = editRowIndex;
+    }
+    if (index !== null && index !== undefined) {
+      scrollToRowIndex(index);
+    }
+  }, [editingState, editRowIndex, rowIndexByNodeId, scrollToRowIndex]);
 
   // Focus workspace name input when editing starts
   useEffect(() => {
@@ -333,17 +492,9 @@ export function FileTree({
         case "v": // Paste
           if (clipboard && clipboard.nodeIds.length > 0) {
             e.preventDefault();
-            // Determine target folder: if a folder is selected, paste there; otherwise paste to root
-            let targetParentId: string | null = null;
-            if (selectedNodeIds.size === 1) {
-              const selectedId = Array.from(selectedNodeIds)[0];
-              const selectedNode = nodeMap.get(selectedId);
-              if (selectedNode?.type === "folder") {
-                targetParentId = selectedId;
-              } else if (selectedNode) {
-                targetParentId = selectedNode.parent_id;
-              }
-            }
+            // Paste at the same level as the copied item (same parent)
+            const firstClipboardNode = nodeMap.get(clipboard.nodeIds[0]);
+            const targetParentId = firstClipboardNode?.parent_id ?? null;
 
             if (clipboard.operation === "cut") {
               onMoveNodes?.(clipboard.nodeIds, targetParentId);
@@ -384,7 +535,7 @@ export function FileTree({
     const isDuplicate = checkDuplicateName(trimmedValue, editingState.parentId, excludeId);
 
     if (isDuplicate) {
-      setValidationError(`A file or folder with this name already exists in this location.`);
+      setValidationError(trimmedValue);
     } else {
       setValidationError(null);
     }
@@ -525,7 +676,11 @@ export function FileTree({
         break;
       case "download":
         if (targetId) {
-          onDownload?.([targetId]);
+          // If the target is selected and there are multiple selections, download all selected
+          const idsToDownload = selectedNodeIds.has(targetId) && selectedNodeIds.size > 1
+            ? Array.from(selectedNodeIds)
+            : [targetId];
+          onDownload?.(idsToDownload);
         } else {
           // Download all
           onDownload?.([]);
@@ -544,10 +699,18 @@ export function FileTree({
         break;
       case "delete":
         if (targetId && targetNode) {
+          // If the target is selected and there are multiple selections, delete all selected
+          const idsToDelete = selectedNodeIds.has(targetId) && selectedNodeIds.size > 1
+            ? Array.from(selectedNodeIds)
+            : [targetId];
+          const names = idsToDelete.map(id => nodeMap.get(id)?.name).filter(Boolean);
+          const displayName = names.length === 1
+            ? names[0]!
+            : `${names.length}個の項目`;
           setConfirmDialog({
             isOpen: true,
-            targetId,
-            targetName: targetNode.name,
+            targetIds: idsToDelete,
+            targetName: displayName,
           });
         }
         break;
@@ -576,10 +739,10 @@ export function FileTree({
   };
 
   const handleDeleteConfirm = () => {
-    if (confirmDialog.targetId) {
-      onDeleteNode(confirmDialog.targetId);
+    if (confirmDialog.targetIds.length > 0) {
+      onDeleteNodes(confirmDialog.targetIds);
     }
-    setConfirmDialog({ isOpen: false, targetId: null, targetName: "" });
+    setConfirmDialog({ isOpen: false, targetIds: [], targetName: "" });
   };
 
   const toggleFolder = (id: string) => {
@@ -877,35 +1040,15 @@ export function FileTree({
     setDropdownMenu(null);
   };
 
-  const renderTree = (parentId: string | null, depth: number = 0) => {
-    const currentLevelNodes = nodes
-      .filter((n) => n.parent_id === parentId)
-      .sort((a, b) => {
-        if (a.type !== b.type) return a.type === "folder" ? -1 : 1;
-        return a.name.localeCompare(b.name);
-      });
-
-    const nodesToRender = [...currentLevelNodes];
-    let editItem = null;
-    const isCreatingFile =
-      editingState?.type === "create" &&
-      editingState.parentId === parentId &&
-      editingState.nodeType === "file";
-    const isCreatingFolder =
-      editingState?.type === "create" &&
-      editingState.parentId === parentId &&
-      editingState.nodeType === "folder";
-
-    if (editingState && editingState.type === "create" && editingState.parentId === parentId) {
-      const IconComponent = isCreatingFile ? FileIcons.Plain : FileIcons.Folder;
-      const editPaddingLeft = depth * 16 + (isCreatingFolder ? 4 : 22);
-      editItem = (
-        <div
-          key="editing-item"
-          className="relative"
-        >
+  const renderRow = (row: VisibleRow) => {
+    if (row.kind === "create") {
+      const isCreatingFolder = row.nodeType === "folder";
+      const IconComponent = isCreatingFolder ? FileIcons.Folder : FileIcons.Plain;
+      const editPaddingLeft = row.depth * 16 + (isCreatingFolder ? 4 : 22);
+      return (
+        <div className="relative h-full">
           <div
-            className="flex items-center gap-1 px-2 py-0 text-[14px] leading-5"
+            className="flex items-center gap-1 px-2 py-0 text-[14px] leading-5 h-full"
             style={{ paddingLeft: `${editPaddingLeft}px` }}
           >
             {isCreatingFolder && (
@@ -928,213 +1071,194 @@ export function FileTree({
           </div>
           {validationError && (
             <div
-              className="mt-1 mx-2 p-2 bg-red-50 border border-red-200 rounded text-xs text-red-600"
-              style={{ marginLeft: `${depth * 16 + 22}px` }}
+              className="absolute left-0 top-full z-20 mt-1 p-2 bg-red-50 border border-red-200 rounded text-xs text-red-600"
+              style={{ marginLeft: `${row.depth * 16 + 22}px` }}
             >
-              {validationError}
+              <span className="font-bold">{validationError}</span> というファイルまたはフォルダーはこの場所に既に存在します。別の名前を指定してください。
             </div>
           )}
         </div>
       );
     }
 
-    const renderNode = (node: Node) => {
-      const isRenaming = editingState?.type === "rename" && editingState.targetId === node.id;
+    const node = row.node;
+    const depth = row.depth;
+    const isRenaming = editingState?.type === "rename" && editingState.targetId === node.id;
 
-      if (isRenaming) {
-        const IconComponent = node.type === "file" ? getFileIcon(node.name) : FileIcons.Folder;
-        return (
-          <div
-            key={node.id}
-            className="relative"
-          >
-            <div
-              className="flex items-center gap-1 px-2 py-0 text-[14px] leading-5"
-              style={{ paddingLeft: `${depth * 16 + (node.type === "folder" ? 4 : 22)}px` }}
-            >
-              {node.type === "folder" && (
-                <ChevronIcon isOpen={expandedFolders.has(node.id)} className="w-4 h-4 text-zinc-400" />
-              )}
-              <IconComponent className={`w-4 h-4 flex-shrink-0 ${node.type === "folder" ? getFolderColor(node.name) : ""}`} />
-              <input
-                ref={inputRef}
-                type="text"
-                value={inputValue}
-                onChange={handleInputChange}
-                className={`bg-white text-zinc-900 border rounded px-1.5 py-[3px] text-[14px] leading-5 w-full outline-none min-w-0 ${
-                  validationError ? "border-red-400" : "border-blue-500 ring-1 ring-blue-500"
-                }`}
-                onBlur={handleInputBlur}
-                onKeyDown={handleKeyDown}
-              />
-            </div>
-            {validationError && (
-              <div
-                className="mt-1 mx-2 p-2 bg-red-50 border border-red-200 rounded text-xs text-red-600"
-                style={{ marginLeft: `${depth * 16 + 22}px` }}
-              >
-                {validationError}
-              </div>
-            )}
-          </div>
-        );
-      }
-
-      const isExpanded = expandedFolders.has(node.id);
-      const isSelected = selectedNodeIds.has(node.id);
-      const isBeingDragged = draggingNodeIds.has(node.id);
-      const isCut = clipboard?.operation === "cut" && clipboard.nodeIds.includes(node.id);
-      const isRootDragOver = dragOverNodeId === "root";
-      const isDragOver = !isRootDragOver && dragOverNodeId === node.id;
-      const isDragOverSubtree =
-        !isRootDragOver &&
-        dragOverSubtreeId !== null &&
-        isNodeInSubtree(node.id, dragOverSubtreeId);
-      const FileIcon = getFileIcon(node.name);
-
+    if (isRenaming) {
+      const IconComponent = node.type === "file" ? getFileIcon(node.name) : FileIcons.Folder;
       return (
-        <div key={node.id}>
+        <div className="relative h-full">
           <div
-            draggable
-            data-node-id={node.id}
-            onDragStart={(e) => {
-              // Set node data for chat panel drops
-              const dragData = {
-                id: node.id,
-                name: node.name,
-                type: node.type,
-              };
-              e.dataTransfer.setData("application/cursor-node", node.id);
-              e.dataTransfer.effectAllowed = "move";
-              // If the dragged node is selected, drag all selected nodes
-              // Otherwise, drag only this node
-              const dragCount = selectedNodeIds.has(node.id) && selectedNodeIds.size > 1
-                ? selectedNodeIds.size
-                : 1;
-
-              // Set data for all dragged nodes (for chat panel)
-              if (dragCount > 1) {
-                const allDragData = Array.from(selectedNodeIds).map(id => {
-                  const n = nodeMap.get(id);
-                  return n ? { id: n.id, name: n.name, type: n.type } : null;
-                }).filter(Boolean);
-                e.dataTransfer.setData("application/cursor-node-data", JSON.stringify(allDragData));
-                setDraggingNodeIds(new Set(selectedNodeIds));
-              } else {
-                e.dataTransfer.setData("application/cursor-node-data", JSON.stringify([dragData]));
-                setDraggingNodeIds(new Set([node.id]));
-              }
-
-              // Create custom drag preview
-              if (dragPreviewRef.current) {
-                const preview = dragPreviewRef.current;
-                if (dragCount === 1) {
-                  // Single file: show filename in pill (blue border)
-                  preview.innerHTML = `<span style="
-                    display: inline-block;
-                    padding: 4px 12px;
-                    background: white;
-                    border: 1.5px solid #93c5fd;
-                    border-radius: 9999px;
-                    font-size: 13px;
-                    color: #374151;
-                    white-space: nowrap;
-                    overflow: hidden;
-                    text-overflow: ellipsis;
-                    max-width: 180px;
-                    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
-                  ">${node.name}</span>`;
-                } else {
-                  // Multiple files: show count in circle
-                  preview.innerHTML = `<span style="
-                    display: inline-flex;
-                    align-items: center;
-                    justify-content: center;
-                    width: 28px;
-                    height: 28px;
-                    background: white;
-                    border: 1.5px solid #a5b4fc;
-                    border-radius: 50%;
-                    font-size: 13px;
-                    color: #6366f1;
-                    font-weight: 500;
-                    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
-                  ">${dragCount}</span>`;
-                }
-                e.dataTransfer.setDragImage(preview, preview.offsetWidth / 2, preview.offsetHeight / 2);
-              }
-            }}
-            onDragEnd={handleDragEnd}
-            onDragEnter={(e) => handleNodeDragEnter(e, node.id)}
-            onDragLeave={(e) => handleNodeDragLeave(e, node.id)}
-            onDragOver={(e) => handleNodeDragOver(e, node.id)}
-            onDrop={(e) => handleNodeDrop(e, node.id)}
-            className={`
-              group/item flex items-center gap-1 px-2 py-1 text-[14px] leading-5 cursor-pointer select-none
-              transition-colors duration-75
-              ${isBeingDragged || isCut
-                ? "opacity-50"
-                : isDragOver || isDragOverSubtree
-                  ? "bg-green-600/10 text-zinc-900"
-                  : isSelected
-                    ? "bg-blue-600/10 text-zinc-900"
-                    : "text-zinc-700 hover:bg-zinc-100"
-              }
-            `}
+            className="flex items-center gap-1 px-2 py-0 text-[14px] leading-5 h-full"
             style={{ paddingLeft: `${depth * 16 + (node.type === "folder" ? 4 : 22)}px` }}
-            onMouseEnter={() => {
-              if (node.type === "file") {
-                onHoverNode?.(node.id);
-              }
-            }}
-            onClick={(e) => {
-              if (e.metaKey || e.ctrlKey) {
-                onToggleSelectNode(node.id);
-                return;
-              }
-              if (node.type === "folder") {
-                toggleFolder(node.id);
-                onSelectFolder?.(node.id);
-              } else {
-                onSelectNode(node.id);
-              }
-            }}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              setContextMenu({ x: e.clientX, y: e.clientY, targetId: node.id });
-            }}
           >
-            {node.type === "folder" ? (
-              <>
-                <ChevronIcon isOpen={isExpanded} className="w-4 h-4 text-zinc-400 flex-shrink-0" />
-                {isExpanded ? (
-                  <FileIcons.FolderOpen className={`w-4 h-4 flex-shrink-0 ${getFolderColor(node.name)}`} />
-                ) : (
-                  <FileIcons.Folder className={`w-4 h-4 flex-shrink-0 ${getFolderColor(node.name)}`} />
-                )}
-              </>
-            ) : (
-              <FileIcon className="w-4 h-4 flex-shrink-0" />
+            {node.type === "folder" && (
+              <ChevronIcon isOpen={expandedFolders.has(node.id)} className="w-4 h-4 text-zinc-400" />
             )}
-            <span className="truncate flex-1">{node.name}</span>
+            <IconComponent className={`w-4 h-4 flex-shrink-0 ${node.type === "folder" ? getFolderColor(node.name) : ""}`} />
+            <input
+              ref={inputRef}
+              type="text"
+              value={inputValue}
+              onChange={handleInputChange}
+              className={`bg-white text-zinc-900 border rounded px-1.5 py-[3px] text-[14px] leading-5 w-full outline-none min-w-0 ${
+                validationError ? "border-red-400" : "border-blue-500 ring-1 ring-blue-500"
+              }`}
+              onBlur={handleInputBlur}
+              onKeyDown={handleKeyDown}
+            />
           </div>
-
-          {node.type === "folder" && isExpanded && renderTree(node.id, depth + 1)}
+          {validationError && (
+            <div
+              className="absolute left-0 top-full z-20 mt-1 p-2 bg-red-50 border border-red-200 rounded text-xs text-red-600"
+              style={{ marginLeft: `${depth * 16 + 22}px` }}
+            >
+              <span className="font-bold">{validationError}</span> というファイルまたはフォルダーはこの場所に既に存在します。別の名前を指定してください。
+            </div>
+          )}
         </div>
       );
-    };
+    }
 
-    const folderNodes = nodesToRender.filter((node) => node.type === "folder");
-    const fileNodes = nodesToRender.filter((node) => node.type === "file");
+    const isExpanded = expandedFolders.has(node.id);
+    const isSelected = selectedNodeIds.has(node.id);
+    const isBeingDragged = draggingNodeIds.has(node.id);
+    const isCut = clipboard?.operation === "cut" && clipboard.nodeIds.includes(node.id);
+    const isRootDragOver = dragOverNodeId === "root";
+    const isDragOver = !isRootDragOver && dragOverNodeId === node.id;
+    const isDragOverSubtree =
+      !isRootDragOver &&
+      dragOverSubtreeId !== null &&
+      isNodeInSubtree(node.id, dragOverSubtreeId);
+    const FileIcon = getFileIcon(node.name);
 
     return (
-      <>
-        {editItem && isCreatingFolder ? editItem : null}
-        {folderNodes.map(renderNode)}
-        {editItem && isCreatingFile ? editItem : null}
-        {fileNodes.map(renderNode)}
-      </>
+      <div
+        draggable
+        data-node-id={node.id}
+        onDragStart={(e) => {
+          // Set node data for chat panel drops
+          const dragData = {
+            id: node.id,
+            name: node.name,
+            type: node.type,
+          };
+          e.dataTransfer.setData("application/cursor-node", node.id);
+          e.dataTransfer.effectAllowed = "move";
+          // If the dragged node is selected, drag all selected nodes
+          // Otherwise, drag only this node
+          const dragCount = selectedNodeIds.has(node.id) && selectedNodeIds.size > 1
+            ? selectedNodeIds.size
+            : 1;
+
+          // Set data for all dragged nodes (for chat panel)
+          if (dragCount > 1) {
+            const allDragData = Array.from(selectedNodeIds).map(id => {
+              const n = nodeMap.get(id);
+              return n ? { id: n.id, name: n.name, type: n.type } : null;
+            }).filter(Boolean);
+            e.dataTransfer.setData("application/cursor-node-data", JSON.stringify(allDragData));
+            setDraggingNodeIds(new Set(selectedNodeIds));
+          } else {
+            e.dataTransfer.setData("application/cursor-node-data", JSON.stringify([dragData]));
+            setDraggingNodeIds(new Set([node.id]));
+          }
+
+          // Create custom drag preview
+          if (dragPreviewRef.current) {
+            const preview = dragPreviewRef.current;
+            if (dragCount === 1) {
+              // Single file: show filename in pill (blue border)
+              preview.innerHTML = `<span style="
+                display: inline-block;
+                padding: 4px 12px;
+                background: white;
+                border: 1.5px solid #93c5fd;
+                border-radius: 9999px;
+                font-size: 13px;
+                color: #374151;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                max-width: 180px;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+              ">${node.name}</span>`;
+            } else {
+              // Multiple files: show count in circle
+              preview.innerHTML = `<span style="
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                width: 28px;
+                height: 28px;
+                background: white;
+                border: 1.5px solid #a5b4fc;
+                border-radius: 50%;
+                font-size: 13px;
+                color: #6366f1;
+                font-weight: 500;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+              ">${dragCount}</span>`;
+            }
+            e.dataTransfer.setDragImage(preview, preview.offsetWidth / 2, preview.offsetHeight / 2);
+          }
+        }}
+        onDragEnd={handleDragEnd}
+        onDragEnter={(e) => handleNodeDragEnter(e, node.id)}
+        onDragLeave={(e) => handleNodeDragLeave(e, node.id)}
+        onDragOver={(e) => handleNodeDragOver(e, node.id)}
+        onDrop={(e) => handleNodeDrop(e, node.id)}
+        className={`
+          group/item flex items-center gap-1 px-2 py-1 text-[14px] leading-5 cursor-pointer select-none h-full
+          transition-colors duration-75
+          ${isBeingDragged || isCut
+            ? "opacity-50"
+            : isDragOver || isDragOverSubtree
+              ? "bg-green-600/10 text-zinc-900"
+              : isSelected
+                ? "bg-blue-600/10 text-zinc-900"
+                : "text-zinc-700 hover:bg-zinc-100"
+          }
+        `}
+        style={{ paddingLeft: `${depth * 16 + (node.type === "folder" ? 4 : 22)}px` }}
+        onMouseEnter={() => {
+          if (node.type === "file") {
+            onHoverNode?.(node.id);
+          }
+        }}
+        onClick={(e) => {
+          if (e.metaKey || e.ctrlKey) {
+            onToggleSelectNode(node.id);
+            return;
+          }
+          if (node.type === "folder") {
+            toggleFolder(node.id);
+            onSelectFolder?.(node.id);
+          } else {
+            onSelectNode(node.id);
+          }
+        }}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          setContextMenu({ x: e.clientX, y: e.clientY, targetId: node.id });
+        }}
+      >
+        {node.type === "folder" ? (
+          <>
+            <ChevronIcon isOpen={isExpanded} className="w-4 h-4 text-zinc-400 flex-shrink-0" />
+            {isExpanded ? (
+              <FileIcons.FolderOpen className={`w-4 h-4 flex-shrink-0 ${getFolderColor(node.name)}`} />
+            ) : (
+              <FileIcons.Folder className={`w-4 h-4 flex-shrink-0 ${getFolderColor(node.name)}`} />
+            )}
+          </>
+        ) : (
+          <FileIcon className="w-4 h-4 flex-shrink-0" />
+        )}
+        <span className="truncate flex-1">{node.name}</span>
+      </div>
     );
   };
 
@@ -1285,6 +1409,7 @@ export function FileTree({
           dragOverNodeId === "root" ? "bg-green-600/10" : ""
         }`}
         ref={treeScrollRef}
+        onScroll={handleScroll}
         onClick={(e) => {
           if (e.target === e.currentTarget) {
             onClearSelection();
@@ -1365,11 +1490,22 @@ export function FileTree({
               ファイルがありません<br/>右クリックで作成
             </div>
           ) : (
-            <>
-              {renderTree(null)}
-              {/* Clickable gap at bottom to clear selection */}
+            <div
+              className="relative"
+              onClick={(e) => {
+                if (e.target === e.currentTarget) {
+                  onClearSelection();
+                }
+              }}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setContextMenu({ x: e.clientX, y: e.clientY, targetId: null });
+              }}
+            >
               <div
-                className="min-h-[40px] flex-1 cursor-pointer"
+                style={{ height: topPadding }}
+                className="cursor-pointer"
                 onClick={(e) => {
                   e.stopPropagation();
                   onClearSelection();
@@ -1380,7 +1516,46 @@ export function FileTree({
                   setContextMenu({ x: e.clientX, y: e.clientY, targetId: null });
                 }}
               />
-            </>
+              {visibleSlice.map((row) => (
+                <div
+                  key={
+                    row.kind === "node"
+                      ? row.node.id
+                      : `create:${row.parentId ?? "root"}:${row.nodeType}`
+                  }
+                  style={{ height: ROW_HEIGHT }}
+                  className="relative"
+                >
+                  {renderRow(row)}
+                </div>
+              ))}
+              <div
+                style={{ height: bottomPadding }}
+                className="cursor-pointer"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onClearSelection();
+                }}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setContextMenu({ x: e.clientX, y: e.clientY, targetId: null });
+                }}
+              />
+              <div
+                className="flex-1 cursor-pointer"
+                style={{ height: BOTTOM_GAP }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onClearSelection();
+                }}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setContextMenu({ x: e.clientX, y: e.clientY, targetId: null });
+                }}
+              />
+            </div>
           )
         )}
       </div>
@@ -1461,7 +1636,7 @@ export function FileTree({
         confirmLabel="削除"
         isDanger={true}
         onConfirm={handleDeleteConfirm}
-        onCancel={() => setConfirmDialog({ isOpen: false, targetId: null, targetName: "" })}
+        onCancel={() => setConfirmDialog({ isOpen: false, targetIds: [], targetName: "" })}
       />
 
       {/* Hidden drag preview element */}

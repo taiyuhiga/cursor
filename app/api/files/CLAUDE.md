@@ -7,8 +7,23 @@
 
 | ID | Time | T | Title | Read |
 |----|------|---|-------|------|
-| #99 | 4:51 PM | 🔴 | Next.js build error due to incompatible route segment config | ~312 |
+| #100 | 4:51 PM | 🔵 | Reviewing files API route structure after recent modifications | ~322 |
+| #99 | " | 🔴 | Next.js build error due to incompatible route segment config | ~312 |
 | #98 | 4:50 PM | 🔴 | Next.js Route Segment Config Compatibility Error | ~329 |
 | #94 | 4:49 PM | 🟣 | Added error handling for large file uploads in files API route | ~294 |
 | #91 | 4:46 PM | 🔵 | File API route structure and node management patterns | ~346 |
+
+### Jan 15, 2026
+
+| ID | Time | T | Title | Read |
+|----|------|---|-------|------|
+| #171 | 4:56 PM | 🔴 | Fixed files and folders disappearing after page reload | ~411 |
+| #165 | 4:51 PM | 🔵 | create_file action uses explicitParentId parameter with fallback to path resolution | ~340 |
+| #164 | " | 🔴 | Added idempotent folder creation with race condition handling | ~415 |
+| #160 | 3:37 PM | 🔵 | ensureParentFolders API helper creates folder hierarchy for file and folder creation | ~296 |
+| #150 | 3:31 PM | 🟣 | Implemented recursive deletion for nodes with children and file contents cleanup | ~357 |
+| #149 | " | 🔵 | create_folder API always creates new folder without checking for existing duplicates | ~379 |
+| #148 | " | 🔵 | API route has create_folder action handler for folder creation | ~152 |
+| #145 | 3:30 PM | 🔵 | delete_node API endpoint performs simple database deletion by node ID | ~281 |
+| #144 | " | 🔵 | API route handles delete_node action for removing files and folders | ~234 |
 </claude-mem-context>

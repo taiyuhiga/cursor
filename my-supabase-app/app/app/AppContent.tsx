@@ -107,13 +107,21 @@ export default async function AppContent({ searchParamsPromise }: Props) {
   const ensuredWorkspace: Workspace = currentWorkspace;
 
   // 現在のワークスペースのプロジェクトを取得 or 作成
-  const { data: project } = await supabase
+  // 複数存在しても最新を使う。maybeSingleだと複数件でエラーになり、
+  // 毎回新規プロジェクトが作られてしまうため。
+  const { data: projects, error: projectsError } = await supabase
     .from("projects")
-    .select("*")
+    .select("id, created_at")
     .eq("workspace_id", ensuredWorkspace.id)
-    .maybeSingle();
+    .order("created_at", { ascending: false })
+    .limit(1);
 
-  let projectId = project?.id;
+  if (projectsError) {
+    console.error("Error fetching projects:", projectsError);
+    return <div>Error fetching project: {projectsError.message}</div>;
+  }
+
+  let projectId = projects?.[0]?.id;
 
   if (!projectId) {
     const { data: newProject, error: projError } = await supabase
@@ -160,6 +168,7 @@ export default async function AppContent({ searchParamsPromise }: Props) {
     .from("nodes")
     .select("*")
     .eq("project_id", projectId!)
+    .order("parent_id", { ascending: true, nullsFirst: true })
     .order("type", { ascending: false })
     .order("name", { ascending: true })
     .order("id", { ascending: true })
