@@ -186,6 +186,7 @@ export function FileTree({
   // ワークスペース切り替えポップオーバー
   const [isWorkspacePopoverOpen, setIsWorkspacePopoverOpen] = useState(false);
   const workspacePopoverRef = useRef<HTMLDivElement>(null);
+  const workspaceTriggerRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(0);
   const scrollRafRef = useRef<number | null>(null);
@@ -484,9 +485,16 @@ export function FileTree({
   useEffect(() => {
     if (!isWorkspacePopoverOpen) return;
     const handleClickOutside = (e: MouseEvent) => {
-      if (workspacePopoverRef.current && !workspacePopoverRef.current.contains(e.target as HTMLElement)) {
-        setIsWorkspacePopoverOpen(false);
+      const target = e.target as HTMLElement;
+      // ポップオーバー内のクリックは無視
+      if (workspacePopoverRef.current && workspacePopoverRef.current.contains(target)) {
+        return;
       }
+      // トリガー領域（アイコン・名前）のクリックは無視（トグル処理に任せる）
+      if (workspaceTriggerRef.current && workspaceTriggerRef.current.contains(target)) {
+        return;
+      }
+      setIsWorkspacePopoverOpen(false);
     };
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
@@ -1297,47 +1305,50 @@ export function FileTree({
       {/* Project name header */}
       {projectName && (
         <div className="group flex items-center px-3 py-2 border-b border-zinc-200 gap-0.5 relative">
-          {/* Workspace icon with first character */}
-          <div
-            className="w-8 h-8 rounded bg-blue-100 flex items-center justify-center flex-shrink-0 mr-1.5 cursor-pointer hover:bg-blue-200 transition-colors"
-            onClick={(e) => {
-              e.stopPropagation();
-              setIsWorkspacePopoverOpen(!isWorkspacePopoverOpen);
-            }}
-          >
-            <span className="text-sm font-bold text-blue-600">
-              {(isEditingWorkspaceName ? workspaceNameValue : projectName).charAt(0).toUpperCase()}
-            </span>
-          </div>
-          {isEditingWorkspaceName ? (
-            <input
-              ref={workspaceNameInputRef}
-              type="text"
-              value={workspaceNameValue}
-              onChange={(e) => setWorkspaceNameValue(e.target.value)}
-              onKeyDown={handleWorkspaceNameKeyDown}
-              onBlur={handleWorkspaceNameComplete}
-              onClick={(e) => e.stopPropagation()}
-              className="flex-1 min-w-0 px-1.5 py-0.5 text-base font-semibold text-zinc-800 border border-blue-500 rounded outline-none bg-white"
-            />
-          ) : (
+          {/* Workspace trigger area (icon + name) */}
+          <div ref={workspaceTriggerRef} className="flex items-center min-w-0 flex-1">
+            {/* Workspace icon with first character */}
             <div
-              className="flex items-center min-w-0 flex-1 cursor-pointer"
+              className="w-8 h-8 rounded bg-blue-100 flex items-center justify-center flex-shrink-0 mr-1.5 cursor-pointer hover:bg-blue-200 transition-colors"
               onClick={(e) => {
                 e.stopPropagation();
                 setIsWorkspacePopoverOpen(!isWorkspacePopoverOpen);
               }}
-              onDoubleClick={(e) => {
-                e.stopPropagation();
-                startEditingWorkspaceName();
-              }}
             >
-              <span className="text-base font-semibold text-zinc-800 truncate min-w-[24px]">
-                {projectName}
+              <span className="text-sm font-bold text-blue-600">
+                {(isEditingWorkspaceName ? workspaceNameValue : projectName).charAt(0).toUpperCase()}
               </span>
-              <ChevronIcon isOpen={isWorkspacePopoverOpen} className="w-4 h-4 text-zinc-400 flex-shrink-0 ml-1" />
             </div>
-          )}
+            {isEditingWorkspaceName ? (
+              <input
+                ref={workspaceNameInputRef}
+                type="text"
+                value={workspaceNameValue}
+                onChange={(e) => setWorkspaceNameValue(e.target.value)}
+                onKeyDown={handleWorkspaceNameKeyDown}
+                onBlur={handleWorkspaceNameComplete}
+                onClick={(e) => e.stopPropagation()}
+                className="flex-1 min-w-0 px-1.5 py-0.5 text-base font-semibold text-zinc-800 border border-blue-500 rounded outline-none bg-white"
+              />
+            ) : (
+              <div
+                className="flex items-center min-w-0 flex-1 cursor-pointer"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setIsWorkspacePopoverOpen(!isWorkspacePopoverOpen);
+                }}
+                onDoubleClick={(e) => {
+                  e.stopPropagation();
+                  startEditingWorkspaceName();
+                }}
+              >
+                <span className="text-base font-semibold text-zinc-800 truncate min-w-[24px]">
+                  {projectName}
+                </span>
+                <ChevronIcon isOpen={isWorkspacePopoverOpen} className="w-4 h-4 text-zinc-400 flex-shrink-0 ml-1" />
+              </div>
+            )}
+          </div>
 
           {/* Workspace Switcher Popover */}
           {isWorkspacePopoverOpen && (
