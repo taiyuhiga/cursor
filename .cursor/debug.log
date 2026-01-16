@@ -1,0 +1,10 @@
+{"location":"AppLayout.tsx:handleUndo:confirmed","message":"Undo confirmed","data":{"confirmed":true,"actionType":"copy"},"timestamp":1768557401692,"sessionId":"debug-session","hypothesisId":"H_CONFIRM"}
+{"location":"AppLayout.tsx:handleUndo:copy_start","message":"Undo copy start","data":{"nodeIds":["e09901d8-71d8-43b1-882e-2d92258aefd7"],"nodesCount":1001,"missingCount":1},"timestamp":1768557401692,"sessionId":"debug-session","hypothesisId":"H_COPY_START"}
+{"location":"AppLayout.tsx:handleUndo:copy_ids","message":"Undo copy ids","data":{"idsCount":1,"hasTempIds":false},"timestamp":1768557401693,"sessionId":"debug-session","hypothesisId":"H_COPY_IDS"}
+{"location":"AppLayout.tsx:handleUndo:copy_ui","message":"Undo copy UI update","data":{"before":1001,"after":1001},"timestamp":1768557401693,"sessionId":"debug-session","hypothesisId":"H_COPY_UI"}
+{"location":"AppLayout.tsx:handleUndo:copy_ui","message":"Undo copy UI update","data":{"before":1001,"after":1001},"timestamp":1768557401693,"sessionId":"debug-session","hypothesisId":"H_COPY_UI"}
+{"location":"AppLayout.tsx:handleUndo:confirmed","message":"Undo confirmed","data":{"confirmed":true,"actionType":"copy"},"timestamp":1768557424858,"sessionId":"debug-session","hypothesisId":"H_CONFIRM"}
+{"location":"AppLayout.tsx:handleUndo:copy_start","message":"Undo copy start","data":{"nodeIds":["0be2563f-d1c5-45cb-aa88-ea35b2f543a3"],"nodesCount":43712,"missingCount":1},"timestamp":1768557424861,"sessionId":"debug-session","hypothesisId":"H_COPY_START"}
+{"location":"AppLayout.tsx:handleUndo:copy_ids","message":"Undo copy ids","data":{"idsCount":1,"hasTempIds":false},"timestamp":1768557424863,"sessionId":"debug-session","hypothesisId":"H_COPY_IDS"}
+{"location":"AppLayout.tsx:handleUndo:copy_ui","message":"Undo copy UI update","data":{"before":43712,"after":43712},"timestamp":1768557424865,"sessionId":"debug-session","hypothesisId":"H_COPY_UI"}
+{"location":"AppLayout.tsx:handleUndo:copy_ui","message":"Undo copy UI update","data":{"before":43712,"after":43712},"timestamp":1768557424867,"sessionId":"debug-session","hypothesisId":"H_COPY_UI"}

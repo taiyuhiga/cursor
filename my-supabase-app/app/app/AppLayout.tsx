@@ -225,6 +225,8 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const [currentWorkspaces, setCurrentWorkspaces] = useState(workspaces);
   const [activeWorkspace, setActiveWorkspace] = useState(currentWorkspace);
   const [showDeleteWorkspaceConfirm, setShowDeleteWorkspaceConfirm] = useState(false);
+  // ワークスペース削除対象（コンテキストメニューから）
+  const [deletingWorkspace, setDeletingWorkspace] = useState<{ id: string; name: string } | null>(null);
 
   // Resizable panel widths (persisted to localStorage)
   const [leftPanelWidth, setLeftPanelWidth] = useState(256);
@@ -319,9 +321,17 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     | { type: "rename"; nodeId: string; oldName: string; newName: string }
     | { type: "move"; nodeIds: string[]; oldParentIds: (string | null)[]; newParentId: string | null }
     | { type: "copy"; nodeIds: string[]; names?: string[] };
+  type UploadSession = {
+    canceled: boolean;
+    done: boolean;
+    donePromise: Promise<void>;
+    resolveDone: () => void;
+    realId?: string;
+  };
   const [undoStack, setUndoStack] = useState<UndoAction[]>([]);
   const [redoStack, setRedoStack] = useState<UndoAction[]>([]);
   const MAX_UNDO_STACK = 50;
+  const folderUploadSessionsRef = useRef<Map<string, UploadSession>>(new Map());
 
   const pushUndoAction = useCallback((action: UndoAction) => {
     setUndoStack(prev => {
@@ -333,6 +343,18 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     });
     // Clear redo stack when a new action is performed
     setRedoStack([]);
+  }, []);
+
+  const updateUndoCreateNodeId = useCallback((tempId: string, realId: string) => {
+    setUndoStack(prev => prev.map(action => {
+      if (action.type !== "create" || action.nodeId !== tempId) return action;
+      const node = action.node ? { ...action.node, id: realId } : action.node;
+      return { ...action, nodeId: realId, node };
+    }));
+  }, []);
+
+  const removeUndoCreateAction = useCallback((nodeId: string) => {
+    setUndoStack(prev => prev.filter(action => !(action.type === "create" && action.nodeId === nodeId)));
   }, []);
 
   const runWithConcurrency = useCallback(async <T,>(items: T[], limit: number, worker: (item: T) => Promise<void>) => {
@@ -437,11 +459,11 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     void supabase
       .from("file_contents")
       .upsert({ node_id: realId, text: content }, { onConflict: "node_id" })
-      .then(({ error }) => {
+      .then(({ error }: { error: Error | null }) => {
         if (error) throw error;
         pendingContentByRealIdRef.current.delete(realId);
       })
-      .catch((error) => {
+      .catch((error: Error) => {
         console.error("Failed to save temp content:", error?.message ?? error);
       });
   }, [supabase]);
@@ -633,12 +655,17 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const handleUndo = useCallback(async () => {
     if (undoStack.length === 0) return;
 
-    const action = undoStack[undoStack.length - 1];
-
-    if (action.type === "delete") {
-      setUndoStack(prev => prev.slice(0, -1));
+    let lastIndex = undoStack.length - 1;
+    while (lastIndex >= 0 && undoStack[lastIndex].type === "delete") {
+      lastIndex -= 1;
+    }
+    if (lastIndex < 0) {
+      setUndoStack([]);
       return;
     }
+
+    const trimmedStack = undoStack.slice(0, lastIndex + 1);
+    const action = trimmedStack[trimmedStack.length - 1];
 
     // Show confirmation dialog for create and copy actions
     if (action.type === "create" || action.type === "copy") {
@@ -656,51 +683,123 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       }
 
       const confirmed = await promptUndoConfirmation(actionName, actionType);
-      if (!confirmed) return;
+      if (!confirmed) {
+        if (trimmedStack.length !== undoStack.length) {
+          setUndoStack(trimmedStack);
+        }
+        return;
+      }
     }
 
-    setUndoStack(prev => prev.slice(0, -1));
+    setUndoStack(trimmedStack.slice(0, -1));
 
     try {
       switch (action.type) {
-        case "create": {
-          // Get node info before deleting (for redo)
-          const nodeToDelete = nodes.find(n => n.id === action.nodeId);
-          const contentPromise = nodeToDelete?.type === "file"
-            ? supabase
-              .from("file_contents")
-              .select("text")
-              .eq("node_id", action.nodeId)
-              .single()
-              .then(({ data }) => data?.text)
-              .catch(() => undefined)
-            : Promise.resolve(undefined);
+          case "create": {
+            console.log("[Undo] action.nodeId:", action.nodeId);
+            const resolveCreateNodeId = async (): Promise<string | null> => {
+              if (!String(action.nodeId).startsWith("temp-")) {
+                console.log("[Undo] nodeId is not temp, returning as is:", action.nodeId);
+                return action.nodeId;
+              }
+              const mapped = tempIdRealIdMapRef.current.get(action.nodeId);
+              console.log("[Undo] mapped from tempIdRealIdMapRef:", mapped);
+              if (mapped) return mapped;
+              const path = tempIdPathMapRef.current.get(action.nodeId) ?? pathByNodeId.get(action.nodeId);
+              console.log("[Undo] path:", path);
+              if (path) {
+                const existing = nodeIdByPath.get(path);
+                console.log("[Undo] existing from nodeIdByPath:", existing);
+                if (existing) return existing;
+              }
+              console.log("[Undo] falling back to resolveMaybeTempNodeId");
+              return await resolveMaybeTempNodeId(action.nodeId, 10000);
+            };
 
-          // Optimistic: update UI immediately
-          setNodes(prev => prev.filter(n => n.id !== action.nodeId));
-          setOpenTabs(prev => prev.filter(id => id !== action.nodeId));
-          if (activeNodeId === action.nodeId) {
-            setActiveNodeId(null);
-          }
-          setSelectedNodeIds(prev => {
-            if (!prev.has(action.nodeId)) return prev;
-            const next = new Set(prev);
-            next.delete(action.nodeId);
-            return next;
-          });
+            const resolvePromise = resolveCreateNodeId();
+            let nodeFromState = nodes.find(n => n.id === action.nodeId) ?? action.node;
+            const currentNodes = nodes;
+            const nodeToDelete = nodeFromState ?? action.node;
+            const isFolder = nodeToDelete?.type === "folder";
+            console.log("[Undo] nodeToDelete (initial):", nodeToDelete);
+
+            const buildIdsToRemove = (rootId: string, snapshot: Node[]) => {
+              const ids = new Set<string>();
+              if (isFolder) {
+                const collectChildren = (id: string) => {
+                  ids.add(id);
+                  snapshot.filter((n: Node) => n.parent_id === id).forEach((child: Node) => collectChildren(child.id));
+                };
+                collectChildren(rootId);
+              } else {
+                ids.add(rootId);
+              }
+              return ids;
+            };
+
+            const removeIdsFromUi = (ids: Set<string>) => {
+              setNodes(prev => {
+                const filtered = prev.filter(n => !ids.has(n.id));
+                console.log("[Undo] nodes before:", prev.length, "after:", filtered.length);
+                return filtered;
+              });
+              setOpenTabs(prev => prev.filter(id => !ids.has(id)));
+              if (activeNodeId && ids.has(activeNodeId)) {
+                setActiveNodeId(null);
+              }
+              setSelectedNodeIds(prev => {
+                if (prev.size === 0) return prev;
+                const next = new Set(prev);
+                ids.forEach((id) => next.delete(id));
+                return next;
+              });
+            };
+
+            const idsToRemove = buildIdsToRemove(action.nodeId, currentNodes);
+            console.log("[Undo] idsToRemove (temp):", Array.from(idsToRemove));
+
+            // Optimistic: update UI immediately
+            removeIdsFromUi(idsToRemove);
+
+            const resolvedNodeId = await resolvePromise;
+            if (!resolvedNodeId) {
+              console.log("[Undo] resolvedNodeId is null, skipping server delete");
+              break;
+            }
+
+            if (resolvedNodeId !== action.nodeId) {
+              const resolvedIdsToRemove = buildIdsToRemove(resolvedNodeId, nodes);
+              if (resolvedIdsToRemove.size > 0) {
+                console.log("[Undo] idsToRemove (resolved):", Array.from(resolvedIdsToRemove));
+                removeIdsFromUi(resolvedIdsToRemove);
+              }
+            }
+
+            const contentPromise = nodeToDelete?.type === "file"
+              ? supabase
+                .from("file_contents")
+                .select("text")
+                .eq("node_id", resolvedNodeId)
+                .single()
+                .then(({ data }: { data: { text?: string } | null }) => data?.text)
+                .catch(() => undefined)
+              : Promise.resolve(undefined);
 
           // Delete the created node
+          console.log("[Undo] Calling API to delete node:", resolvedNodeId);
           const res = await fetch("/api/files", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ action: "delete_node", id: action.nodeId }),
+            body: JSON.stringify({ action: "delete_node", id: resolvedNodeId }),
           });
+          console.log("[Undo] API response status:", res.status);
           if (!res.ok) throw new Error("Failed to undo create");
 
           const contentToSave = await contentPromise;
           // Push to redo stack (delete action to redo = create again)
           if (nodeToDelete) {
-            setRedoStack(prev => [...prev, { type: "delete", nodeId: action.nodeId, node: nodeToDelete, content: contentToSave }]);
+            const nodeForRedo = nodeToDelete.id === resolvedNodeId ? nodeToDelete : { ...nodeToDelete, id: resolvedNodeId };
+            setRedoStack(prev => [...prev, { type: "delete", nodeId: resolvedNodeId, node: nodeForRedo, content: contentToSave }]);
           }
           break;
         }
@@ -799,7 +898,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       setUndoStack(prev => [...prev, action]);
       void fetchNodes(false);
     }
-  }, [undoStack, nodes, activeNodeId, fetchNodes, supabase, promptUndoConfirmation]);
+  }, [undoStack, nodes, activeNodeId, fetchNodes, supabase, promptUndoConfirmation, nodeIdByPath, pathByNodeId, resolveMaybeTempNodeId]);
 
   const handleRedo = useCallback(async () => {
     if (redoStack.length === 0) return;
@@ -841,7 +940,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
               .select("text")
               .eq("node_id", action.nodeId)
               .single()
-              .then(({ data }) => data?.text)
+              .then(({ data }: { data: { text?: string } | null }) => data?.text)
               .catch(() => action.content)
             : Promise.resolve(action.content);
 
@@ -1125,14 +1224,27 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     if (activeActivity !== "explorer") {
       setActiveActivity("explorer");
     }
+    tempIdPathMapRef.current.set(tempId, path);
+    pushUndoAction({ type: "create", nodeId: tempId, node: tempNode });
 
     // バックグラウンドでAPI処理を実行（UIブロックしない）
     (async () => {
       try {
+        let parentIdForRequest: string | null = parentId;
+        if (parentId && parentId.startsWith("temp-")) {
+          const resolvedParentId = await resolveMaybeTempNodeId(parentId, 10000);
+          parentIdForRequest = resolvedParentId ?? null;
+        }
+        const requestBody = {
+          action: "create_file",
+          path,
+          projectId,
+          ...(parentIdForRequest ? { parentId: parentIdForRequest } : {}),
+        };
         const res = await fetch("/api/files", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "create_file", path, projectId, parentId }),
+          body: JSON.stringify(requestBody),
         });
         const raw = await res.text();
         let json: any = {};
@@ -1155,8 +1267,9 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
           setOpenTabs(prev => prev.map(id => id === tempId ? json.nodeId : id));
           setActiveNodeId(json.nodeId);
           setSelectedNodeIds(new Set([json.nodeId]));
-          // Push undo action for create
-          pushUndoAction({ type: "create", nodeId: json.nodeId });
+          // Update undo action for create
+          updateUndoCreateNodeId(tempId, json.nodeId);
+          tempIdPathMapRef.current.delete(tempId);
         }
         // 成功したら正式なデータで更新
         fetchNodes();
@@ -1176,26 +1289,30 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
               setActiveNodeId(recoveredNode.id);
             }
             setSelectedNodeIds(new Set([recoveredNode.id]));
+            updateUndoCreateNodeId(tempId, recoveredNode.id);
+            tempIdPathMapRef.current.delete(tempId);
           }
         } catch (refreshError) {
           console.error("Failed to refresh nodes after create error:", refreshError);
         }
-      if (!recovered) {
-        // 失敗したらロールバック
-        setNodes(prev => prev.filter(n => n.id !== tempId));
-        setOpenTabs(prev => prev.filter(id => id !== tempId));
-        setActiveNodeId(prevActiveId ?? null);
-        setSelectedNodeIds(new Set(prevSelectedIds));
-        editableTempNodeIdsRef.current.delete(tempId);
-        setTempFileContents((prev) => {
-          if (!Object.prototype.hasOwnProperty.call(prev, tempId)) return prev;
-          const next = { ...prev };
-          delete next[tempId];
-          tempFileContentsRef.current = next;
-          return next;
-        });
-        alert(`Error: ${error.message}`);
-      }
+        if (!recovered) {
+          // 失敗したらロールバック
+          removeUndoCreateAction(tempId);
+          tempIdPathMapRef.current.delete(tempId);
+          setNodes(prev => prev.filter(n => n.id !== tempId));
+          setOpenTabs(prev => prev.filter(id => id !== tempId));
+          setActiveNodeId(prevActiveId ?? null);
+          setSelectedNodeIds(new Set(prevSelectedIds));
+          editableTempNodeIdsRef.current.delete(tempId);
+          setTempFileContents((prev) => {
+            if (!Object.prototype.hasOwnProperty.call(prev, tempId)) return prev;
+            const next = { ...prev };
+            delete next[tempId];
+            tempFileContentsRef.current = next;
+            return next;
+          });
+          alert(`Error: ${error.message}`);
+        }
       }
     })();
   };
@@ -1225,14 +1342,27 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     setNodes(prev => [...prev, tempNode]);
     setSelectedNodeIds(new Set([tempId]));
     setRevealNodeId(tempId);
+    tempIdPathMapRef.current.set(tempId, path);
+    pushUndoAction({ type: "create", nodeId: tempId, node: tempNode });
 
     // バックグラウンドでAPI処理を実行（UIブロックしない）
     (async () => {
       try {
+        let parentIdForRequest: string | null = parentId;
+        if (parentId && parentId.startsWith("temp-")) {
+          const resolvedParentId = await resolveMaybeTempNodeId(parentId, 10000);
+          parentIdForRequest = resolvedParentId ?? null;
+        }
+        const requestBody = {
+          action: "create_folder",
+          path,
+          projectId,
+          ...(parentIdForRequest ? { parentId: parentIdForRequest } : {}),
+        };
         const res = await fetch("/api/files", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "create_folder", path, projectId, parentId }),
+          body: JSON.stringify(requestBody),
         });
         const raw = await res.text();
         let json: any = {};
@@ -1253,8 +1383,9 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
             return prev.map(n => n.id === tempId ? { ...n, id: json.nodeId } : n);
           });
           setSelectedNodeIds(new Set([json.nodeId]));
-          // Push undo action for create
-          pushUndoAction({ type: "create", nodeId: json.nodeId });
+          // Update undo action for create
+          updateUndoCreateNodeId(tempId, json.nodeId);
+          tempIdPathMapRef.current.delete(tempId);
         }
         fetchNodes();
       } catch (error: any) {
@@ -1269,11 +1400,15 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
             recovered = true;
             registerTempIdMapping(tempId, recoveredNode.id);
             setSelectedNodeIds(new Set([recoveredNode.id]));
+            updateUndoCreateNodeId(tempId, recoveredNode.id);
+            tempIdPathMapRef.current.delete(tempId);
           }
         } catch (refreshError) {
           console.error("Failed to refresh nodes after create error:", refreshError);
         }
         if (!recovered) {
+          removeUndoCreateAction(tempId);
+          tempIdPathMapRef.current.delete(tempId);
           setNodes(prev => prev.filter(n => n.id !== tempId));
           setSelectedNodeIds(new Set(prevSelectedIds));
           alert(`Error: ${error.message}`);
@@ -1997,6 +2132,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       const useStorage = isBinary || file.size > (isBinary ? STORAGE_THRESHOLD_BINARY : STORAGE_THRESHOLD_TEXT);
       const shouldFocus = file === lastFile;
       const shouldRevealImmediately = file === firstFile; // 最初のファイルで即座に中央表示
+      const fullPath = parentPath ? `${parentPath}/${fileName}` : fileName;
 
       // Create the file node optimistically FIRST (before any dialog)
       const tempId = `temp-${Date.now()}-${Math.random()}`;
@@ -2065,6 +2201,9 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
           }
         }
       }
+
+      tempIdPathMapRef.current.set(tempId, fullPath);
+      pushUndoAction({ type: "create", nodeId: tempId, source: "upload", node: tempNode });
 
       let uploadToStorage = useStorage;
       let textContent: string | null = null;
@@ -2137,7 +2276,6 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         } else {
           // Use regular JSON API for small text files
           const content = textContent ?? "";
-          const fullPath = parentPath ? `${parentPath}/${fileName}` : fileName;
 
           const res = await fetch("/api/files", {
             method: "POST",
@@ -2191,8 +2329,8 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
           delete next[tempId];
           return next;
         });
-        // Push undo action for upload
-        pushUndoAction({ type: "create", nodeId: newId, source: "upload" });
+        updateUndoCreateNodeId(tempId, newId);
+        tempIdPathMapRef.current.delete(tempId);
         lastSuccessId = newId;
         if (tempId === lastTempId) {
           lastFinalId = newId;
@@ -2209,6 +2347,8 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
           delete next[tempId];
           return next;
         });
+        removeUndoCreateAction(tempId);
+        tempIdPathMapRef.current.delete(tempId);
         if (createdNodeId) {
           try {
             await supabase.from("file_contents").delete().eq("node_id", createdNodeId);
@@ -2234,9 +2374,10 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         setRevealNodeId(finalId);
       }
     }
-  }, [activeActivity, projectId, supabase, pathByNodeId, registerTempIdMapping, uploadFileToSignedUrl, runWithConcurrency, findExistingNode, promptReplaceConfirmation, pushUndoAction]);
+  }, [activeActivity, projectId, supabase, pathByNodeId, registerTempIdMapping, uploadFileToSignedUrl, runWithConcurrency, findExistingNode, promptReplaceConfirmation, pushUndoAction, updateUndoCreateNodeId, removeUndoCreateAction]);
 
   const uploadFolderItems = useCallback(async (items: UploadItem[], parentId: string | null) => {
+    console.log("[FolderUpload] START - items:", items.length, "parentId:", parentId);
     if (items.length === 0) return;
 
     const baseParentPath = parentId ? pathByNodeId.get(parentId) || "" : "";
@@ -2253,6 +2394,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     }
 
     const rootFolderName = rootNames.length ? rootNames[rootNames.length - 1] : null;
+    console.log("[FolderUpload] rootFolderName:", rootFolderName, "rootNames:", rootNames);
     let lastCreatedNodeId: string | null = null;
 
     const folderIdByPath = new Map<string, string>();
@@ -2351,6 +2493,8 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       const normalized = item.relativePath.replace(/\\/g, "/").replace(/^\/+/, "");
       const tempId = `temp-folder-${Date.now()}-${Math.random()}`;
       tempIdByPath.set(normalized, tempId);
+      const fullPath = baseParentPath ? `${baseParentPath}/${normalized}` : normalized;
+      tempIdPathMapRef.current.set(tempId, fullPath);
 
       // Determine parent temp ID
       const parts = normalized.split("/");
@@ -2367,6 +2511,8 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         created_at: new Date().toISOString(),
       });
     }
+
+    const rootTempId = rootFolderName ? (tempIdByPath.get(rootFolderName) ?? null) : null;
 
     // Find existing nodes that will be replaced
     const existingNodesToReplace: Node[] = [];
@@ -2434,6 +2580,9 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       if (!shouldReplace) {
         // Restore all existing nodes and remove all temp nodes
         setNodes(prev => [...prev.filter(n => !tempIdsSet.has(n.id)), ...existingNodesToReplace]);
+        for (const tempId of tempIdsSet) {
+          tempIdPathMapRef.current.delete(tempId);
+        }
         return; // Cancel entire folder upload
       }
       // Clear deleted folder paths from cache to ensure new folders are created
@@ -2448,14 +2597,20 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       }
     }
 
-    // Select and reveal the root folder
-    if (rootFolderName) {
-      const rootPath = rootFolderName;
-      const rootTempId = tempIdByPath.get(rootPath);
-      if (rootTempId) {
-        setSelectedNodeIds(new Set([rootTempId]));
-        setRevealNodeId(rootTempId);
+    console.log("[FolderUpload] rootTempId:", rootTempId);
+    if (rootTempId) {
+      const rootTempNode = tempNodes.find(node => node.id === rootTempId);
+      console.log("[FolderUpload] rootTempNode:", rootTempNode);
+      if (rootTempNode) {
+        console.log("[FolderUpload] Pushing undo action with nodeId:", rootTempId);
+        pushUndoAction({ type: "create", nodeId: rootTempId, source: "upload", node: rootTempNode });
       }
+    }
+
+    // Select and reveal the root folder
+    if (rootTempId) {
+      setSelectedNodeIds(new Set([rootTempId]));
+      setRevealNodeId(rootTempId);
     }
 
     // Track temp IDs to remove later
@@ -2568,52 +2723,93 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       }
     };
 
+    console.log("[FolderUpload] Starting upload of", sortedItems.length, "items...");
     await runWithConcurrency(sortedItems, sortedItems.length, uploadOne);
+    console.log("[FolderUpload] Upload complete, fetching nodes...");
 
     // Remove temp nodes and fetch real nodes
     const refreshedNodes = await fetchNodes();
+    console.log("[FolderUpload] fetchNodes complete, got", refreshedNodes.length, "nodes");
     setNodes(prev => prev.filter(n => !tempIdsToRemove.has(n.id)));
 
+    let resolvedRootNodeId: string | null = null;
+    console.log("[FolderUpload] rootFolderName:", rootFolderName, "parentId:", parentId, "rootTempId:", rootTempId);
+    console.log("[FolderUpload] refreshedNodes count:", refreshedNodes.length);
     if (rootFolderName) {
       const folderNode = refreshedNodes.find((node: Node) =>
         node.type === "folder" &&
         node.name === rootFolderName &&
         node.parent_id === parentId
       );
+      console.log("[FolderUpload] folderNode found:", folderNode);
       if (folderNode) {
-        // Push undo action for folder upload
-        pushUndoAction({ type: "create", nodeId: folderNode.id, source: "upload" });
+        // Update undo action for folder upload
+        if (rootTempId) {
+          console.log("[FolderUpload] Registering mapping:", rootTempId, "->", folderNode.id);
+          registerTempIdMapping(rootTempId, folderNode.id);
+          updateUndoCreateNodeId(rootTempId, folderNode.id);
+        }
+        resolvedRootNodeId = folderNode.id;
         setSelectedNodeIds(new Set([folderNode.id]));
         setRevealNodeId(folderNode.id);
         if (activeActivity !== "explorer") {
           setActiveActivity("explorer");
         }
+        if (tempIdsToRemove.size > 0) {
+          for (const tempId of tempIdsToRemove) {
+            tempIdPathMapRef.current.delete(tempId);
+          }
+        }
         return;
+      } else if (rootTempId) {
+        // folderNode not found, try to resolve using path
+        const rootPath = baseParentPath ? `${baseParentPath}/${rootFolderName}` : rootFolderName;
+        const rootNodeId = nodeIdByPath.get(rootPath);
+        if (rootNodeId) {
+          registerTempIdMapping(rootTempId, rootNodeId);
+          updateUndoCreateNodeId(rootTempId, rootNodeId);
+          resolvedRootNodeId = rootNodeId;
+        }
+      }
+    }
+    if (tempIdsToRemove.size > 0) {
+      for (const tempId of tempIdsToRemove) {
+        if (rootTempId && !resolvedRootNodeId && tempId === rootTempId) continue;
+        tempIdPathMapRef.current.delete(tempId);
       }
     }
     if (lastCreatedNodeId) {
       handleOpenNode(lastCreatedNodeId);
     }
-  }, [activeActivity, fetchNodes, handleOpenNode, nodes, pathByNodeId, projectId, runWithConcurrency, supabase, uploadFileToSignedUrl, findExistingNode, promptReplaceConfirmation, pushUndoAction]);
+  }, [activeActivity, fetchNodes, handleOpenNode, nodes, nodeIdByPath, pathByNodeId, projectId, runWithConcurrency, supabase, uploadFileToSignedUrl, findExistingNode, promptReplaceConfirmation, pushUndoAction, registerTempIdMapping, updateUndoCreateNodeId]);
 
   const handleFileInputChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
-    if (!files || files.length === 0) return;
+    if (!files || files.length === 0) {
+      fileInputRef.current?.blur();
+      return;
+    }
 
     const parentId = uploadTargetParentId;
+    fileInputRef.current?.blur();
     await uploadFiles(Array.from(files), parentId);
 
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
+      fileInputRef.current.blur();
     }
     setUploadTargetParentId(null);
   }, [uploadFiles, uploadTargetParentId]);
 
   const handleFolderInputChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
-    if (!files || files.length === 0) return;
+    if (!files || files.length === 0) {
+      folderInputRef.current?.blur();
+      return;
+    }
 
     const parentId = uploadTargetParentId;
+    folderInputRef.current?.blur();
 
     // Collect all unique folder paths from file paths
     const folderPaths = new Set<string>();
@@ -2652,6 +2848,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
 
     if (folderInputRef.current) {
       folderInputRef.current.value = "";
+      folderInputRef.current.blur();
     }
     setUploadTargetParentId(null);
   }, [uploadFolderItems, uploadTargetParentId]);
@@ -4005,10 +4202,9 @@ ${diffs}`;
     }
   };
 
-  // ワークスペースをIDで名前変更（コンテキストメニューから）
-  const handleRenameWorkspaceById = (workspaceId: string, currentName: string) => {
-    const newName = prompt("新しいワークスペース名を入力してください", currentName);
-    if (!newName || newName === currentName) return;
+  // ワークスペースをIDで名前変更（インライン編集から）
+  const handleRenameWorkspaceById = (workspaceId: string, newName: string) => {
+    if (!newName.trim()) return;
 
     // 現在のワークスペースかどうか確認
     if (workspaceId === activeWorkspace.id) {
@@ -4034,13 +4230,41 @@ ${diffs}`;
     }
   };
 
-  // ワークスペースをIDで削除（コンテキストメニューから）
-  const handleDeleteWorkspaceById = async (workspaceId: string, workspaceName: string) => {
-    const confirmed = confirm(`「${workspaceName}」を削除しますか？この操作は取り消せません。`);
-    if (!confirmed) return;
+  // ワークスペースをIDで削除（コンテキストメニューから）- ダイアログを表示
+  const handleDeleteWorkspaceById = (workspaceId: string, workspaceName: string) => {
+    setDeletingWorkspace({ id: workspaceId, name: workspaceName });
+  };
 
+  // ワークスペース削除の実行（オプティミスティックアップデート）
+  const executeDeleteWorkspace = async () => {
+    if (!deletingWorkspace) return;
+
+    const workspaceToDelete = deletingWorkspace;
+    const previousWorkspaces = currentWorkspaces;
+
+    // 即座にUIを更新
+    setDeletingWorkspace(null);
+
+    // 削除したワークスペースが現在のワークスペースだった場合
+    if (workspaceToDelete.id === activeWorkspace.id) {
+      const remainingWorkspaces = currentWorkspaces.filter(w => w.id !== workspaceToDelete.id);
+      if (remainingWorkspaces.length > 0) {
+        // 即座に別のワークスペースに切り替え
+        setActiveWorkspace(remainingWorkspaces[0]);
+        setCurrentWorkspaces(remainingWorkspaces);
+        window.history.replaceState(null, "", `/app?workspace=${remainingWorkspaces[0].id}`);
+      } else {
+        window.location.href = "/app";
+        return;
+      }
+    } else {
+      // 別のワークスペースを削除した場合はリストを即座に更新
+      setCurrentWorkspaces(prev => prev.filter(w => w.id !== workspaceToDelete.id));
+    }
+
+    // バックグラウンドでAPIを呼び出し
     try {
-      const res = await fetch(`/api/workspaces?workspaceId=${workspaceId}`, {
+      const res = await fetch(`/api/workspaces?workspaceId=${workspaceToDelete.id}`, {
         method: "DELETE",
       });
 
@@ -4048,20 +4272,9 @@ ${diffs}`;
         const error = await res.json();
         throw new Error(error.error);
       }
-
-      // 削除したワークスペースが現在のワークスペースだった場合
-      if (workspaceId === activeWorkspace.id) {
-        const remainingWorkspaces = currentWorkspaces.filter(w => w.id !== workspaceId);
-        if (remainingWorkspaces.length > 0) {
-          window.location.href = `/app?workspace=${remainingWorkspaces[0].id}`;
-        } else {
-          window.location.href = "/app";
-        }
-      } else {
-        // 別のワークスペースを削除した場合はリストを更新
-        setCurrentWorkspaces(prev => prev.filter(w => w.id !== workspaceId));
-      }
     } catch (error: any) {
+      // エラーの場合は元に戻す
+      setCurrentWorkspaces(previousWorkspaces);
       alert(`Error: ${error.message}`);
     }
   };
@@ -4096,6 +4309,7 @@ ${diffs}`;
             onCopyNodes={handleCopyNodes}
             onUndo={handleUndo}
             onRedo={handleRedo}
+            activeNodeId={activeNodeId}
             projectName={activeWorkspace.name}
             userEmail={userEmail}
             onOpenSettings={() => setActiveActivity("settings")}
@@ -4205,31 +4419,26 @@ ${diffs}`;
           />
         )}
 
-        {/* ワークスペース削除確認ダイアログ */}
-        {showDeleteWorkspaceConfirm && (
-          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-            <div className="bg-white rounded-lg shadow-xl w-96 p-6">
-              <h2 className="text-lg font-semibold mb-2">ワークスペースを削除</h2>
-              <p className="text-zinc-600 mb-4">
-                「{activeWorkspace.name}」を削除しますか？この操作は取り消せません。すべてのファイルとフォルダも削除されます。
-              </p>
-              <div className="mt-4 flex justify-end gap-2">
-                <button
-                  onClick={() => setShowDeleteWorkspaceConfirm(false)}
-                  className="px-4 py-2 text-zinc-600 hover:bg-zinc-100 rounded-md"
-                >
-                  キャンセル
-                </button>
-                <button
-                  onClick={handleDeleteWorkspace}
-                  className="px-4 py-2 bg-red-500 text-white rounded-md hover:bg-red-600"
-                >
-                  削除
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
+        {/* ワークスペース削除確認ダイアログ（ヘッダーから） */}
+        <DeleteConfirmDialog
+          isOpen={showDeleteWorkspaceConfirm}
+          names={[activeWorkspace.name]}
+          itemType="folder"
+          onConfirm={() => {
+            setShowDeleteWorkspaceConfirm(false);
+            handleDeleteWorkspace();
+          }}
+          onCancel={() => setShowDeleteWorkspaceConfirm(false)}
+        />
+
+        {/* ワークスペース削除確認ダイアログ（コンテキストメニューから） */}
+        <DeleteConfirmDialog
+          isOpen={!!deletingWorkspace}
+          names={deletingWorkspace ? [deletingWorkspace.name] : []}
+          itemType="folder"
+          onConfirm={executeDeleteWorkspace}
+          onCancel={() => setDeletingWorkspace(null)}
+        />
 
         {/* ファイル/フォルダ置換確認ダイアログ */}
         <ReplaceConfirmDialog

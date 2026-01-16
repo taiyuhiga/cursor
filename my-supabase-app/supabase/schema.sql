@@ -80,6 +80,111 @@ alter table public.file_contents enable row level security;
 alter table public.chat_sessions enable row level security;
 alter table public.chat_messages enable row level security;
 
+-- Workspace policies
+create policy "Workspace members can view workspaces"
+  on public.workspaces for select
+  using (exists (
+    select 1 from public.workspace_members
+    where workspace_members.workspace_id = workspaces.id
+    and workspace_members.user_id = auth.uid()
+  ));
+
+create policy "Users can create workspaces"
+  on public.workspaces for insert
+  with check (auth.uid() = owner_id);
+
+create policy "Owners can update workspaces"
+  on public.workspaces for update
+  using (auth.uid() = owner_id);
+
+create policy "Owners can delete workspaces"
+  on public.workspaces for delete
+  using (auth.uid() = owner_id);
+
+-- Workspace members policies
+create policy "Workspace members can view members"
+  on public.workspace_members for select
+  using (exists (
+    select 1 from public.workspace_members wm
+    where wm.workspace_id = workspace_members.workspace_id
+    and wm.user_id = auth.uid()
+  ));
+
+create policy "Owners and admins can manage members"
+  on public.workspace_members for insert
+  with check (exists (
+    select 1 from public.workspace_members wm
+    where wm.workspace_id = workspace_members.workspace_id
+    and wm.user_id = auth.uid()
+    and wm.role in ('owner', 'admin')
+  ) or auth.uid() = user_id);
+
+create policy "Owners and admins can delete members"
+  on public.workspace_members for delete
+  using (exists (
+    select 1 from public.workspace_members wm
+    where wm.workspace_id = workspace_members.workspace_id
+    and wm.user_id = auth.uid()
+    and wm.role in ('owner', 'admin')
+  ) or auth.uid() = user_id);
+
+-- Projects policies
+create policy "Workspace members can view projects"
+  on public.projects for select
+  using (exists (
+    select 1 from public.workspace_members
+    where workspace_members.workspace_id = projects.workspace_id
+    and workspace_members.user_id = auth.uid()
+  ));
+
+create policy "Workspace members can manage projects"
+  on public.projects for all
+  using (exists (
+    select 1 from public.workspace_members
+    where workspace_members.workspace_id = projects.workspace_id
+    and workspace_members.user_id = auth.uid()
+  ));
+
+-- Nodes policies
+create policy "Project members can view nodes"
+  on public.nodes for select
+  using (exists (
+    select 1 from public.projects
+    join public.workspace_members on workspace_members.workspace_id = projects.workspace_id
+    where projects.id = nodes.project_id
+    and workspace_members.user_id = auth.uid()
+  ) or is_public = true);
+
+create policy "Project members can manage nodes"
+  on public.nodes for all
+  using (exists (
+    select 1 from public.projects
+    join public.workspace_members on workspace_members.workspace_id = projects.workspace_id
+    where projects.id = nodes.project_id
+    and workspace_members.user_id = auth.uid()
+  ));
+
+-- File contents policies
+create policy "Project members can view file contents"
+  on public.file_contents for select
+  using (exists (
+    select 1 from public.nodes
+    join public.projects on projects.id = nodes.project_id
+    join public.workspace_members on workspace_members.workspace_id = projects.workspace_id
+    where nodes.id = file_contents.node_id
+    and workspace_members.user_id = auth.uid()
+  ));
+
+create policy "Project members can manage file contents"
+  on public.file_contents for all
+  using (exists (
+    select 1 from public.nodes
+    join public.projects on projects.id = nodes.project_id
+    join public.workspace_members on workspace_members.workspace_id = projects.workspace_id
+    where nodes.id = file_contents.node_id
+    and workspace_members.user_id = auth.uid()
+  ));
+
 -- Simple RLS for development (allow authenticated users to do everything for now)
 -- In production, these should be stricter
 create policy "Users can view their own chat sessions"
