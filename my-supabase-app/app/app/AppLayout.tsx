@@ -635,6 +635,11 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
 
     const action = undoStack[undoStack.length - 1];
 
+    if (action.type === "delete") {
+      setUndoStack(prev => prev.slice(0, -1));
+      return;
+    }
+
     // Show confirmation dialog for create and copy actions
     if (action.type === "create" || action.type === "copy") {
       let actionName: string;
@@ -658,64 +663,31 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
 
     try {
       switch (action.type) {
-        case "delete": {
-          // Restore deleted node and its children
-          const { node, content, children } = action;
-
-          // First restore the parent node
-          const res = await fetch("/api/files", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              action: node.type === "file" ? "create_file" : "create_folder",
-              path: node.name,
-              content: content || "",
-              projectId: node.project_id,
-              parentId: node.parent_id,
-            }),
-          });
-          const json = await res.json();
-          if (!res.ok) throw new Error(json?.error || "Failed to restore");
-
-          // Restore children if any
-          if (children && children.length > 0) {
-            const newParentId = json.nodeId;
-            for (const child of children) {
-              await fetch("/api/files", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  action: child.node.type === "file" ? "create_file" : "create_folder",
-                  path: child.node.name,
-                  content: child.content || "",
-                  projectId: child.node.project_id,
-                  parentId: child.node.parent_id === node.id ? newParentId : child.node.parent_id,
-                }),
-              });
-            }
-          }
-
-          // Push to redo stack (create action to redo = delete again)
-          setRedoStack(prev => [...prev, { type: "create", nodeId: json.nodeId, node, content }]);
-          fetchNodes();
-          break;
-        }
         case "create": {
           // Get node info before deleting (for redo)
           const nodeToDelete = nodes.find(n => n.id === action.nodeId);
-          let contentToSave: string | undefined;
-          if (nodeToDelete?.type === "file") {
-            try {
-              const { data } = await supabase
-                .from("file_contents")
-                .select("text")
-                .eq("node_id", action.nodeId)
-                .single();
-              contentToSave = data?.text;
-            } catch {
-              // ignore
-            }
+          const contentPromise = nodeToDelete?.type === "file"
+            ? supabase
+              .from("file_contents")
+              .select("text")
+              .eq("node_id", action.nodeId)
+              .single()
+              .then(({ data }) => data?.text)
+              .catch(() => undefined)
+            : Promise.resolve(undefined);
+
+          // Optimistic: update UI immediately
+          setNodes(prev => prev.filter(n => n.id !== action.nodeId));
+          setOpenTabs(prev => prev.filter(id => id !== action.nodeId));
+          if (activeNodeId === action.nodeId) {
+            setActiveNodeId(null);
           }
+          setSelectedNodeIds(prev => {
+            if (!prev.has(action.nodeId)) return prev;
+            const next = new Set(prev);
+            next.delete(action.nodeId);
+            return next;
+          });
 
           // Delete the created node
           const res = await fetch("/api/files", {
@@ -725,48 +697,34 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
           });
           if (!res.ok) throw new Error("Failed to undo create");
 
+          const contentToSave = await contentPromise;
           // Push to redo stack (delete action to redo = create again)
           if (nodeToDelete) {
             setRedoStack(prev => [...prev, { type: "delete", nodeId: action.nodeId, node: nodeToDelete, content: contentToSave }]);
           }
-
-          setNodes(prev => prev.filter(n => n.id !== action.nodeId));
-          setOpenTabs(prev => prev.filter(id => id !== action.nodeId));
-          if (activeNodeId === action.nodeId) {
-            setActiveNodeId(null);
-          }
           break;
         }
         case "rename": {
+          // Optimistic: rename back to old name
+          setNodes(prev => prev.map(n => n.id === action.nodeId ? { ...n, name: action.oldName } : n));
+
           // Rename back to old name
           const res = await fetch("/api/files", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ action: "rename_node", id: action.nodeId, newName: action.oldName }),
           });
-          if (!res.ok) throw new Error("Failed to undo rename");
+          if (!res.ok) {
+            setNodes(prev => prev.map(n => n.id === action.nodeId ? { ...n, name: action.newName } : n));
+            throw new Error("Failed to undo rename");
+          }
 
           // Push to redo stack (swap old and new names)
           setRedoStack(prev => [...prev, { type: "rename", nodeId: action.nodeId, oldName: action.newName, newName: action.oldName }]);
-
-          setNodes(prev => prev.map(n => n.id === action.nodeId ? { ...n, name: action.oldName } : n));
           break;
         }
         case "move": {
-          // Move back to original parent
-          await Promise.all(action.nodeIds.map(async (nodeId, index) => {
-            const res = await fetch("/api/files", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ action: "move_node", id: nodeId, newParentId: action.oldParentIds[index] }),
-            });
-            if (!res.ok) throw new Error(`Failed to undo move for ${nodeId}`);
-          }));
-
-          // Push to redo stack (swap old and new parent IDs)
-          const currentParentIds = action.nodeIds.map(() => action.newParentId);
-          setRedoStack(prev => [...prev, { type: "move", nodeIds: action.nodeIds, oldParentIds: currentParentIds, newParentId: action.oldParentIds[0] }]);
-
+          // Optimistic: move back to original parents
           setNodes(prev => prev.map(n => {
             const index = action.nodeIds.indexOf(n.id);
             if (index >= 0) {
@@ -774,19 +732,64 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
             }
             return n;
           }));
+
+          // Move back to original parent
+          try {
+            await Promise.all(action.nodeIds.map(async (nodeId, index) => {
+              const res = await fetch("/api/files", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "move_node", id: nodeId, newParentId: action.oldParentIds[index] }),
+              });
+              if (!res.ok) throw new Error(`Failed to undo move for ${nodeId}`);
+            }));
+          } catch (error) {
+            setNodes(prev => prev.map(n => {
+              if (action.nodeIds.includes(n.id)) {
+                return { ...n, parent_id: action.newParentId };
+              }
+              return n;
+            }));
+            throw error;
+          }
+
+          // Push to redo stack (swap old and new parent IDs)
+          const currentParentIds = action.nodeIds.map(() => action.newParentId);
+          setRedoStack(prev => [...prev, { type: "move", nodeIds: action.nodeIds, oldParentIds: currentParentIds, newParentId: action.oldParentIds[0] }]);
           break;
         }
         case "copy": {
+          const idsToRemove = new Set<string>();
+          const collectChildren = (parentId: string) => {
+            idsToRemove.add(parentId);
+            nodes
+              .filter(n => n.parent_id === parentId)
+              .forEach(child => collectChildren(child.id));
+          };
+          action.nodeIds.forEach((nodeId) => collectChildren(nodeId));
+
+          // Optimistic: remove copied nodes immediately
+          setNodes(prev => prev.filter(n => !idsToRemove.has(n.id)));
+          setOpenTabs(prev => prev.filter(id => !idsToRemove.has(id)));
+          if (activeNodeId && idsToRemove.has(activeNodeId)) {
+            setActiveNodeId(null);
+          }
+          setSelectedNodeIds(prev => {
+            if (prev.size === 0) return prev;
+            const next = new Set(prev);
+            idsToRemove.forEach((nodeId) => next.delete(nodeId));
+            return next;
+          });
+
           // Delete the copied nodes
-          for (const nodeId of action.nodeIds) {
-            await fetch("/api/files", {
+          await Promise.all(action.nodeIds.map((nodeId) =>
+            fetch("/api/files", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ action: "delete_node", id: nodeId }),
-            });
-          }
+            })
+          ));
           // Push to redo stack (copy action - but we can't easily redo copy, so skip)
-          fetchNodes();
           break;
         }
       }
@@ -794,6 +797,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       alert(`元に戻せませんでした: ${error.message}`);
       // Put the action back on the stack if it failed
       setUndoStack(prev => [...prev, action]);
+      void fetchNodes(false);
     }
   }, [undoStack, nodes, activeNodeId, fetchNodes, supabase, promptUndoConfirmation]);
 
@@ -831,19 +835,28 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         case "create": {
           // Redo create = delete the node again
           const nodeToDelete = nodes.find(n => n.id === action.nodeId);
-          let contentToSave: string | undefined;
-          if (action.node?.type === "file" || nodeToDelete?.type === "file") {
-            try {
-              const { data } = await supabase
-                .from("file_contents")
-                .select("text")
-                .eq("node_id", action.nodeId)
-                .single();
-              contentToSave = data?.text;
-            } catch {
-              contentToSave = action.content;
-            }
+          const contentPromise = (action.node?.type === "file" || nodeToDelete?.type === "file")
+            ? supabase
+              .from("file_contents")
+              .select("text")
+              .eq("node_id", action.nodeId)
+              .single()
+              .then(({ data }) => data?.text)
+              .catch(() => action.content)
+            : Promise.resolve(action.content);
+
+          // Optimistic: remove immediately
+          setNodes(prev => prev.filter(n => n.id !== action.nodeId));
+          setOpenTabs(prev => prev.filter(id => id !== action.nodeId));
+          if (activeNodeId === action.nodeId) {
+            setActiveNodeId(null);
           }
+          setSelectedNodeIds(prev => {
+            if (!prev.has(action.nodeId)) return prev;
+            const next = new Set(prev);
+            next.delete(action.nodeId);
+            return next;
+          });
 
           const res = await fetch("/api/files", {
             method: "POST",
@@ -852,49 +865,35 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
           });
           if (!res.ok) throw new Error("Failed to redo delete");
 
+          const contentToSave = await contentPromise;
           // Push back to undo stack
           const nodeInfo = nodeToDelete || action.node;
           if (nodeInfo) {
             setUndoStack(prev => [...prev, { type: "delete", nodeId: action.nodeId, node: nodeInfo, content: contentToSave }]);
           }
-
-          setNodes(prev => prev.filter(n => n.id !== action.nodeId));
-          setOpenTabs(prev => prev.filter(id => id !== action.nodeId));
-          if (activeNodeId === action.nodeId) {
-            setActiveNodeId(null);
-          }
           break;
         }
         case "rename": {
+          // Optimistic: apply rename immediately
+          setNodes(prev => prev.map(n => n.id === action.nodeId ? { ...n, name: action.oldName } : n));
+
           // Redo rename = rename back to the "new" name (which is now oldName in redo action)
           const res = await fetch("/api/files", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ action: "rename_node", id: action.nodeId, newName: action.oldName }),
           });
-          if (!res.ok) throw new Error("Failed to redo rename");
+          if (!res.ok) {
+            setNodes(prev => prev.map(n => n.id === action.nodeId ? { ...n, name: action.newName } : n));
+            throw new Error("Failed to redo rename");
+          }
 
           // Push back to undo stack (swap names again)
           setUndoStack(prev => [...prev, { type: "rename", nodeId: action.nodeId, oldName: action.newName, newName: action.oldName }]);
-
-          setNodes(prev => prev.map(n => n.id === action.nodeId ? { ...n, name: action.oldName } : n));
           break;
         }
         case "move": {
-          // Redo move = move to the "new" parent (which is now in oldParentIds)
-          await Promise.all(action.nodeIds.map(async (nodeId, index) => {
-            const res = await fetch("/api/files", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ action: "move_node", id: nodeId, newParentId: action.oldParentIds[index] }),
-            });
-            if (!res.ok) throw new Error(`Failed to redo move for ${nodeId}`);
-          }));
-
-          // Push back to undo stack
-          const currentParentIds = action.nodeIds.map(() => action.newParentId);
-          setUndoStack(prev => [...prev, { type: "move", nodeIds: action.nodeIds, oldParentIds: currentParentIds, newParentId: action.oldParentIds[0] }]);
-
+          // Optimistic: move to the "new" parent (which is now in oldParentIds)
           setNodes(prev => prev.map(n => {
             const index = action.nodeIds.indexOf(n.id);
             if (index >= 0) {
@@ -902,6 +901,30 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
             }
             return n;
           }));
+
+          // Redo move = move to the "new" parent (which is now in oldParentIds)
+          try {
+            await Promise.all(action.nodeIds.map(async (nodeId, index) => {
+              const res = await fetch("/api/files", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "move_node", id: nodeId, newParentId: action.oldParentIds[index] }),
+              });
+              if (!res.ok) throw new Error(`Failed to redo move for ${nodeId}`);
+            }));
+          } catch (error) {
+            setNodes(prev => prev.map(n => {
+              if (action.nodeIds.includes(n.id)) {
+                return { ...n, parent_id: action.newParentId };
+              }
+              return n;
+            }));
+            throw error;
+          }
+
+          // Push back to undo stack
+          const currentParentIds = action.nodeIds.map(() => action.newParentId);
+          setUndoStack(prev => [...prev, { type: "move", nodeIds: action.nodeIds, oldParentIds: currentParentIds, newParentId: action.oldParentIds[0] }]);
           break;
         }
         case "copy": {
@@ -913,6 +936,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       alert(`やり直せませんでした: ${error.message}`);
       // Put the action back on the redo stack if it failed
       setRedoStack(prev => [...prev, action]);
+      void fetchNodes(false);
     }
   }, [redoStack, nodes, activeNodeId, fetchNodes, supabase]);
 
@@ -3981,6 +4005,72 @@ ${diffs}`;
     }
   };
 
+  // ワークスペースをIDで名前変更（コンテキストメニューから）
+  const handleRenameWorkspaceById = (workspaceId: string, currentName: string) => {
+    const newName = prompt("新しいワークスペース名を入力してください", currentName);
+    if (!newName || newName === currentName) return;
+
+    // 現在のワークスペースかどうか確認
+    if (workspaceId === activeWorkspace.id) {
+      handleRenameWorkspace(newName);
+    } else {
+      // 別のワークスペースの名前を変更
+      (async () => {
+        try {
+          const res = await fetch("/api/workspaces", {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ workspaceId, name: newName }),
+          });
+          if (!res.ok) {
+            const error = await res.json();
+            throw new Error(error.error);
+          }
+          setCurrentWorkspaces(prev => prev.map(w => w.id === workspaceId ? { ...w, name: newName } : w));
+        } catch (error: any) {
+          alert(`Error: ${error.message}`);
+        }
+      })();
+    }
+  };
+
+  // ワークスペースをIDで削除（コンテキストメニューから）
+  const handleDeleteWorkspaceById = async (workspaceId: string, workspaceName: string) => {
+    const confirmed = confirm(`「${workspaceName}」を削除しますか？この操作は取り消せません。`);
+    if (!confirmed) return;
+
+    try {
+      const res = await fetch(`/api/workspaces?workspaceId=${workspaceId}`, {
+        method: "DELETE",
+      });
+
+      if (!res.ok) {
+        const error = await res.json();
+        throw new Error(error.error);
+      }
+
+      // 削除したワークスペースが現在のワークスペースだった場合
+      if (workspaceId === activeWorkspace.id) {
+        const remainingWorkspaces = currentWorkspaces.filter(w => w.id !== workspaceId);
+        if (remainingWorkspaces.length > 0) {
+          window.location.href = `/app?workspace=${remainingWorkspaces[0].id}`;
+        } else {
+          window.location.href = "/app";
+        }
+      } else {
+        // 別のワークスペースを削除した場合はリストを更新
+        setCurrentWorkspaces(prev => prev.filter(w => w.id !== workspaceId));
+      }
+    } catch (error: any) {
+      alert(`Error: ${error.message}`);
+    }
+  };
+
+  // ワークスペースを共有（機能は未実装）
+  const handleShareWorkspace = (workspaceId: string) => {
+    alert("共有機能は準備中です");
+  };
+
   const renderSidebarContent = () => {
     switch (activeActivity) {
       case "explorer":
@@ -4016,6 +4106,9 @@ ${diffs}`;
             activeWorkspaceId={activeWorkspace.id}
             onSelectWorkspace={handleSwitchWorkspace}
             onCreateWorkspace={handleOpenCreateWorkspace}
+            onRenameWorkspaceById={handleRenameWorkspaceById}
+            onDeleteWorkspaceById={handleDeleteWorkspaceById}
+            onShareWorkspace={handleShareWorkspace}
           />
         );
       case "git":

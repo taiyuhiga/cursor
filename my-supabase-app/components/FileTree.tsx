@@ -53,6 +53,10 @@ type FileTreeProps = {
   activeWorkspaceId?: string;
   onSelectWorkspace?: (id: string) => void;
   onCreateWorkspace?: () => void;
+  // ワークスペースコンテキストメニュー用
+  onRenameWorkspaceById?: (workspaceId: string, currentName: string) => void;
+  onDeleteWorkspaceById?: (workspaceId: string, workspaceName: string) => void;
+  onShareWorkspace?: (workspaceId: string) => void;
 };
 
 type EditingState = {
@@ -150,12 +154,23 @@ export function FileTree({
   activeWorkspaceId,
   onSelectWorkspace,
   onCreateWorkspace,
+  onRenameWorkspaceById,
+  onDeleteWorkspaceById,
+  onShareWorkspace,
 }: FileTreeProps) {
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
     targetId: string | null;
+  } | null>(null);
+
+  // ワークスペース用コンテキストメニュー
+  const [wsContextMenu, setWsContextMenu] = useState<{
+    x: number;
+    y: number;
+    workspaceId: string;
+    workspaceName: string;
   } | null>(null);
 
   const [editingState, setEditingState] = useState<EditingState | null>(null);
@@ -1375,24 +1390,59 @@ export function FileTree({
               <div className="py-1">
                 {workspaces && workspaces.length > 0 ? (
                   workspaces.map((ws) => (
-                    <button
+                    <div
                       key={ws.id}
-                      className="w-full px-3 py-2 text-left hover:bg-zinc-50 flex items-center gap-2"
-                      onClick={() => {
-                        onSelectWorkspace?.(ws.id);
-                        setIsWorkspacePopoverOpen(false);
-                      }}
+                      className="w-full px-3 py-2 hover:bg-zinc-50 flex items-center group/wsitem"
                     >
-                      <div className="w-6 h-6 rounded bg-zinc-100 flex items-center justify-center flex-shrink-0 text-xs font-semibold text-zinc-600">
-                        {ws.name.charAt(0).toUpperCase()}
+                      <button
+                        className="flex items-center gap-2 flex-1 min-w-0 text-left"
+                        onClick={() => {
+                          onSelectWorkspace?.(ws.id);
+                          setIsWorkspacePopoverOpen(false);
+                        }}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setWsContextMenu({
+                            x: e.clientX,
+                            y: e.clientY,
+                            workspaceId: ws.id,
+                            workspaceName: ws.name,
+                          });
+                        }}
+                      >
+                        <div className="w-6 h-6 rounded bg-zinc-100 flex items-center justify-center flex-shrink-0 text-xs font-semibold text-zinc-600">
+                          {ws.name.charAt(0).toUpperCase()}
+                        </div>
+                        <span className="text-sm text-zinc-700 truncate">{ws.name}</span>
+                      </button>
+                      {/* 右寄せのコンテナ */}
+                      <div className="flex items-center gap-1 ml-auto">
+                        {ws.id === activeWorkspaceId && (
+                          <svg className="w-4 h-4 text-zinc-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                          </svg>
+                        )}
+                        {/* 縦3点メニュー */}
+                        <button
+                          className="p-1 rounded hover:bg-zinc-200 text-zinc-400 hover:text-zinc-600 flex-shrink-0 opacity-0 group-hover/wsitem:opacity-100 transition-opacity"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const rect = e.currentTarget.getBoundingClientRect();
+                            setWsContextMenu({
+                              x: rect.left,
+                              y: rect.bottom + 4,
+                              workspaceId: ws.id,
+                              workspaceName: ws.name,
+                            });
+                          }}
+                        >
+                          <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                            <path d="M10 6a2 2 0 110-4 2 2 0 010 4zM10 12a2 2 0 110-4 2 2 0 010 4zM10 18a2 2 0 110-4 2 2 0 010 4z" />
+                          </svg>
+                        </button>
                       </div>
-                      <span className="text-sm text-zinc-700 truncate flex-1">{ws.name}</span>
-                      {ws.id === activeWorkspaceId && (
-                        <svg className="w-4 h-4 text-zinc-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                        </svg>
-                      )}
-                    </button>
+                    </div>
                   ))
                 ) : (
                   <div className="px-3 py-2 text-sm text-zinc-400">
@@ -1730,6 +1780,44 @@ export function FileTree({
           />
         );
       })()}
+
+      {/* Workspace context menu */}
+      {wsContextMenu && (
+        <ContextMenu
+          x={wsContextMenu.x}
+          y={wsContextMenu.y}
+          onClose={() => setWsContextMenu(null)}
+          items={[
+            {
+              label: "共有",
+              icon: (
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z" />
+                </svg>
+              ),
+              action: () => {
+                onShareWorkspace?.(wsContextMenu.workspaceId);
+              },
+            },
+            {
+              label: "ワークスペース名を変更",
+              icon: <ActionIcons.Rename className="w-4 h-4" />,
+              action: () => {
+                onRenameWorkspaceById?.(wsContextMenu.workspaceId, wsContextMenu.workspaceName);
+              },
+            },
+            { separator: true, label: "", action: () => {} },
+            {
+              label: "ワークスペースを削除",
+              icon: <ActionIcons.Trash className="w-4 h-4" />,
+              action: () => {
+                onDeleteWorkspaceById?.(wsContextMenu.workspaceId, wsContextMenu.workspaceName);
+              },
+              danger: true,
+            },
+          ]}
+        />
+      )}
 
       {/* Hidden drag preview element */}
       <div

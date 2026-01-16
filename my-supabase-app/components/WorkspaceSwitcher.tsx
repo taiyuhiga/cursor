@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
+import { ContextMenu } from "./ContextMenu";
 
 type Workspace = {
   id: string;
@@ -10,12 +11,23 @@ type Workspace = {
   role: string;
 };
 
+type ContextMenuState = {
+  isOpen: boolean;
+  x: number;
+  y: number;
+  workspaceId: string;
+  workspaceName: string;
+} | null;
+
 type Props = {
   workspaces: Workspace[];
   currentWorkspace: Workspace;
   userEmail: string;
   onSwitch: (workspaceId: string) => void;
   onCreateNew: () => void;
+  onRename?: (workspaceId: string, currentName: string) => void;
+  onDelete?: (workspaceId: string, workspaceName: string) => void;
+  onShare?: (workspaceId: string) => void;
 };
 
 export function WorkspaceSwitcher({
@@ -24,8 +36,12 @@ export function WorkspaceSwitcher({
   userEmail,
   onSwitch,
   onCreateNew,
+  onRename,
+  onDelete,
+  onShare,
 }: Props) {
   const [isOpen, setIsOpen] = useState(false);
+  const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -41,6 +57,66 @@ export function WorkspaceSwitcher({
   // ワークスペースの頭文字を取得
   const getInitial = (name: string) => {
     return name.charAt(0).toUpperCase();
+  };
+
+  // 右クリックハンドラー
+  const handleContextMenu = (e: React.MouseEvent, workspace: Workspace) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setContextMenu({
+      isOpen: true,
+      x: e.clientX,
+      y: e.clientY,
+      workspaceId: workspace.id,
+      workspaceName: workspace.name,
+    });
+  };
+
+  // コンテキストメニューを閉じる
+  const closeContextMenu = () => {
+    setContextMenu(null);
+  };
+
+  // コンテキストメニューのアイテム
+  const getContextMenuItems = () => {
+    if (!contextMenu) return [];
+    return [
+      {
+        label: "共有",
+        action: () => {
+          onShare?.(contextMenu.workspaceId);
+        },
+        icon: (
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z" />
+          </svg>
+        ),
+      },
+      {
+        label: "ワークスペース名を変更",
+        action: () => {
+          onRename?.(contextMenu.workspaceId, contextMenu.workspaceName);
+        },
+        icon: (
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+          </svg>
+        ),
+      },
+      { label: "", action: () => {}, separator: true },
+      {
+        label: "ワークスペースを削除",
+        action: () => {
+          onDelete?.(contextMenu.workspaceId, contextMenu.workspaceName);
+        },
+        danger: true,
+        icon: (
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+          </svg>
+        ),
+      },
+    ];
   };
 
   // 自分のワークスペースとチームワークスペースを分ける
@@ -125,6 +201,7 @@ export function WorkspaceSwitcher({
                     onSwitch(ws.id);
                     setIsOpen(false);
                   }}
+                  onContextMenu={(e) => handleContextMenu(e, ws)}
                   className={`w-full flex items-center gap-2 px-2 py-2 rounded-lg transition-colors ${
                     ws.id === currentWorkspace.id
                       ? "bg-blue-50 text-blue-700"
@@ -158,6 +235,7 @@ export function WorkspaceSwitcher({
                     onSwitch(ws.id);
                     setIsOpen(false);
                   }}
+                  onContextMenu={(e) => handleContextMenu(e, ws)}
                   className={`w-full flex items-center gap-2 px-2 py-2 rounded-lg transition-colors ${
                     ws.id === currentWorkspace.id
                       ? "bg-blue-50 text-blue-700"
@@ -202,6 +280,16 @@ export function WorkspaceSwitcher({
             </button>
           </div>
         </div>
+      )}
+
+      {/* コンテキストメニュー */}
+      {contextMenu && (
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          items={getContextMenuItems()}
+          onClose={closeContextMenu}
+        />
       )}
     </div>
   );
