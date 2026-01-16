@@ -383,6 +383,18 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     }));
   }, []);
 
+  const updateUndoCopyNodeIds = useCallback((tempIds: string[], realIds: string[]) => {
+    if (tempIds.length === 0 || realIds.length === 0) return;
+    if (tempIds.length !== realIds.length) return;
+    const tempKey = JSON.stringify(tempIds);
+    setUndoStack(prev => prev.map(action => {
+      if (action.type !== "copy") return action;
+      const actionKey = JSON.stringify(action.nodeIds);
+      if (actionKey !== tempKey) return action;
+      return { ...action, nodeIds: realIds };
+    }));
+  }, []);
+
   const removeUndoCreateAction = useCallback((nodeId: string) => {
     setUndoStack(prev => prev.filter(action => !(action.type === "create" && action.nodeId === nodeId)));
   }, []);
@@ -907,7 +919,9 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
           fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AppLayout.tsx:handleUndo:copy',message:'Undo copy start',data:{nodeIds:action.nodeIds,knownInState:action.nodeIds.map(id=>nodes.some(n=>n.id===id))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H_COPY'})}).catch(()=>{});
           // #endregion
           const snapshotNodes = nodes;
-          const missingInState = action.nodeIds.some((id) => !snapshotNodes.some((n) => n.id === id));
+          const resolveCopyNodeId = (id: string) => tempIdRealIdMapRef.current.get(id) ?? id;
+          const resolvedNodeIds = action.nodeIds.map(resolveCopyNodeId);
+          const missingInState = resolvedNodeIds.some((id) => !snapshotNodes.some((n) => n.id === id));
           if (missingInState) {
             // #region agent log
             fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AppLayout.tsx:handleUndo:copy_missing',message:'Undo copy missing in state',data:{missingInState:true},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H_COPY_MISSING'})}).catch(()=>{});
@@ -922,13 +936,16 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
               .forEach(child => collectChildren(child.id));
           };
           action.nodeIds.forEach((nodeId) => collectChildren(nodeId));
+          resolvedNodeIds.forEach((nodeId) => collectChildren(nodeId));
           const tempIdsToRemove: string[] = [];
           for (const [tempId, realId] of tempIdRealIdMapRef.current.entries()) {
-            if (action.nodeIds.includes(realId)) {
+            if (resolvedNodeIds.includes(realId)) {
               tempIdsToRemove.push(tempId);
               idsToRemove.add(tempId);
             }
           }
+          action.nodeIds.forEach((nodeId) => idsToRemove.add(nodeId));
+          resolvedNodeIds.forEach((nodeId) => idsToRemove.add(nodeId));
           // #region agent log
           fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AppLayout.tsx:handleUndo:copy_ids',message:'Undo copy idsToRemove',data:{idsCount:idsToRemove.size,ids:Array.from(idsToRemove).slice(0,20)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H_COPY_IDS'})}).catch(()=>{});
           // #endregion
@@ -956,7 +973,9 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
           // #region agent log
           fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AppLayout.tsx:handleUndo:copy_delete',message:'Undo copy delete start',data:{nodeIds:action.nodeIds},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H_COPY_DELETE'})}).catch(()=>{});
           // #endregion
-          const deleteResults = await Promise.all(action.nodeIds.map(async (nodeId) => {
+          const deletableIds = resolvedNodeIds.filter((id) => !String(id).startsWith("temp-"));
+          const unresolvedTempIds = action.nodeIds.filter((id) => String(id).startsWith("temp-") && !tempIdRealIdMapRef.current.get(id));
+          const deleteResults = await Promise.all(deletableIds.map(async (nodeId) => {
             const res = await fetch("/api/files", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
@@ -964,6 +983,17 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
             });
             return res.status;
           }));
+          for (const tempId of unresolvedTempIds) {
+            void (async () => {
+              const realId = await waitForRealNodeIdByTempId(tempId);
+              if (!realId) return;
+              await fetch("/api/files", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "delete_node", id: realId }),
+              });
+            })();
+          }
           // #region agent log
           fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AppLayout.tsx:handleUndo:copy_delete_done',message:'Undo copy delete done',data:{statuses:deleteResults},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H_COPY_DELETE_DONE'})}).catch(()=>{});
           // #endregion
@@ -1683,6 +1713,14 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     if (rootTempIds.length > 0) {
       setRevealNodeId(rootTempIds[0]);
     }
+    // Push undo action for copy immediately (use temp IDs for instant undo)
+    if (rootTempIds.length > 0) {
+      const copiedNames = rootTempIds.map(tempId => {
+        const tempNode = tempNodes.find(n => n.id === tempId);
+        return tempNode?.name || "";
+      }).filter(Boolean);
+      pushUndoAction({ type: "copy", nodeIds: rootTempIds, names: copiedNames });
+    }
 
     try {
       const resolvedNodeIds = await resolvedNodeIdsPromise;
@@ -1740,14 +1778,9 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         }
       }
 
-      // Push undo action for copy
-      if (newNodeIds.length > 0) {
-        // Get the names of copied nodes for undo dialog
-        const copiedNames = rootTempIds.map(tempId => {
-          const tempNode = tempNodes.find(n => n.id === tempId);
-          return tempNode?.name || "";
-        }).filter(Boolean);
-        pushUndoAction({ type: "copy", nodeIds: newNodeIds, names: copiedNames });
+      // Update undo action with real IDs once copy completes
+      if (newNodeIds.length > 0 && rootTempIds.length > 0) {
+        updateUndoCopyNodeIds(rootTempIds, newNodeIds);
       }
 
       const ensureCopiedNodesVisible = async () => {
