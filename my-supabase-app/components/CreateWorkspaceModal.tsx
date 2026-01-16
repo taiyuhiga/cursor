@@ -4,12 +4,17 @@ import { useState, useRef, useEffect } from "react";
 
 type WorkspaceType = "personal" | "team";
 
-type Props = {
+type CreateWorkspaceModalProps = {
+  isOpen: boolean;
   onClose: () => void;
   onCreate: (name: string, type: WorkspaceType) => void;
 };
 
-export function CreateWorkspaceDialog({ onClose, onCreate }: Props) {
+export function CreateWorkspaceModal({
+  isOpen,
+  onClose,
+  onCreate,
+}: CreateWorkspaceModalProps) {
   const [step, setStep] = useState<1 | 2>(1);
   const [workspaceType, setWorkspaceType] = useState<WorkspaceType | null>(null);
   const [workspaceName, setWorkspaceName] = useState("");
@@ -17,6 +22,17 @@ export function CreateWorkspaceDialog({ onClose, onCreate }: Props) {
   const [copied, setCopied] = useState(false);
   const nameInputRef = useRef<HTMLInputElement>(null);
   const modalRef = useRef<HTMLDivElement>(null);
+
+  // Reset state when modal opens
+  useEffect(() => {
+    if (isOpen) {
+      setStep(1);
+      setWorkspaceType(null);
+      setWorkspaceName("");
+      setInviteLink("");
+      setCopied(false);
+    }
+  }, [isOpen]);
 
   // Focus name input when step 2 opens
   useEffect(() => {
@@ -28,6 +44,7 @@ export function CreateWorkspaceDialog({ onClose, onCreate }: Props) {
   // Generate invite link when team is selected
   useEffect(() => {
     if (workspaceType === "team" && step === 2) {
+      // Generate a placeholder invite link (will be replaced with real one after creation)
       const randomId = Math.random().toString(36).substring(2, 10);
       setInviteLink(`${window.location.origin}/invite/${randomId}`);
     }
@@ -35,6 +52,7 @@ export function CreateWorkspaceDialog({ onClose, onCreate }: Props) {
 
   // Close on escape key
   useEffect(() => {
+    if (!isOpen) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         onClose();
@@ -42,10 +60,11 @@ export function CreateWorkspaceDialog({ onClose, onCreate }: Props) {
     };
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
+  }, [isOpen, onClose]);
 
   // Close on outside click
   useEffect(() => {
+    if (!isOpen) return;
     const handleClickOutside = (e: MouseEvent) => {
       if (modalRef.current && !modalRef.current.contains(e.target as HTMLElement)) {
         onClose();
@@ -53,7 +72,7 @@ export function CreateWorkspaceDialog({ onClose, onCreate }: Props) {
     };
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, [onClose]);
+  }, [isOpen, onClose]);
 
   const handleTypeSelect = (type: WorkspaceType) => {
     setWorkspaceType(type);
@@ -63,6 +82,7 @@ export function CreateWorkspaceDialog({ onClose, onCreate }: Props) {
   const handleCreate = () => {
     if (!workspaceName.trim() || !workspaceType) return;
     onCreate(workspaceName.trim(), workspaceType);
+    onClose();
   };
 
   const handleCopyLink = async () => {
@@ -81,11 +101,13 @@ export function CreateWorkspaceDialog({ onClose, onCreate }: Props) {
     setWorkspaceName("");
   };
 
+  if (!isOpen) return null;
+
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30 backdrop-blur-sm p-4">
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
       <div
         ref={modalRef}
-        className="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden"
+        className="bg-white rounded-xl shadow-xl w-full max-w-md overflow-hidden"
       >
         {step === 1 ? (
           <>
@@ -94,9 +116,6 @@ export function CreateWorkspaceDialog({ onClose, onCreate }: Props) {
               <h2 className="text-lg font-semibold text-zinc-800">
                 新しいワークスペースを作成
               </h2>
-              <p className="text-sm text-zinc-500 mt-1">
-                利用目的を選択してください
-              </p>
             </div>
             <div className="p-6 space-y-3">
               <button
@@ -128,9 +147,9 @@ export function CreateWorkspaceDialog({ onClose, onCreate }: Props) {
                 </div>
               </button>
             </div>
-            <div className="px-6 py-4 border-t border-zinc-100 flex justify-end">
+            <div className="px-6 py-4 border-t border-zinc-200 flex justify-end">
               <button
-                className="px-4 py-2 text-sm text-zinc-600 hover:text-zinc-800 hover:bg-zinc-100 rounded-lg transition-colors"
+                className="px-4 py-2 text-sm text-zinc-600 hover:text-zinc-800"
                 onClick={onClose}
               >
                 キャンセル
@@ -149,11 +168,9 @@ export function CreateWorkspaceDialog({ onClose, onCreate }: Props) {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
                 </svg>
               </button>
-              <div>
-                <h2 className="text-lg font-semibold text-zinc-800">
-                  {workspaceType === "team" ? "チーム" : "個人"}ワークスペースを作成
-                </h2>
-              </div>
+              <h2 className="text-lg font-semibold text-zinc-800">
+                {workspaceType === "team" ? "チーム" : "個人"}ワークスペースを作成
+              </h2>
             </div>
             <div className="p-6 space-y-4">
               <div>
@@ -171,7 +188,7 @@ export function CreateWorkspaceDialog({ onClose, onCreate }: Props) {
                     }
                   }}
                   placeholder="My workspace"
-                  className="w-full px-3 py-2.5 border border-zinc-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  className="w-full px-3 py-2 border border-zinc-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                 />
               </div>
 
@@ -185,11 +202,11 @@ export function CreateWorkspaceDialog({ onClose, onCreate }: Props) {
                       type="text"
                       value={inviteLink}
                       readOnly
-                      className="flex-1 px-3 py-2.5 border border-zinc-300 rounded-lg bg-zinc-50 text-zinc-600 text-sm"
+                      className="flex-1 px-3 py-2 border border-zinc-300 rounded-lg bg-zinc-50 text-zinc-600 text-sm"
                     />
                     <button
                       onClick={handleCopyLink}
-                      className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors flex-shrink-0 ${
+                      className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
                         copied
                           ? "bg-green-100 text-green-700"
                           : "bg-zinc-100 text-zinc-700 hover:bg-zinc-200"
@@ -218,15 +235,15 @@ export function CreateWorkspaceDialog({ onClose, onCreate }: Props) {
                 </div>
               )}
             </div>
-            <div className="px-6 py-4 border-t border-zinc-100 flex justify-end gap-2">
+            <div className="px-6 py-4 border-t border-zinc-200 flex justify-end gap-2">
               <button
-                className="px-4 py-2 text-sm text-zinc-600 hover:text-zinc-800 hover:bg-zinc-100 rounded-lg transition-colors"
+                className="px-4 py-2 text-sm text-zinc-600 hover:text-zinc-800"
                 onClick={onClose}
               >
                 キャンセル
               </button>
               <button
-                className="px-4 py-2 text-sm font-medium text-white bg-blue-500 rounded-lg hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
                 onClick={handleCreate}
                 disabled={!workspaceName.trim()}
               >

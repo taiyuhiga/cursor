@@ -191,6 +191,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(new Set());
   const [activeActivity, setActiveActivity] = useState<Activity>("explorer");
   const [fileContent, setFileContent] = useState<string>("");
+  const [tempFileContents, setTempFileContents] = useState<Record<string, string>>({});
   const [isSaving, setIsSaving] = useState(false);
   // Start with loading=false if we have initial data (server-side or cached)
   const [isLoading, setIsLoading] = useState(() => {
@@ -295,7 +296,19 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const tempIdPathMapRef = useRef<Map<string, string>>(new Map());
   // tempノードID→実ノードIDのマッピング（コピーの連鎖対応）
   const tempIdRealIdMapRef = useRef<Map<string, string>>(new Map());
+  const editableTempNodeIdsRef = useRef<Set<string>>(new Set());
+  const pendingContentByRealIdRef = useRef<Map<string, string>>(new Map());
+  const tempFileContentsRef = useRef<Record<string, string>>({});
+  const activeNodeIdRef = useRef<string | null>(null);
   const supabase = createClient();
+
+  useEffect(() => {
+    tempFileContentsRef.current = tempFileContents;
+  }, [tempFileContents]);
+
+  useEffect(() => {
+    activeNodeIdRef.current = activeNodeId;
+  }, [activeNodeId]);
 
   const getNodeKey = (node: Node) => `${node.type}:${node.parent_id ?? "root"}:${node.name}`;
 
@@ -391,13 +404,47 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     if (!tempId || !realId) return;
     tempIdRealIdMapRef.current.set(tempId, realId);
     const pending = pendingTempResolversRef.current.get(tempId);
-    if (!pending) return;
-    for (const entry of pending) {
-      window.clearTimeout(entry.timeoutId);
-      entry.resolve(realId);
+    if (pending) {
+      for (const entry of pending) {
+        window.clearTimeout(entry.timeoutId);
+        entry.resolve(realId);
+      }
+      pendingTempResolversRef.current.delete(tempId);
     }
-    pendingTempResolversRef.current.delete(tempId);
-  }, []);
+
+    if (!editableTempNodeIdsRef.current.has(tempId)) {
+      return;
+    }
+
+    editableTempNodeIdsRef.current.delete(tempId);
+    const hasTempContent = Object.prototype.hasOwnProperty.call(tempFileContentsRef.current, tempId);
+    if (!hasTempContent) return;
+
+    const content = tempFileContentsRef.current[tempId] ?? "";
+    setTempFileContents((prev) => {
+      if (!Object.prototype.hasOwnProperty.call(prev, tempId)) return prev;
+      const next = { ...prev };
+      delete next[tempId];
+      tempFileContentsRef.current = next;
+      return next;
+    });
+    pendingContentByRealIdRef.current.set(realId, content);
+    const activeId = activeNodeIdRef.current;
+    if (activeId === tempId || activeId === realId) {
+      setFileContent(content);
+    }
+
+    void supabase
+      .from("file_contents")
+      .upsert({ node_id: realId, text: content }, { onConflict: "node_id" })
+      .then(({ error }) => {
+        if (error) throw error;
+        pendingContentByRealIdRef.current.delete(realId);
+      })
+      .catch((error) => {
+        console.error("Failed to save temp content:", error?.message ?? error);
+      });
+  }, [supabase]);
 
   const waitForRealNodeIdByTempId = useCallback((tempId: string, timeoutMs: number = 70000) => {
     const existing = tempIdRealIdMapRef.current.get(tempId);
@@ -1045,6 +1092,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       name,
       created_at: new Date().toISOString(),
     };
+    editableTempNodeIdsRef.current.add(tempId);
     setNodes(prev => [...prev, tempNode]);
     setSelectedNodeIds(new Set([tempId]));
     setOpenTabs((prev) => (prev.includes(tempId) ? prev : [...prev, tempId]));
@@ -1108,14 +1156,22 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         } catch (refreshError) {
           console.error("Failed to refresh nodes after create error:", refreshError);
         }
-        if (!recovered) {
-          // 失敗したらロールバック
-          setNodes(prev => prev.filter(n => n.id !== tempId));
-          setOpenTabs(prev => prev.filter(id => id !== tempId));
-          setActiveNodeId(prevActiveId ?? null);
-          setSelectedNodeIds(new Set(prevSelectedIds));
-          alert(`Error: ${error.message}`);
-        }
+      if (!recovered) {
+        // 失敗したらロールバック
+        setNodes(prev => prev.filter(n => n.id !== tempId));
+        setOpenTabs(prev => prev.filter(id => id !== tempId));
+        setActiveNodeId(prevActiveId ?? null);
+        setSelectedNodeIds(new Set(prevSelectedIds));
+        editableTempNodeIdsRef.current.delete(tempId);
+        setTempFileContents((prev) => {
+          if (!Object.prototype.hasOwnProperty.call(prev, tempId)) return prev;
+          const next = { ...prev };
+          delete next[tempId];
+          tempFileContentsRef.current = next;
+          return next;
+        });
+        alert(`Error: ${error.message}`);
+      }
       }
     })();
   };
@@ -2877,6 +2933,11 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       setFileContent("");
       return;
     }
+    const pendingContent = pendingContentByRealIdRef.current.get(activeNodeId);
+    if (pendingContent !== undefined) {
+      setFileContent(pendingContent);
+      return;
+    }
     const activeNode = nodeById.get(activeNodeId);
     if (activeNode && isMediaFile(activeNode.name)) {
       setFileContent("");
@@ -2902,12 +2963,20 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const saveContent = useCallback(async () => {
     if (!activeNodeId) return;
     // Virtual doc は通常保存しない（Save to workspace を使う）
-    if (activeNodeId.startsWith("virtual-plan:") || activeNodeId.startsWith("temp-")) return;
+    if (activeNodeId.startsWith("virtual-plan:")) return;
+    const resolvedId = activeNodeId.startsWith("temp-")
+      ? tempIdRealIdMapRef.current.get(activeNodeId)
+      : activeNodeId;
+    if (!resolvedId) return;
     setIsSaving(true);
     const { error } = await supabase
       .from("file_contents")
-      .upsert({ node_id: activeNodeId, text: fileContent }, { onConflict: "node_id" });
-    if (error) console.error("Error saving content:", error?.message ?? error);
+      .upsert({ node_id: resolvedId, text: fileContent }, { onConflict: "node_id" });
+    if (error) {
+      console.error("Error saving content:", error?.message ?? error);
+    } else {
+      pendingContentByRealIdRef.current.delete(resolvedId);
+    }
     setIsSaving(false);
     if (activeActivity === "git") {
       void refreshSourceControl();
@@ -2937,6 +3006,22 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         const doc = prev[activeNodeId];
         if (!doc) return prev;
         return { ...prev, [activeNodeId]: { ...doc, content: next } };
+      });
+      return;
+    }
+    if (activeNodeId.startsWith("temp-")) {
+      const mappedId = tempIdRealIdMapRef.current.get(activeNodeId);
+      if (mappedId) {
+        pendingContentByRealIdRef.current.set(mappedId, next);
+        setFileContent(next);
+        return;
+      }
+      if (!editableTempNodeIdsRef.current.has(activeNodeId)) return;
+      setTempFileContents((prev) => {
+        if (prev[activeNodeId] === next) return prev;
+        const updated = { ...prev, [activeNodeId]: next };
+        tempFileContentsRef.current = updated;
+        return updated;
       });
       return;
     }
@@ -3782,10 +3867,24 @@ ${diffs}`;
   const activeNode = activeNodeId && !activeNodeId.startsWith("virtual-plan:")
     ? (nodes.find((n) => n.id === activeNodeId) ?? null)
     : null;
-  const activeEditorContent = activeVirtual ? activeVirtual.content : fileContent;
-  const activeUploadProgress = activeNode && activeNode.id.startsWith("temp-")
+  const activeTempMappedId = activeNodeId && activeNodeId.startsWith("temp-")
+    ? tempIdRealIdMapRef.current.get(activeNodeId) ?? null
+    : null;
+  const activeEditorContent = activeVirtual
+    ? activeVirtual.content
+    : activeNodeId && activeNodeId.startsWith("temp-")
+      ? (activeTempMappedId ? fileContent : (tempFileContents[activeNodeId] ?? ""))
+      : fileContent;
+  const activeUploadProgress = activeNode &&
+    activeNode.id.startsWith("temp-") &&
+    uploadProgress[activeNode.id] !== undefined
     ? uploadProgress[activeNode.id]
     : null;
+  const activeTempIsEditable = activeNode
+    ? activeNode.id.startsWith("temp-") &&
+      (editableTempNodeIdsRef.current.has(activeNode.id) ||
+        (activeTempMappedId ? pendingContentByRealIdRef.current.has(activeTempMappedId) : false))
+    : false;
 
   // ワークスペース切り替え
   const handleSwitchWorkspace = async (workspaceId: string) => {
@@ -3797,12 +3896,12 @@ ${diffs}`;
   };
 
   // 新規ワークスペース作成
-  const handleCreateWorkspace = async (name: string) => {
+  const handleCreateWorkspace = async (name: string, type: "personal" | "team") => {
     try {
       const res = await fetch("/api/workspaces", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name }),
+        body: JSON.stringify({ name, type }),
       });
 
       if (!res.ok) {
@@ -3811,15 +3910,20 @@ ${diffs}`;
       }
 
       const { workspace } = await res.json();
-      
+
       // ワークスペース一覧を更新
       setCurrentWorkspaces(prev => [...prev, { ...workspace, role: "owner" }]);
-      
+
       // 新しいワークスペースに切り替え
       window.location.href = `/app?workspace=${workspace.id}`;
     } catch (error: any) {
       alert(`Error: ${error.message}`);
     }
+  };
+
+  // ポップオーバーからワークスペース作成ダイアログを開く
+  const handleOpenCreateWorkspace = () => {
+    setShowCreateWorkspace(true);
   };
 
   // ワークスペース名変更を実行（optimistic update）
@@ -3908,6 +4012,10 @@ ${diffs}`;
             onRenameWorkspace={handleRenameWorkspace}
             onDeleteWorkspace={() => setShowDeleteWorkspaceConfirm(true)}
             isLoading={isLoading}
+            workspaces={currentWorkspaces.map(w => ({ id: w.id, name: w.name }))}
+            activeWorkspaceId={activeWorkspace.id}
+            onSelectWorkspace={handleSwitchWorkspace}
+            onCreateWorkspace={handleOpenCreateWorkspace}
           />
         );
       case "git":
@@ -4113,7 +4221,7 @@ ${diffs}`;
                   onSave={() => handleSavePlanToWorkspace(activeVirtual.id)}
                 />
               ) : activeNode ? (
-                activeNode.id.startsWith("temp-") ? (
+                activeNode.id.startsWith("temp-") && activeUploadProgress !== null ? (
                   <div className="absolute inset-0 flex items-center justify-center text-zinc-500">
                     <div className="flex flex-col items-center gap-3">
                       <div className="flex items-center gap-3">
@@ -4148,6 +4256,28 @@ ${diffs}`;
                       </div>
                     </div>
                   </div>
+                ) : activeNode.id.startsWith("temp-") && !activeTempIsEditable ? (
+                  <div className="absolute inset-0 flex items-center justify-center text-zinc-500">
+                    <div className="flex items-center gap-3">
+                      <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
+                        <circle
+                          className="opacity-25"
+                          cx="12"
+                          cy="12"
+                          r="10"
+                          stroke="currentColor"
+                          strokeWidth="4"
+                          fill="none"
+                        />
+                        <path
+                          className="opacity-75"
+                          fill="currentColor"
+                          d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                        />
+                      </svg>
+                      <span>Creating...</span>
+                    </div>
+                  </div>
                 ) : isMediaFile(activeNode.name) ? (
                   <MediaPreview
                     fileName={activeNode.name}
@@ -4155,8 +4285,8 @@ ${diffs}`;
                   />
                 ) : (
                   <MainEditor
-                    value={fileContent}
-                    onChange={setFileContent}
+                    value={activeEditorContent}
+                    onChange={setActiveEditorContent}
                     fileName={activeNode.name}
                     onSave={saveContent}
                   />

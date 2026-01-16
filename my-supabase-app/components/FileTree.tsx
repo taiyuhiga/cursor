@@ -1343,7 +1343,7 @@ export function FileTree({
           {isWorkspacePopoverOpen && (
             <div
               ref={workspacePopoverRef}
-              className="absolute top-full left-0 mt-1 w-72 bg-white rounded-lg shadow-lg border border-zinc-200 z-50 py-2"
+              className="absolute top-full left-2 mt-1 w-72 bg-white rounded-lg shadow-lg border border-zinc-200 z-50 py-2"
               onClick={(e) => e.stopPropagation()}
             >
               {/* Current workspace header */}
