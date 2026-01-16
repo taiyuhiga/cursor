@@ -274,104 +274,145 @@ export async function POST(req: NextRequest) {
           throw new Error("Source node not found");
         }
 
+        const isUniqueNameViolation = (error: any) => {
+          if (!error) return false;
+          if (error.code === "23505") return true;
+          const message = typeof error.message === "string" ? error.message : "";
+          return message.toLowerCase().includes("duplicate key value") ||
+            message.toLowerCase().includes("unique constraint");
+        };
+
+        const splitNameParts = (name: string, isFile: boolean) => {
+          let baseName: string;
+          let extension: string;
+
+          if (isFile) {
+            const lastDotIndex = name.lastIndexOf(".");
+            if (lastDotIndex > 0) {
+              baseName = name.substring(0, lastDotIndex);
+              extension = name.substring(lastDotIndex);
+            } else {
+              baseName = name;
+              extension = "";
+            }
+          } else {
+            baseName = name;
+            extension = "";
+          }
+
+          const copyPattern = / copy( \d+)?$/;
+          const baseWithoutCopy = baseName.replace(copyPattern, "");
+          return { baseWithoutCopy, extension };
+        };
+
+        const buildCopyName = (baseWithoutCopy: string, extension: string, counter: number) => {
+          if (counter === 1) {
+            return `${baseWithoutCopy} copy${extension}`;
+          }
+          return `${baseWithoutCopy} copy ${counter}${extension}`;
+        };
+
+        const getExistingNames = async (targetParentId: string | null, projectId: string) => {
+          let query = supabase.from("nodes").select("name").eq("project_id", projectId);
+          if (targetParentId === null) {
+            query = query.is("parent_id", null);
+          } else {
+            query = query.eq("parent_id", targetParentId);
+          }
+          const { data } = await query;
+          return (data || []).map((entry: any) => entry.name as string);
+        };
+
+        const getNextCopyCounter = (existingNames: string[], baseWithoutCopy: string, extension: string) => {
+          if (!existingNames.length) return 1;
+          const escapedBase = baseWithoutCopy.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          const escapedExt = extension.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+          const copyNames = existingNames.filter((name: string) => {
+            if (extension) {
+              return name === `${baseWithoutCopy}${extension}` ||
+                name === `${baseWithoutCopy} copy${extension}` ||
+                name.match(new RegExp(`^${escapedBase} copy \\d+${escapedExt}$`));
+            }
+            return name === baseWithoutCopy ||
+              name === `${baseWithoutCopy} copy` ||
+              name.match(new RegExp(`^${escapedBase} copy \\d+$`));
+          });
+
+          if (copyNames.length === 0) return 1;
+
+          const numbers = copyNames.map((name: string) => {
+            const nameWithoutExt = extension ? name.replace(new RegExp(escapedExt + "$"), "") : name;
+            if (nameWithoutExt === baseWithoutCopy) {
+              return 0;
+            }
+            const match = nameWithoutExt.match(/ copy( (\d+))?$/);
+            if (match) {
+              return match[2] ? parseInt(match[2], 10) : 1;
+            }
+            return 0;
+          });
+
+          return Math.max(...numbers) + 1;
+        };
+
+        const insertCopyNode = async (node: any, targetParentId: string | null) => {
+          const isFile = node.type === "file";
+          const { baseWithoutCopy, extension } = splitNameParts(node.name, isFile);
+          let useCopyName = node.parent_id === targetParentId;
+          let counter = 0;
+          let candidateName = node.name;
+          let existingNames: string[] | null = null;
+
+          if (useCopyName) {
+            existingNames = await getExistingNames(targetParentId, node.project_id);
+            counter = getNextCopyCounter(existingNames, baseWithoutCopy, extension);
+            candidateName = buildCopyName(baseWithoutCopy, extension, counter);
+          }
+
+          let attempts = 0;
+          const maxAttempts = 50;
+
+          while (attempts < maxAttempts) {
+            const { data: newNode, error: createError } = await supabase
+              .from("nodes")
+              .insert({
+                project_id: node.project_id,
+                type: node.type,
+                name: candidateName,
+                parent_id: targetParentId,
+              })
+              .select()
+              .single();
+
+            if (!createError && newNode) {
+              return { newNode, finalName: candidateName };
+            }
+
+            if (!isUniqueNameViolation(createError)) {
+              throw new Error(`Failed to copy: ${createError?.message || "Unknown error"}`);
+            }
+
+            attempts += 1;
+            if (!useCopyName) {
+              useCopyName = true;
+              existingNames = await getExistingNames(targetParentId, node.project_id);
+              counter = getNextCopyCounter(existingNames, baseWithoutCopy, extension);
+            } else {
+              counter += 1;
+            }
+            candidateName = buildCopyName(baseWithoutCopy, extension, counter);
+          }
+
+          throw new Error("Failed to generate a unique copy name");
+        };
+
         // Helper function to recursively copy nodes
         const copyNodeRecursive = async (
           node: any,
           targetParentId: string | null
         ): Promise<string> => {
-          // Generate a unique name if copying to the same folder
-          let newName = node.name;
-          if (node.parent_id === targetParentId) {
-            // Split filename into base and extension for files
-            const isFile = node.type === "file";
-            let baseName: string;
-            let extension: string;
-
-            if (isFile) {
-              const lastDotIndex = node.name.lastIndexOf(".");
-              if (lastDotIndex > 0) {
-                baseName = node.name.substring(0, lastDotIndex);
-                extension = node.name.substring(lastDotIndex);
-              } else {
-                baseName = node.name;
-                extension = "";
-              }
-            } else {
-              baseName = node.name;
-              extension = "";
-            }
-
-            // Check if name already has " copy" or " copy N" pattern
-            const copyPattern = / copy( \d+)?$/;
-            const baseWithoutCopy = baseName.replace(copyPattern, "");
-
-            // Find existing nodes in the same folder (handle null parent_id)
-            let query = supabase.from("nodes").select("name");
-            if (targetParentId === null) {
-              query = query.is("parent_id", null).eq("project_id", node.project_id);
-            } else {
-              query = query.eq("parent_id", targetParentId);
-            }
-            const { data: existingNodes } = await query;
-
-            // Filter to find copies of this file (including original and all copies)
-            let counter = 1;
-            if (existingNodes && existingNodes.length > 0) {
-              const escapedBase = baseWithoutCopy.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-              const escapedExt = extension.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-              const copyNames = existingNodes
-                .map((n: any) => n.name)
-                .filter((name: string) => {
-                  // Match original name, "baseName copy.ext" or "baseName copy N.ext"
-                  if (extension) {
-                    return name === `${baseWithoutCopy}${extension}` ||
-                           name === `${baseWithoutCopy} copy${extension}` ||
-                           name.match(new RegExp(`^${escapedBase} copy \\d+${escapedExt}$`));
-                  } else {
-                    return name === baseWithoutCopy ||
-                           name === `${baseWithoutCopy} copy` ||
-                           name.match(new RegExp(`^${escapedBase} copy \\d+$`));
-                  }
-                });
-
-              if (copyNames.length > 0) {
-                const numbers = copyNames.map((name: string) => {
-                  const nameWithoutExt = extension ? name.replace(new RegExp(escapedExt + "$"), "") : name;
-                  // Original file counts as 0, "copy" counts as 1, "copy N" counts as N
-                  if (nameWithoutExt === baseWithoutCopy) {
-                    return 0; // Original
-                  }
-                  const match = nameWithoutExt.match(/ copy( (\d+))?$/);
-                  if (match) {
-                    return match[2] ? parseInt(match[2], 10) : 1;
-                  }
-                  return 0;
-                });
-                counter = Math.max(...numbers) + 1;
-              }
-            }
-
-            if (counter === 1) {
-              newName = `${baseWithoutCopy} copy${extension}`;
-            } else {
-              newName = `${baseWithoutCopy} copy ${counter}${extension}`;
-            }
-          }
-
-          // Create new node
-          const { data: newNode, error: createError } = await supabase
-            .from("nodes")
-            .insert({
-              project_id: node.project_id,
-              type: node.type,
-              name: newName,
-              parent_id: targetParentId,
-            })
-            .select()
-            .single();
-
-          if (createError) throw new Error(`Failed to copy: ${createError.message}`);
+          const { newNode, finalName } = await insertCopyNode(node, targetParentId);
 
           // If it's a file, copy the content
           if (node.type === "file") {
@@ -387,7 +428,7 @@ export async function POST(req: NextRequest) {
               // If it's a storage reference, copy the actual file in storage
               if (content.text && content.text.startsWith("storage:")) {
                 const originalPath = content.text.replace("storage:", "");
-                const newPath = `${node.project_id}/${newNode.id}/${newName}`;
+                const newPath = `${node.project_id}/${newNode.id}/${finalName}`;
 
                 // Copy file in storage
                 const { error: copyError } = await supabase.storage

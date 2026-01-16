@@ -18,6 +18,8 @@ import { ReviewPanel } from "@/components/ReviewPanel";
 import { SourceControlPanel, type SourceControlChange } from "@/components/SourceControlPanel";
 import { MediaPreview, isMediaFile, prefetchMediaUrl } from "@/components/MediaPreview";
 import { ReplaceConfirmDialog } from "@/components/ReplaceConfirmDialog";
+import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
+import { UndoConfirmDialog } from "@/components/UndoConfirmDialog";
 import type { PendingChange, ReviewIssue } from "@/lib/review/types";
 import type { AgentCheckpointChange, AgentCheckpointRecordInput } from "@/lib/checkpoints/types";
 
@@ -141,13 +143,24 @@ type VirtualDoc = {
 // Helper to get/set localStorage cache for nodes
 const NODES_CACHE_KEY = "fileTreeCache";
 
+const dedupeNodesById = (list: Node[]) => {
+  const seen = new Set<string>();
+  const unique: Node[] = [];
+  for (const node of list) {
+    if (seen.has(node.id)) continue;
+    seen.add(node.id);
+    unique.push(node);
+  }
+  return unique;
+};
+
 function getCachedNodes(projectId: string): Node[] | null {
   if (typeof window === "undefined") return null;
   try {
     const cached = localStorage.getItem(`${NODES_CACHE_KEY}:${projectId}`);
     if (!cached) return null;
     const { nodes } = JSON.parse(cached);
-    return nodes;
+    return Array.isArray(nodes) ? dedupeNodesById(nodes) : null;
   } catch {
     return null;
   }
@@ -158,7 +171,7 @@ function setCachedNodes(projectId: string, nodes: Node[]) {
   try {
     localStorage.setItem(
       `${NODES_CACHE_KEY}:${projectId}`,
-      JSON.stringify({ nodes })
+      JSON.stringify({ nodes: dedupeNodesById(nodes) })
     );
   } catch {
     // Ignore storage errors
@@ -249,9 +262,39 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     existingNodeId: "",
     resolve: null,
   });
+
+  // Delete confirmation dialog state
+  const [deleteDialog, setDeleteDialog] = useState<{
+    isOpen: boolean;
+    names: string[];
+    itemType: "file" | "folder" | "mixed";
+  }>({
+    isOpen: false,
+    names: [],
+    itemType: "file",
+  });
+  const deleteDialogResolveRef = useRef<((confirmed: boolean) => void) | null>(null);
+
+  // Undo confirmation dialog state
+  const [undoDialog, setUndoDialog] = useState<{
+    isOpen: boolean;
+    actionName: string;
+    actionType: "create" | "copy" | "upload";
+  }>({
+    isOpen: false,
+    actionName: "",
+    actionType: "create",
+  });
+  const undoDialogResolveRef = useRef<((confirmed: boolean) => void) | null>(null);
+
   const prefetchedMediaIdsRef = useRef<Set<string>>(new Set());
   const pendingNodeIdsRef = useRef<Set<string>>(new Set());
   const pendingPathResolversRef = useRef<Map<string, { path: string; resolve: (id: string | null) => void; timeoutId: number }>>(new Map());
+  const pendingTempResolversRef = useRef<Map<string, { resolve: (id: string | null) => void; timeoutId: number }[]>>(new Map());
+  // tempノードID→パスのマッピング（楽観的更新時に保存、fetchNodes後も解決に使用）
+  const tempIdPathMapRef = useRef<Map<string, string>>(new Map());
+  // tempノードID→実ノードIDのマッピング（コピーの連鎖対応）
+  const tempIdRealIdMapRef = useRef<Map<string, string>>(new Map());
   const supabase = createClient();
 
   const getNodeKey = (node: Node) => `${node.type}:${node.parent_id ?? "root"}:${node.name}`;
@@ -259,10 +302,10 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   // Undo/Redo stack for file operations
   type UndoAction =
     | { type: "delete"; nodeId: string; node: Node; content?: string; children?: { node: Node; content?: string }[] }
-    | { type: "create"; nodeId: string; node?: Node; content?: string }
+    | { type: "create"; nodeId: string; node?: Node; content?: string; source?: "create" | "upload" }
     | { type: "rename"; nodeId: string; oldName: string; newName: string }
     | { type: "move"; nodeIds: string[]; oldParentIds: (string | null)[]; newParentId: string | null }
-    | { type: "copy"; nodeIds: string[] };
+    | { type: "copy"; nodeIds: string[]; names?: string[] };
   const [undoStack, setUndoStack] = useState<UndoAction[]>([]);
   const [redoStack, setRedoStack] = useState<UndoAction[]>([]);
   const MAX_UNDO_STACK = 50;
@@ -344,13 +387,82 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     });
   }, [nodeIdByPath]);
 
+  const registerTempIdMapping = useCallback((tempId: string, realId: string) => {
+    if (!tempId || !realId) return;
+    tempIdRealIdMapRef.current.set(tempId, realId);
+    const pending = pendingTempResolversRef.current.get(tempId);
+    if (!pending) return;
+    for (const entry of pending) {
+      window.clearTimeout(entry.timeoutId);
+      entry.resolve(realId);
+    }
+    pendingTempResolversRef.current.delete(tempId);
+  }, []);
+
+  const waitForRealNodeIdByTempId = useCallback((tempId: string, timeoutMs: number = 70000) => {
+    const existing = tempIdRealIdMapRef.current.get(tempId);
+    if (existing) {
+      return Promise.resolve(existing);
+    }
+    return new Promise<string | null>((resolve) => {
+      const timeoutId = window.setTimeout(() => {
+        const pending = pendingTempResolversRef.current.get(tempId);
+        if (pending) {
+          const nextPending = pending.filter((entry) => entry.resolve !== resolve);
+          if (nextPending.length > 0) {
+            pendingTempResolversRef.current.set(tempId, nextPending);
+          } else {
+            pendingTempResolversRef.current.delete(tempId);
+          }
+        }
+        resolve(null);
+      }, timeoutMs);
+      const entry = { resolve, timeoutId };
+      const pending = pendingTempResolversRef.current.get(tempId);
+      if (pending) {
+        pending.push(entry);
+      } else {
+        pendingTempResolversRef.current.set(tempId, [entry]);
+      }
+    });
+  }, []);
+
   const resolveMaybeTempNodeId = useCallback(async (nodeId: string | null, timeoutMs: number = 70000) => {
     if (!nodeId) return null;
     if (!String(nodeId).startsWith("temp-")) return nodeId;
-    const path = pathByNodeId.get(nodeId);
-    if (!path) return null;
-    return await waitForRealNodeIdByPath(path, timeoutMs);
-  }, [pathByNodeId, waitForRealNodeIdByPath]);
+    const mapped = tempIdRealIdMapRef.current.get(nodeId);
+    if (mapped) return mapped;
+    // pathByNodeIdから取得を試み、なければtempIdPathMapRefから取得
+    const path = pathByNodeId.get(nodeId) ?? tempIdPathMapRef.current.get(nodeId);
+    const waitForTempId = waitForRealNodeIdByTempId(nodeId, timeoutMs);
+
+    if (!path) {
+      return await waitForTempId;
+    }
+
+    const waitForPath = waitForRealNodeIdByPath(path, timeoutMs);
+
+    return await new Promise<string | null>((resolve) => {
+      let pending = 2;
+      let settled = false;
+      const finish = (value: string | null) => {
+        if (settled) return;
+        if (value) {
+          settled = true;
+          registerTempIdMapping(nodeId, value);
+          resolve(value);
+          return;
+        }
+        pending -= 1;
+        if (pending === 0) {
+          settled = true;
+          resolve(null);
+        }
+      };
+      waitForTempId.then(finish).catch(() => finish(null));
+      waitForPath.then(finish).catch(() => finish(null));
+    });
+  }, [pathByNodeId, registerTempIdMapping, waitForRealNodeIdByPath, waitForRealNodeIdByTempId]);
 
   useEffect(() => {
     if (pendingPathResolversRef.current.size === 0) return;
@@ -403,7 +515,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     }
 
     setNodes((prev) => {
-      const serverNodes = allNodes;
+      const serverNodes = dedupeNodesById(allNodes);
       const serverKeys = new Set(serverNodes.map(getNodeKey));
       const serverIds = new Set(serverNodes.map((node) => node.id));
       for (const id of Array.from(pendingNodeIdsRef.current)) {
@@ -418,7 +530,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         }
         return pendingNodeIdsRef.current.has(node.id) && !serverIds.has(node.id);
       });
-      const newNodes = [...serverNodes, ...pendingNodes];
+      const newNodes = dedupeNodesById([...serverNodes, ...pendingNodes]);
       // Cache nodes for faster reload
       setCachedNodes(projectId, serverNodes);
       return newNodes;
@@ -440,11 +552,61 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     fetchNodes(!hasInitialDataRef.current);
   }, [fetchNodes]);
 
+  // Prompt user for undo confirmation
+  const promptUndoConfirmation = useCallback((actionName: string, actionType: "create" | "copy" | "upload"): Promise<boolean> => {
+    return new Promise((resolve) => {
+      undoDialogResolveRef.current = resolve;
+      setUndoDialog({
+        isOpen: true,
+        actionName,
+        actionType,
+      });
+    });
+  }, []);
+
+  // Handle undo dialog response
+  const handleUndoDialogResponse = useCallback((confirmed: boolean) => {
+    const resolve = undoDialogResolveRef.current;
+    undoDialogResolveRef.current = null;
+
+    // Close dialog immediately
+    setUndoDialog({
+      isOpen: false,
+      actionName: "",
+      actionType: "create",
+    });
+
+    // Resolve after dialog closes
+    if (resolve) {
+      resolve(confirmed);
+    }
+  }, []);
+
   // Undo/Redo handlers (must be after fetchNodes)
   const handleUndo = useCallback(async () => {
     if (undoStack.length === 0) return;
 
     const action = undoStack[undoStack.length - 1];
+
+    // Show confirmation dialog for create and copy actions
+    if (action.type === "create" || action.type === "copy") {
+      let actionName: string;
+      let actionType: "create" | "copy" | "upload";
+
+      if (action.type === "create") {
+        const node = nodes.find(n => n.id === action.nodeId);
+        actionName = node?.name || action.node?.name || "ファイル";
+        actionType = action.source === "upload" ? "upload" : "create";
+      } else {
+        // copy action
+        actionName = action.names?.[0] || "項目";
+        actionType = "copy";
+      }
+
+      const confirmed = await promptUndoConfirmation(actionName, actionType);
+      if (!confirmed) return;
+    }
+
     setUndoStack(prev => prev.slice(0, -1));
 
     try {
@@ -586,7 +748,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       // Put the action back on the stack if it failed
       setUndoStack(prev => [...prev, action]);
     }
-  }, [undoStack, nodes, activeNodeId, fetchNodes, supabase]);
+  }, [undoStack, nodes, activeNodeId, fetchNodes, supabase, promptUndoConfirmation]);
 
   const handleRedo = useCallback(async () => {
     if (redoStack.length === 0) return;
@@ -887,69 +1049,75 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     setSelectedNodeIds(new Set([tempId]));
     setOpenTabs((prev) => (prev.includes(tempId) ? prev : [...prev, tempId]));
     setActiveNodeId(tempId);
+    setRevealNodeId(tempId);
     if (activeActivity !== "explorer") {
       setActiveActivity("explorer");
     }
 
-    try {
-      const res = await fetch("/api/files", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "create_file", path, projectId, parentId }),
-      });
-      const raw = await res.text();
-      let json: any = {};
+    // バックグラウンドでAPI処理を実行（UIブロックしない）
+    (async () => {
       try {
-        json = raw ? JSON.parse(raw) : {};
-      } catch {
-        throw new Error("Failed to parse server response.");
-      }
-      if (!res.ok) throw new Error(json?.error || "Failed to create file");
-      if (json?.nodeId) {
-        pendingNodeIdsRef.current.add(json.nodeId);
-        setNodes(prev => {
-          const hasReal = prev.some(n => n.id === json.nodeId);
-          if (hasReal) {
-            return prev.filter(n => n.id !== tempId);
-          }
-          return prev.map(n => n.id === tempId ? { ...n, id: json.nodeId } : n);
+        const res = await fetch("/api/files", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "create_file", path, projectId, parentId }),
         });
-        setOpenTabs(prev => prev.map(id => id === tempId ? json.nodeId : id));
-        setActiveNodeId(json.nodeId);
-        setSelectedNodeIds(new Set([json.nodeId]));
-        // Push undo action for create
-        pushUndoAction({ type: "create", nodeId: json.nodeId });
-      }
-      // 成功したら正式なデータで更新
-      fetchNodes();
-    } catch (error: any) {
-      console.error("Failed to create file:", error);
-      let recovered = false;
-      try {
-        const refreshedNodes = await fetchNodes();
-        const recoveredNode = refreshedNodes.find(
-          (node: Node) => node.type === "file" && node.name === name && node.parent_id === parentId
-        );
-        if (recoveredNode) {
-          recovered = true;
-          setOpenTabs(prev => prev.map(id => id === tempId ? recoveredNode.id : id));
-          if (activeNodeId === tempId) {
-            setActiveNodeId(recoveredNode.id);
-          }
-          setSelectedNodeIds(new Set([recoveredNode.id]));
+        const raw = await res.text();
+        let json: any = {};
+        try {
+          json = raw ? JSON.parse(raw) : {};
+        } catch {
+          throw new Error("Failed to parse server response.");
         }
-      } catch (refreshError) {
-        console.error("Failed to refresh nodes after create error:", refreshError);
+        if (!res.ok) throw new Error(json?.error || "Failed to create file");
+        if (json?.nodeId) {
+          registerTempIdMapping(tempId, json.nodeId);
+          pendingNodeIdsRef.current.add(json.nodeId);
+          setNodes(prev => {
+            const hasReal = prev.some(n => n.id === json.nodeId);
+            if (hasReal) {
+              return prev.filter(n => n.id !== tempId);
+            }
+            return prev.map(n => n.id === tempId ? { ...n, id: json.nodeId } : n);
+          });
+          setOpenTabs(prev => prev.map(id => id === tempId ? json.nodeId : id));
+          setActiveNodeId(json.nodeId);
+          setSelectedNodeIds(new Set([json.nodeId]));
+          // Push undo action for create
+          pushUndoAction({ type: "create", nodeId: json.nodeId });
+        }
+        // 成功したら正式なデータで更新
+        fetchNodes();
+      } catch (error: any) {
+        console.error("Failed to create file:", error);
+        let recovered = false;
+        try {
+          const refreshedNodes = await fetchNodes();
+          const recoveredNode = refreshedNodes.find(
+            (node: Node) => node.type === "file" && node.name === name && node.parent_id === parentId
+          );
+          if (recoveredNode) {
+            recovered = true;
+            registerTempIdMapping(tempId, recoveredNode.id);
+            setOpenTabs(prev => prev.map(id => id === tempId ? recoveredNode.id : id));
+            if (activeNodeId === tempId) {
+              setActiveNodeId(recoveredNode.id);
+            }
+            setSelectedNodeIds(new Set([recoveredNode.id]));
+          }
+        } catch (refreshError) {
+          console.error("Failed to refresh nodes after create error:", refreshError);
+        }
+        if (!recovered) {
+          // 失敗したらロールバック
+          setNodes(prev => prev.filter(n => n.id !== tempId));
+          setOpenTabs(prev => prev.filter(id => id !== tempId));
+          setActiveNodeId(prevActiveId ?? null);
+          setSelectedNodeIds(new Set(prevSelectedIds));
+          alert(`Error: ${error.message}`);
+        }
       }
-      if (!recovered) {
-        // 失敗したらロールバック
-        setNodes(prev => prev.filter(n => n.id !== tempId));
-        setOpenTabs(prev => prev.filter(id => id !== tempId));
-        setActiveNodeId(prevActiveId ?? null);
-        setSelectedNodeIds(new Set(prevSelectedIds));
-        alert(`Error: ${error.message}`);
-      }
-    }
+    })();
   };
 
   const handleCreateFolder = async (path: string, explicitParentId?: string | null) => {
@@ -976,56 +1144,62 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     };
     setNodes(prev => [...prev, tempNode]);
     setSelectedNodeIds(new Set([tempId]));
+    setRevealNodeId(tempId);
 
-    try {
-      const res = await fetch("/api/files", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "create_folder", path, projectId, parentId }),
-      });
-      const raw = await res.text();
-      let json: any = {};
+    // バックグラウンドでAPI処理を実行（UIブロックしない）
+    (async () => {
       try {
-        json = raw ? JSON.parse(raw) : {};
-      } catch {
-        throw new Error("Failed to parse server response.");
-      }
-      if (!res.ok) throw new Error(json?.error || "Failed to create folder");
-      if (json?.nodeId) {
-        pendingNodeIdsRef.current.add(json.nodeId);
-        setNodes(prev => {
-          const hasReal = prev.some(n => n.id === json.nodeId);
-          if (hasReal) {
-            return prev.filter(n => n.id !== tempId);
-          }
-          return prev.map(n => n.id === tempId ? { ...n, id: json.nodeId } : n);
+        const res = await fetch("/api/files", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "create_folder", path, projectId, parentId }),
         });
-        setSelectedNodeIds(new Set([json.nodeId]));
-        // Push undo action for create
-        pushUndoAction({ type: "create", nodeId: json.nodeId });
-      }
-      fetchNodes();
-    } catch (error: any) {
-      console.error("Failed to create folder:", error);
-      let recovered = false;
-      try {
-        const refreshedNodes = await fetchNodes();
-        const recoveredNode = refreshedNodes.find(
-          (node: Node) => node.type === "folder" && node.name === name && node.parent_id === parentId
-        );
-        if (recoveredNode) {
-          recovered = true;
-          setSelectedNodeIds(new Set([recoveredNode.id]));
+        const raw = await res.text();
+        let json: any = {};
+        try {
+          json = raw ? JSON.parse(raw) : {};
+        } catch {
+          throw new Error("Failed to parse server response.");
         }
-      } catch (refreshError) {
-        console.error("Failed to refresh nodes after create error:", refreshError);
+        if (!res.ok) throw new Error(json?.error || "Failed to create folder");
+        if (json?.nodeId) {
+          registerTempIdMapping(tempId, json.nodeId);
+          pendingNodeIdsRef.current.add(json.nodeId);
+          setNodes(prev => {
+            const hasReal = prev.some(n => n.id === json.nodeId);
+            if (hasReal) {
+              return prev.filter(n => n.id !== tempId);
+            }
+            return prev.map(n => n.id === tempId ? { ...n, id: json.nodeId } : n);
+          });
+          setSelectedNodeIds(new Set([json.nodeId]));
+          // Push undo action for create
+          pushUndoAction({ type: "create", nodeId: json.nodeId });
+        }
+        fetchNodes();
+      } catch (error: any) {
+        console.error("Failed to create folder:", error);
+        let recovered = false;
+        try {
+          const refreshedNodes = await fetchNodes();
+          const recoveredNode = refreshedNodes.find(
+            (node: Node) => node.type === "folder" && node.name === name && node.parent_id === parentId
+          );
+          if (recoveredNode) {
+            recovered = true;
+            registerTempIdMapping(tempId, recoveredNode.id);
+            setSelectedNodeIds(new Set([recoveredNode.id]));
+          }
+        } catch (refreshError) {
+          console.error("Failed to refresh nodes after create error:", refreshError);
+        }
+        if (!recovered) {
+          setNodes(prev => prev.filter(n => n.id !== tempId));
+          setSelectedNodeIds(new Set(prevSelectedIds));
+          alert(`Error: ${error.message}`);
+        }
       }
-      if (!recovered) {
-        setNodes(prev => prev.filter(n => n.id !== tempId));
-        setSelectedNodeIds(new Set(prevSelectedIds));
-        alert(`Error: ${error.message}`);
-      }
-    }
+    })();
   };
 
   const handleRenameNode = async (id: string, newName: string) => {
@@ -1178,6 +1352,15 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       };
       tempNodes.push(tempNode);
 
+      // tempIdとパスのマッピングを保存（fetchNodes後も解決に使用）
+      let parentPath = "";
+      if (targetParentId) {
+        // 親がtempノードの場合はtempIdPathMapRefから、通常ノードの場合はpathByNodeIdから取得
+        parentPath = tempIdPathMapRef.current.get(targetParentId) ?? pathByNodeId.get(targetParentId) ?? "";
+      }
+      const tempNodePath = parentPath ? `${parentPath}/${newName}` : newName;
+      tempIdPathMapRef.current.set(tempId, tempNodePath);
+
       if (isRoot) {
         rootTempIds.push(tempId);
       }
@@ -1195,9 +1378,15 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       copyNodeTreeLocally(nodeId, newParentId, true);
     }
 
+    const tempNodeIds = new Set(tempNodes.map((node) => node.id));
+
     // Immediately update UI with temp nodes and select root nodes
     setNodes(prev => [...prev, ...tempNodes]);
     setSelectedNodeIds(new Set(rootTempIds));
+    // 即座に中央表示
+    if (rootTempIds.length > 0) {
+      setRevealNodeId(rootTempIds[0]);
+    }
 
     try {
       const resolvedNodeIds = await resolvedNodeIdsPromise;
@@ -1246,9 +1435,23 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         }
       }
 
+      if (newNodeIds.length > 0) {
+        for (let index = 0; index < newNodeIds.length; index += 1) {
+          const tempId = rootTempIds[index];
+          if (tempId) {
+            registerTempIdMapping(tempId, newNodeIds[index]);
+          }
+        }
+      }
+
       // Push undo action for copy
       if (newNodeIds.length > 0) {
-        pushUndoAction({ type: "copy", nodeIds: newNodeIds });
+        // Get the names of copied nodes for undo dialog
+        const copiedNames = rootTempIds.map(tempId => {
+          const tempNode = tempNodes.find(n => n.id === tempId);
+          return tempNode?.name || "";
+        }).filter(Boolean);
+        pushUndoAction({ type: "copy", nodeIds: newNodeIds, names: copiedNames });
       }
 
       const ensureCopiedNodesVisible = async () => {
@@ -1266,6 +1469,12 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
 
       // Refresh to get the actual nodes (replaces temp nodes) and select the new nodes
       await ensureCopiedNodesVisible();
+      if (tempNodeIds.size > 0) {
+        setNodes(prev => prev.filter((node) => !tempNodeIds.has(node.id)));
+        for (const tempId of tempNodeIds) {
+          tempIdPathMapRef.current.delete(tempId);
+        }
+      }
       setSelectedNodeIds(new Set(newNodeIds));
       if (newNodeIds.length > 0) {
         setRevealNodeId(newNodeIds[0]);
@@ -1274,11 +1483,44 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     } catch (error: any) {
       // Revert optimistic update on error
       setNodes(prev => prev.filter(n => !tempNodes.some(t => t.id === n.id)));
+      for (const tempNode of tempNodes) {
+        tempIdPathMapRef.current.delete(tempNode.id);
+      }
       setSelectedNodeIds(new Set());
       alert(`コピーエラー: ${error.message}`);
       return [];
     }
   };
+
+  // Prompt user for delete confirmation
+  const promptDeleteConfirmation = useCallback((names: string[], itemType: "file" | "folder" | "mixed"): Promise<boolean> => {
+    return new Promise((resolve) => {
+      deleteDialogResolveRef.current = resolve;
+      setDeleteDialog({
+        isOpen: true,
+        names,
+        itemType,
+      });
+    });
+  }, []);
+
+  // Handle delete dialog response
+  const handleDeleteDialogResponse = useCallback((confirmed: boolean) => {
+    const resolve = deleteDialogResolveRef.current;
+    deleteDialogResolveRef.current = null;
+
+    // Close dialog immediately
+    setDeleteDialog({
+      isOpen: false,
+      names: [],
+      itemType: "file",
+    });
+
+    // Resolve after dialog closes
+    if (resolve) {
+      resolve(confirmed);
+    }
+  }, []);
 
   const handleDeleteNodes = async (ids: string[]) => {
     if (ids.length === 0) return;
@@ -1286,6 +1528,23 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     // 削除するノード情報を保存
     const nodesToDelete = ids.map(id => nodes.find(n => n.id === id)).filter(Boolean) as Node[];
     if (nodesToDelete.length === 0) return;
+
+    // Determine names and type for dialog
+    const names = nodesToDelete.map(n => n.name);
+    const hasFiles = nodesToDelete.some(n => n.type === "file");
+    const hasFolders = nodesToDelete.some(n => n.type === "folder");
+    let itemType: "file" | "folder" | "mixed";
+    if (hasFiles && hasFolders) {
+      itemType = "mixed";
+    } else if (hasFolders) {
+      itemType = "folder";
+    } else {
+      itemType = "file";
+    }
+
+    // Show confirmation dialog
+    const confirmed = await promptDeleteConfirmation(names, itemType);
+    if (!confirmed) return;
 
     // 子ノードも含めて削除対象を収集
     const allIdsToDelete = new Set<string>();
@@ -1641,6 +1900,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     const STORAGE_THRESHOLD_TEXT = 5 * 1024 * 1024;
 
     const filesArray = Array.from(filteredFiles);
+    const firstFile = filesArray[0];
     const lastFile = filesArray[filesArray.length - 1];
     let lastTempId: string | null = null;
     let lastFinalId: string | null = null;
@@ -1656,6 +1916,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       const isBinary = isBinaryFile(fileName);
       const useStorage = isBinary || file.size > (isBinary ? STORAGE_THRESHOLD_BINARY : STORAGE_THRESHOLD_TEXT);
       const shouldFocus = file === lastFile;
+      const shouldRevealImmediately = file === firstFile; // 最初のファイルで即座に中央表示
 
       // Create the file node optimistically FIRST (before any dialog)
       const tempId = `temp-${Date.now()}-${Math.random()}`;
@@ -1678,13 +1939,19 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         setNodes(prev => [...prev.filter(n => n.id !== existingNode.id), tempNode]);
         uploadSelection.add(tempId);
         syncSelection();
+        // Replace existing tab with temp tab
         setOpenTabs(prev => {
           const filtered = prev.filter(id => id !== existingNode.id);
           return filtered.includes(tempId) ? filtered : [...filtered, tempId];
         });
         if (shouldFocus) {
           setActiveNodeId(tempId);
+        }
+        if (shouldRevealImmediately || shouldFocus) {
           setRevealNodeId(tempId);
+          if (activeActivity !== "explorer") {
+            setActiveActivity("explorer");
+          }
         }
 
         // Now show dialog (UI already updated)
@@ -1706,10 +1973,16 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         setNodes(prev => [...prev, tempNode]);
         uploadSelection.add(tempId);
         syncSelection();
+        // Open temp tab to show upload progress
         setOpenTabs(prev => (prev.includes(tempId) ? prev : [...prev, tempId]));
         if (shouldFocus) {
           setActiveNodeId(tempId);
+        }
+        if (shouldRevealImmediately || shouldFocus) {
           setRevealNodeId(tempId);
+          if (activeActivity !== "explorer") {
+            setActiveActivity("explorer");
+          }
         }
       }
 
@@ -1817,6 +2090,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         }
 
         // Update the node with the real ID
+        registerTempIdMapping(tempId, newId);
         setNodes(prev => prev.map(n => n.id === tempId ? { ...n, id: newId } : n));
         if (uploadSelection.delete(tempId)) {
           uploadSelection.add(newId);
@@ -1837,6 +2111,8 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
           delete next[tempId];
           return next;
         });
+        // Push undo action for upload
+        pushUndoAction({ type: "create", nodeId: newId, source: "upload" });
         lastSuccessId = newId;
         if (tempId === lastTempId) {
           lastFinalId = newId;
@@ -1878,7 +2154,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         setRevealNodeId(finalId);
       }
     }
-  }, [projectId, supabase, pathByNodeId, uploadFileToSignedUrl, runWithConcurrency, findExistingNode, promptReplaceConfirmation]);
+  }, [activeActivity, projectId, supabase, pathByNodeId, registerTempIdMapping, uploadFileToSignedUrl, runWithConcurrency, findExistingNode, promptReplaceConfirmation, pushUndoAction]);
 
   const uploadFolderItems = useCallback(async (items: UploadItem[], parentId: string | null) => {
     if (items.length === 0) return;
@@ -2225,6 +2501,8 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         node.parent_id === parentId
       );
       if (folderNode) {
+        // Push undo action for folder upload
+        pushUndoAction({ type: "create", nodeId: folderNode.id, source: "upload" });
         setSelectedNodeIds(new Set([folderNode.id]));
         setRevealNodeId(folderNode.id);
         if (activeActivity !== "explorer") {
@@ -2236,7 +2514,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     if (lastCreatedNodeId) {
       handleOpenNode(lastCreatedNodeId);
     }
-  }, [activeActivity, fetchNodes, handleOpenNode, nodes, pathByNodeId, projectId, runWithConcurrency, supabase, uploadFileToSignedUrl, findExistingNode, promptReplaceConfirmation]);
+  }, [activeActivity, fetchNodes, handleOpenNode, nodes, pathByNodeId, projectId, runWithConcurrency, supabase, uploadFileToSignedUrl, findExistingNode, promptReplaceConfirmation, pushUndoAction]);
 
   const handleFileInputChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -3761,6 +4039,24 @@ ${diffs}`;
           onCancel={() => handleReplaceDialogResponse(false)}
         />
 
+        {/* ファイル/フォルダ削除確認ダイアログ */}
+        <DeleteConfirmDialog
+          isOpen={deleteDialog.isOpen}
+          names={deleteDialog.names}
+          itemType={deleteDialog.itemType}
+          onConfirm={() => handleDeleteDialogResponse(true)}
+          onCancel={() => handleDeleteDialogResponse(false)}
+        />
+
+        {/* Undo確認ダイアログ */}
+        <UndoConfirmDialog
+          isOpen={undoDialog.isOpen}
+          actionName={undoDialog.actionName}
+          actionType={undoDialog.actionType}
+          onConfirm={() => handleUndoDialogResponse(true)}
+          onCancel={() => handleUndoDialogResponse(false)}
+        />
+
         <main className="flex-1 flex flex-col min-w-0 bg-white">
           <TabBar
             tabs={tabs}
@@ -3817,7 +4113,7 @@ ${diffs}`;
                   onSave={() => handleSavePlanToWorkspace(activeVirtual.id)}
                 />
               ) : activeNode ? (
-                activeNode.id.startsWith("temp-") && typeof activeUploadProgress === "number" ? (
+                activeNode.id.startsWith("temp-") ? (
                   <div className="absolute inset-0 flex items-center justify-center text-zinc-500">
                     <div className="flex flex-col items-center gap-3">
                       <div className="flex items-center gap-3">
@@ -3843,11 +4139,11 @@ ${diffs}`;
                         <div className="h-1.5 w-full rounded-full bg-zinc-200 overflow-hidden">
                           <div
                             className="h-1.5 bg-blue-500"
-                            style={{ width: `${activeUploadProgress}%` }}
+                            style={{ width: `${activeUploadProgress ?? 0}%` }}
                           />
                         </div>
                         <div className="mt-2 text-xs text-zinc-500 text-center">
-                          {activeUploadProgress}%
+                          {activeUploadProgress ?? 0}%
                         </div>
                       </div>
                     </div>

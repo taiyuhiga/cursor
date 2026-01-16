@@ -2,7 +2,6 @@
 
 import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { ContextMenu } from "./ContextMenu";
-import { ConfirmDialog } from "./ConfirmDialog";
 import { ActionIcons, ChevronIcon, FileIcons, getFileIcon, getFolderColor } from "./fileIcons";
 import { AccountMenu } from "./AccountMenu";
 
@@ -10,6 +9,11 @@ type Node = {
   id: string;
   parent_id: string | null;
   type: "file" | "folder";
+  name: string;
+};
+
+type Workspace = {
+  id: string;
   name: string;
 };
 
@@ -44,6 +48,11 @@ type FileTreeProps = {
   onRenameWorkspace?: (newName: string) => Promise<void>;
   onDeleteWorkspace?: () => void;
   isLoading?: boolean;
+  // ワークスペース切り替え関連
+  workspaces?: Workspace[];
+  activeWorkspaceId?: string;
+  onSelectWorkspace?: (id: string) => void;
+  onCreateWorkspace?: () => void;
 };
 
 type EditingState = {
@@ -137,6 +146,10 @@ export function FileTree({
   onRenameWorkspace,
   onDeleteWorkspace,
   isLoading,
+  workspaces,
+  activeWorkspaceId,
+  onSelectWorkspace,
+  onCreateWorkspace,
 }: FileTreeProps) {
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [contextMenu, setContextMenu] = useState<{
@@ -160,17 +173,6 @@ export function FileTree({
   const dragExpandTimerRef = useRef<NodeJS.Timeout | null>(null);
   const dragPreviewRef = useRef<HTMLDivElement>(null);
 
-  // Delete confirmation dialog state
-  const [confirmDialog, setConfirmDialog] = useState<{
-    isOpen: boolean;
-    targetIds: string[];
-    targetName: string;
-  }>({
-    isOpen: false,
-    targetIds: [],
-    targetName: "",
-  });
-
   // Clipboard state for cut/copy/paste
   const [clipboard, setClipboard] = useState<{
     nodeIds: string[];
@@ -181,9 +183,14 @@ export function FileTree({
   const [isEditingWorkspaceName, setIsEditingWorkspaceName] = useState(false);
   const [workspaceNameValue, setWorkspaceNameValue] = useState("");
   const workspaceNameInputRef = useRef<HTMLInputElement>(null);
+  // ワークスペース切り替えポップオーバー
+  const [isWorkspacePopoverOpen, setIsWorkspacePopoverOpen] = useState(false);
+  const workspacePopoverRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(0);
   const scrollRafRef = useRef<number | null>(null);
+  // 一度スクロールしたrevealNodeIdを追跡（同じIDで再スクロールしない）
+  const lastRevealedNodeIdRef = useRef<string | null>(null);
 
   const nodeMap = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
   const nameCollator = useMemo(
@@ -302,17 +309,23 @@ export function FileTree({
     return null;
   }, [editingState, visibleRows]);
 
-  const scrollToRowIndex = useCallback((index: number) => {
+  const scrollToRowIndex = useCallback((index: number, centerInView = false) => {
     const container = treeScrollRef.current;
     if (!container) return;
     const rowTop = index * ROW_HEIGHT;
-    const rowBottom = rowTop + ROW_HEIGHT;
-    const viewTop = container.scrollTop;
-    const viewBottom = viewTop + container.clientHeight;
-    if (rowTop < viewTop) {
-      container.scrollTop = rowTop;
-    } else if (rowBottom > viewBottom) {
-      container.scrollTop = Math.max(0, rowBottom - container.clientHeight);
+
+    if (centerInView) {
+      const centerOffset = (container.clientHeight - ROW_HEIGHT) / 2;
+      container.scrollTop = Math.max(0, rowTop - centerOffset);
+    } else {
+      const rowBottom = rowTop + ROW_HEIGHT;
+      const viewTop = container.scrollTop;
+      const viewBottom = viewTop + container.clientHeight;
+      if (rowTop < viewTop) {
+        container.scrollTop = rowTop;
+      } else if (rowBottom > viewBottom) {
+        container.scrollTop = Math.max(0, rowBottom - container.clientHeight);
+      }
     }
   }, []);
 
@@ -330,6 +343,8 @@ export function FileTree({
 
   useEffect(() => {
     if (!revealNodeId) return;
+    // 同じIDで既にreveal済みならスキップ
+    if (lastRevealedNodeIdRef.current === revealNodeId) return;
     setIsProjectExpanded(true);
     setExpandedFolders((prev) => {
       const next = new Set(prev);
@@ -346,9 +361,13 @@ export function FileTree({
 
   useEffect(() => {
     if (!revealNodeId) return;
+    // 同じIDで既にスクロール済みならスキップ
+    if (lastRevealedNodeIdRef.current === revealNodeId) return;
     const index = rowIndexByNodeId.get(revealNodeId);
     if (index === undefined) return;
-    scrollToRowIndex(index);
+    scrollToRowIndex(index, true);
+    // スクロール完了後、このIDを記録
+    lastRevealedNodeIdRef.current = revealNodeId;
   }, [revealNodeId, rowIndexByNodeId, scrollToRowIndex]);
 
   // Get the selected folder (for creating files/folders in it)
@@ -460,6 +479,18 @@ export function FileTree({
       }, 0);
     }
   }, [isEditingWorkspaceName]);
+
+  // Close workspace popover on outside click
+  useEffect(() => {
+    if (!isWorkspacePopoverOpen) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (workspacePopoverRef.current && !workspacePopoverRef.current.contains(e.target as HTMLElement)) {
+        setIsWorkspacePopoverOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [isWorkspacePopoverOpen]);
 
   // Keyboard shortcuts for cut/copy/paste
   useEffect(() => {
@@ -703,15 +734,8 @@ export function FileTree({
           const idsToDelete = selectedNodeIds.has(targetId) && selectedNodeIds.size > 1
             ? Array.from(selectedNodeIds)
             : [targetId];
-          const names = idsToDelete.map(id => nodeMap.get(id)?.name).filter(Boolean);
-          const displayName = names.length === 1
-            ? names[0]!
-            : `${names.length}個の項目`;
-          setConfirmDialog({
-            isOpen: true,
-            targetIds: idsToDelete,
-            targetName: displayName,
-          });
+          // Call onDeleteNodes directly - confirmation is handled by AppLayout
+          onDeleteNodes(idsToDelete);
         }
         break;
       case "cut":
@@ -736,13 +760,6 @@ export function FileTree({
         }
         break;
     }
-  };
-
-  const handleDeleteConfirm = () => {
-    if (confirmDialog.targetIds.length > 0) {
-      onDeleteNodes(confirmDialog.targetIds);
-    }
-    setConfirmDialog({ isOpen: false, targetIds: [], targetName: "" });
   };
 
   const toggleFolder = (id: string) => {
@@ -1279,9 +1296,15 @@ export function FileTree({
     >
       {/* Project name header */}
       {projectName && (
-        <div className="group flex items-center px-3 py-2 border-b border-zinc-200 gap-0.5">
+        <div className="group flex items-center px-3 py-2 border-b border-zinc-200 gap-0.5 relative">
           {/* Workspace icon with first character */}
-          <div className="w-8 h-8 rounded bg-blue-100 flex items-center justify-center flex-shrink-0 mr-1.5">
+          <div
+            className="w-8 h-8 rounded bg-blue-100 flex items-center justify-center flex-shrink-0 mr-1.5 cursor-pointer hover:bg-blue-200 transition-colors"
+            onClick={(e) => {
+              e.stopPropagation();
+              setIsWorkspacePopoverOpen(!isWorkspacePopoverOpen);
+            }}
+          >
             <span className="text-sm font-bold text-blue-600">
               {(isEditingWorkspaceName ? workspaceNameValue : projectName).charAt(0).toUpperCase()}
             </span>
@@ -1300,6 +1323,10 @@ export function FileTree({
           ) : (
             <div
               className="flex items-center min-w-0 flex-1 cursor-pointer"
+              onClick={(e) => {
+                e.stopPropagation();
+                setIsWorkspacePopoverOpen(!isWorkspacePopoverOpen);
+              }}
               onDoubleClick={(e) => {
                 e.stopPropagation();
                 startEditingWorkspaceName();
@@ -1308,7 +1335,72 @@ export function FileTree({
               <span className="text-base font-semibold text-zinc-800 truncate min-w-[24px]">
                 {projectName}
               </span>
-              <ChevronIcon isOpen={isProjectExpanded} className="w-4 h-4 text-zinc-400 flex-shrink-0 ml-1 transition-opacity opacity-0 group-hover:opacity-100" />
+              <ChevronIcon isOpen={isWorkspacePopoverOpen} className="w-4 h-4 text-zinc-400 flex-shrink-0 ml-1" />
+            </div>
+          )}
+
+          {/* Workspace Switcher Popover */}
+          {isWorkspacePopoverOpen && (
+            <div
+              ref={workspacePopoverRef}
+              className="absolute top-full left-0 mt-1 w-72 bg-white rounded-lg shadow-lg border border-zinc-200 z-50 py-2"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Current workspace header */}
+              <div className="px-3 py-2 border-b border-zinc-100">
+                <div className="flex items-center gap-2">
+                  <div className="w-10 h-10 rounded bg-blue-100 flex items-center justify-center flex-shrink-0">
+                    <span className="text-base font-bold text-blue-600">
+                      {projectName.charAt(0).toUpperCase()}
+                    </span>
+                  </div>
+                  <span className="text-base font-semibold text-zinc-800 truncate">
+                    {projectName}
+                  </span>
+                </div>
+              </div>
+
+              {/* Workspace list */}
+              <div className="py-1">
+                {workspaces && workspaces.length > 0 ? (
+                  workspaces.map((ws) => (
+                    <button
+                      key={ws.id}
+                      className="w-full px-3 py-2 text-left hover:bg-zinc-50 flex items-center gap-2"
+                      onClick={() => {
+                        onSelectWorkspace?.(ws.id);
+                        setIsWorkspacePopoverOpen(false);
+                      }}
+                    >
+                      <div className="w-6 h-6 rounded bg-zinc-100 flex items-center justify-center flex-shrink-0 text-xs font-semibold text-zinc-600">
+                        {ws.name.charAt(0).toUpperCase()}
+                      </div>
+                      <span className="text-sm text-zinc-700 truncate flex-1">{ws.name}</span>
+                      {ws.id === activeWorkspaceId && (
+                        <svg className="w-4 h-4 text-zinc-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                        </svg>
+                      )}
+                    </button>
+                  ))
+                ) : (
+                  <div className="px-3 py-2 text-sm text-zinc-400">
+                    ワークスペースがありません
+                  </div>
+                )}
+
+                {/* Create new workspace button */}
+                <button
+                  className="w-full px-3 py-2 text-left hover:bg-zinc-50 flex items-center gap-2 text-blue-600"
+                  onClick={() => {
+                    onCreateWorkspace?.();
+                    setIsWorkspacePopoverOpen(false);
+                  }}
+                >
+                  <span className="w-6 h-6 flex items-center justify-center text-lg">+</span>
+                  <span className="text-sm font-medium">新しいワークスペース</span>
+                </button>
+              </div>
             </div>
           )}
           <div className="flex items-center flex-shrink-0 ml-auto -mr-0.5">
@@ -1627,17 +1719,6 @@ export function FileTree({
           />
         );
       })()}
-
-      {/* Confirm Dialog */}
-      <ConfirmDialog
-        isOpen={confirmDialog.isOpen}
-        title="削除の確認"
-        message={`「${confirmDialog.targetName}」を削除しますか？この操作は取り消せません。`}
-        confirmLabel="削除"
-        isDanger={true}
-        onConfirm={handleDeleteConfirm}
-        onCancel={() => setConfirmDialog({ isOpen: false, targetIds: [], targetName: "" })}
-      />
 
       {/* Hidden drag preview element */}
       <div

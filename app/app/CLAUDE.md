@@ -7,8 +7,13 @@
 
 | ID | Time | T | Title | Read |
 |----|------|---|-------|------|
-| #184 | 5:02 PM | 🔵 | AppLayout state management and SSR considerations | ~439 |
-| #182 | 5:01 PM | 🔵 | Server-side component doesn't prefetch nodes for initial page load | ~328 |
-| #181 | " | 🔵 | AppContent passes empty initialNodes array to AppLayout | ~349 |
-| #174 | 4:57 PM | 🔵 | AppLayout receives projectId as prop from parent component | ~277 |
+| #310 | 11:55 PM | 🔵 | AppLayout Import Structure and Type Definitions | ~297 |
+| #273 | 11:15 PM | ✅ | Added DeleteConfirmDialog Import to AppLayout | ~270 |
+
+### Jan 16, 2026
+
+| ID | Time | T | Title | Read |
+|----|------|---|-------|------|
+| #339 | 9:18 AM | 🔵 | AppLayout.tsx imports DeleteConfirmDialog component | ~292 |
+| #311 | 8:58 AM | 🔵 | Examining Upload and Replace Dialog State Management | ~358 |
 </claude-mem-context>
