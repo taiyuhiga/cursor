@@ -2,6 +2,7 @@
 
 import { createClient } from "@/lib/supabase/client";
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
+import { flushSync } from "react-dom";
 import { useRouter } from "next/navigation";
 import { diffLines } from "diff";
 import JSZip from "jszip";
@@ -265,6 +266,12 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     existingNodeId: "",
     resolve: null,
   });
+  const replaceQueueRef = useRef<{
+    items: { key: string; label: string; isFolder: boolean; existingNodeId: string }[];
+    index: number;
+    results: boolean[];
+    resolve: (map: Map<string, boolean>) => void;
+  } | null>(null);
 
   // Delete confirmation dialog state
   const [deleteDialog, setDeleteDialog] = useState<{
@@ -731,11 +738,35 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
 
       if (action.type === "create") {
         const node = nodes.find(n => n.id === action.nodeId);
-        actionName = node?.name || action.node?.name || "ファイル";
-        actionType = action.source === "upload" ? "upload" : "create";
+        const isUpload = action.source === "upload";
+        if (isUpload) {
+          const snapshot = node ? nodes : [...nodes, ...(action.node ? [action.node] : [])];
+          const countResources = (rootId: string) => {
+            let count = 0;
+            const collectChildren = (id: string) => {
+              count += 1;
+              snapshot
+                .filter(n => n.parent_id === id)
+                .forEach(child => collectChildren(child.id));
+            };
+            collectChildren(rootId);
+            return count;
+          };
+          const count = countResources(action.nodeId);
+          actionName = `${count} リソース`;
+          actionType = "upload";
+        } else {
+          actionName = node?.name || action.node?.name || "ファイル";
+          actionType = "create";
+        }
       } else {
         // copy action
-        actionName = action.names?.[0] || "項目";
+        const count = action.nodeIds.length;
+        if (count > 1) {
+          actionName = `${count} ファイル`;
+        } else {
+          actionName = action.names?.[0] || "項目";
+        }
         actionType = "copy";
       }
 
@@ -2165,8 +2196,78 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     });
   }, []);
 
+  const promptReplaceConfirmations = useCallback((items: { key: string; label: string; isFolder: boolean; existingNodeId: string }[]): Promise<Map<string, boolean>> => {
+    return new Promise((resolve) => {
+      if (items.length === 0) {
+        resolve(new Map());
+        return;
+      }
+      replaceQueueRef.current = {
+        items,
+        index: 0,
+        results: [],
+        resolve,
+      };
+      const current = items[0];
+      flushSync(() => {
+        setReplaceDialog({
+          isOpen: true,
+          fileName: current.label,
+          isFolder: current.isFolder,
+          existingNodeId: current.existingNodeId,
+          resolve: null,
+        });
+      });
+    });
+  }, []);
+
   // Handle replace dialog response
   const handleReplaceDialogResponse = useCallback(async (replace: boolean) => {
+    const queue = replaceQueueRef.current;
+    if (queue) {
+      queue.results[queue.index] = replace;
+      const nextIndex = queue.index + 1;
+      if (nextIndex < queue.items.length) {
+        queue.index = nextIndex;
+        const next = queue.items[nextIndex];
+        // Close then immediately show the next dialog
+        flushSync(() => {
+          setReplaceDialog({
+            isOpen: false,
+            fileName: "",
+            isFolder: false,
+            existingNodeId: "",
+            resolve: null,
+          });
+        });
+        requestAnimationFrame(() => {
+          setReplaceDialog({
+            isOpen: true,
+            fileName: next.label,
+            isFolder: next.isFolder,
+            existingNodeId: next.existingNodeId,
+            resolve: null,
+          });
+        });
+        return;
+      }
+      // Finish queue
+      replaceQueueRef.current = null;
+      flushSync(() => {
+        setReplaceDialog({
+          isOpen: false,
+          fileName: "",
+          isFolder: false,
+          existingNodeId: "",
+          resolve: null,
+        });
+      });
+      const map = new Map<string, boolean>();
+      queue.items.forEach((item, idx) => map.set(item.key, queue.results[idx]));
+      queue.resolve(map);
+      return;
+    }
+
     const { resolve, existingNodeId } = replaceDialog;
 
     // Close dialog immediately
@@ -2229,6 +2330,23 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     const STORAGE_THRESHOLD_TEXT = 5 * 1024 * 1024;
 
     const filesArray = Array.from(filteredFiles);
+    const replaceKeyByFile = new Map<File, string>();
+    const replaceCandidates: { file: File; existingNode: Node; key: string }[] = [];
+    for (const file of filesArray) {
+      const existingNode = findExistingNode(file.name, parentId);
+      if (existingNode) {
+        const key = `${file.name}:${existingNode.id}:${replaceCandidates.length}`;
+        replaceKeyByFile.set(file, key);
+        replaceCandidates.push({ file, existingNode, key });
+      }
+    }
+    const replaceItems = replaceCandidates.map(({ file, existingNode, key }) => ({
+      key,
+      label: file.name,
+      isFolder: existingNode.type === "folder",
+      existingNodeId: existingNode.id,
+    }));
+    const replaceDecisions = await promptReplaceConfirmations(replaceItems);
     const firstFile = filesArray[0];
     const lastFile = filesArray[filesArray.length - 1];
     let lastTempId: string | null = null;
@@ -2265,6 +2383,11 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       // Check for existing file with same name
       const existingNode = findExistingNode(fileName, parentId);
       if (existingNode) {
+        const decisionKey = replaceKeyByFile.get(file) ?? "";
+        const shouldReplace = replaceDecisions.get(decisionKey) ?? false;
+        if (!shouldReplace) {
+          return;
+        }
         // Immediately update UI: remove existing, add temp (instant feedback)
         setNodes(prev => [...prev.filter(n => n.id !== existingNode.id), tempNode]);
         uploadSelection.add(tempId);
@@ -2284,19 +2407,6 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
           }
         }
 
-        // Now show dialog (UI already updated)
-        const shouldReplace = await promptReplaceConfirmation(fileName, existingNode.type === "folder", existingNode.id);
-        if (!shouldReplace) {
-          // Restore existing node and remove temp
-          setNodes(prev => [...prev.filter(n => n.id !== tempId), existingNode]);
-          uploadSelection.delete(tempId);
-          syncSelection();
-          setOpenTabs(prev => prev.filter(id => id !== tempId));
-          if (activeNodeId === tempId) {
-            setActiveNodeId(null);
-          }
-          return; // Skip this file
-        }
         // Continue with upload (temp node already in place)
       } else {
         // No existing node, just add temp
@@ -2405,9 +2515,12 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
           let result;
           try {
             const text = await res.text();
+            if (text && text.trim().startsWith("<")) {
+              throw new Error(`Server returned HTML (status ${res.status}). Please re-login or refresh.`);
+            }
             result = text ? JSON.parse(text) : {};
-          } catch {
-            throw new Error("Failed to parse server response.");
+          } catch (err: any) {
+            throw new Error(err?.message || "Failed to parse server response.");
           }
 
           if (!res.ok) {
@@ -2488,7 +2601,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         setRevealNodeId(finalId);
       }
     }
-  }, [activeActivity, projectId, supabase, pathByNodeId, registerTempIdMapping, uploadFileToSignedUrl, runWithConcurrency, findExistingNode, promptReplaceConfirmation, pushUndoAction, updateUndoCreateNodeId, removeUndoCreateAction]);
+  }, [activeActivity, projectId, supabase, pathByNodeId, registerTempIdMapping, uploadFileToSignedUrl, runWithConcurrency, findExistingNode, promptReplaceConfirmations, pushUndoAction, updateUndoCreateNodeId, removeUndoCreateAction]);
 
   const uploadFolderItems = useCallback(async (items: UploadItem[], parentId: string | null) => {
     console.log("[FolderUpload] START - items:", items.length, "parentId:", parentId);
@@ -2689,23 +2802,34 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
 
     // Check for existing root folders/files with the same names (UI already updated)
     const tempIdsSet = new Set(tempIdByPath.values());
-    for (const existingNode of existingNodesToReplace) {
-      const shouldReplace = await promptReplaceConfirmation(existingNode.name, existingNode.type === "folder", existingNode.id);
-      if (!shouldReplace) {
-        // Restore all existing nodes and remove all temp nodes
-        setNodes(prev => [...prev.filter(n => !tempIdsSet.has(n.id)), ...existingNodesToReplace]);
-        for (const tempId of tempIdsSet) {
-          tempIdPathMapRef.current.delete(tempId);
+    if (existingNodesToReplace.length > 0) {
+      const replaceItems = existingNodesToReplace.map((existingNode, index) => ({
+        key: `${existingNode.id}:${index}`,
+        label: existingNode.name,
+        isFolder: existingNode.type === "folder",
+        existingNodeId: existingNode.id,
+      }));
+      const replaceDecisions = await promptReplaceConfirmations(replaceItems);
+      for (let index = 0; index < existingNodesToReplace.length; index += 1) {
+        const existingNode = existingNodesToReplace[index];
+        const decisionKey = replaceItems[index].key;
+        const shouldReplace = replaceDecisions.get(decisionKey) ?? false;
+        if (!shouldReplace) {
+          // Restore all existing nodes and remove all temp nodes
+          setNodes(prev => [...prev.filter(n => !tempIdsSet.has(n.id)), ...existingNodesToReplace]);
+          for (const tempId of tempIdsSet) {
+            tempIdPathMapRef.current.delete(tempId);
+          }
+          return; // Cancel entire folder upload
         }
-        return; // Cancel entire folder upload
-      }
-      // Clear deleted folder paths from cache to ensure new folders are created
-      const existingPath = pathByNodeId.get(existingNode.id);
-      if (existingPath) {
-        // Remove the deleted folder and all its child paths from cache
-        for (const [path] of folderIdByPath) {
-          if (path === existingPath || path.startsWith(existingPath + "/")) {
-            folderIdByPath.delete(path);
+        // Clear deleted folder paths from cache to ensure new folders are created
+        const existingPath = pathByNodeId.get(existingNode.id);
+        if (existingPath) {
+          // Remove the deleted folder and all its child paths from cache
+          for (const [path] of folderIdByPath) {
+            if (path === existingPath || path.startsWith(existingPath + "/")) {
+              folderIdByPath.delete(path);
+            }
           }
         }
       }
@@ -2895,7 +3019,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     if (lastCreatedNodeId) {
       handleOpenNode(lastCreatedNodeId);
     }
-  }, [activeActivity, fetchNodes, handleOpenNode, nodes, nodeIdByPath, pathByNodeId, projectId, runWithConcurrency, supabase, uploadFileToSignedUrl, findExistingNode, promptReplaceConfirmation, pushUndoAction, registerTempIdMapping, updateUndoCreateNodeId]);
+  }, [activeActivity, fetchNodes, handleOpenNode, nodes, nodeIdByPath, pathByNodeId, projectId, runWithConcurrency, supabase, uploadFileToSignedUrl, findExistingNode, promptReplaceConfirmations, pushUndoAction, registerTempIdMapping, updateUndoCreateNodeId]);
 
   const handleFileInputChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;

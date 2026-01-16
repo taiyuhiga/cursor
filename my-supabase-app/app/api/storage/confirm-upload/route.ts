@@ -29,18 +29,17 @@ export async function POST(req: NextRequest) {
       }, { status: 400 });
     }
 
-    // Store the storage path in file_contents
+    // Store the storage path in file_contents (upsert for replace)
     const { error: contentError } = await supabase
       .from("file_contents")
-      .insert({
+      .upsert({
         node_id: nodeId,
         text: `storage:${storagePath}`,
-      });
+      }, { onConflict: "node_id" });
 
     if (contentError) {
-      // Rollback
+      // Rollback storage object only
       await supabase.storage.from("files").remove([storagePath]);
-      await supabase.from("nodes").delete().eq("id", nodeId);
       return NextResponse.json({
         error: `Failed to save content reference: ${contentError.message}`
       }, { status: 500 });

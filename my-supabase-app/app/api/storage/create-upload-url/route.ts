@@ -58,10 +58,29 @@ export async function POST(req: NextRequest) {
     // Create the storage path
     const storagePath = buildStoragePath(projectId, node.id, fileName);
 
+    // If reusing existing node, remove old storage object to avoid conflicts
+    if (existingFile) {
+      await supabase.storage.from("files").remove([storagePath]);
+    }
+
     // Create a signed upload URL (valid for 5 minutes)
-    const { data: signedUrl, error: urlError } = await supabase.storage
+    let { data: signedUrl, error: urlError } = await supabase.storage
       .from("files")
       .createSignedUploadUrl(storagePath);
+
+    if (urlError) {
+      const isExists = typeof urlError.message === "string" &&
+        urlError.message.toLowerCase().includes("already exists");
+      if (isExists) {
+        // Try one more time after removing the existing object
+        await supabase.storage.from("files").remove([storagePath]);
+        const retry = await supabase.storage
+          .from("files")
+          .createSignedUploadUrl(storagePath);
+        signedUrl = retry.data;
+        urlError = retry.error;
+      }
+    }
 
     if (urlError) {
       // Rollback - delete the node only if we created it

@@ -226,6 +226,19 @@ export async function POST(req: NextRequest) {
             }
           }
 
+          // Delete storage file if this is a file with storage reference
+          const { data: contentRow } = await supabase
+            .from("file_contents")
+            .select("text")
+            .eq("node_id", nodeId)
+            .maybeSingle();
+          const storagePath = typeof contentRow?.text === "string" && contentRow.text.startsWith("storage:")
+            ? contentRow.text.replace("storage:", "")
+            : null;
+          if (storagePath) {
+            await supabase.storage.from("files").remove([storagePath]);
+          }
+
           // Delete file_contents if this is a file
           await supabase.from("file_contents").delete().eq("node_id", nodeId);
 
