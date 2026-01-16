@@ -335,7 +335,37 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
 
   const pushUndoAction = useCallback((action: UndoAction) => {
     setUndoStack(prev => {
+      // Prevent duplicate consecutive actions (e.g., from React StrictMode or double events)
+      const lastAction = prev[prev.length - 1];
+      if (lastAction) {
+        const isDuplicate = (() => {
+          if (lastAction.type !== action.type) return false;
+          if (action.type === "copy" && lastAction.type === "copy") {
+            return JSON.stringify(action.nodeIds) === JSON.stringify(lastAction.nodeIds);
+          }
+          if (action.type === "create" && lastAction.type === "create") {
+            return action.nodeId === lastAction.nodeId;
+          }
+          if (action.type === "delete" && lastAction.type === "delete") {
+            return action.nodeId === lastAction.nodeId;
+          }
+          if (action.type === "rename" && lastAction.type === "rename") {
+            return action.nodeId === lastAction.nodeId && action.oldName === lastAction.oldName && action.newName === lastAction.newName;
+          }
+          if (action.type === "move" && lastAction.type === "move") {
+            return JSON.stringify(action.nodeIds) === JSON.stringify(lastAction.nodeIds);
+          }
+          return false;
+        })();
+        if (isDuplicate) {
+          // Skip duplicate action
+          return prev;
+        }
+      }
       const newStack = [...prev, action];
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AppLayout.tsx:pushUndoAction',message:'Push undo action',data:{type:action.type,nodeId:("nodeId" in action ? action.nodeId : undefined),nodeIds:("nodeIds" in action ? action.nodeIds : undefined),stackSize:newStack.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H_PUSH'})}).catch(()=>{});
+      // #endregion
       if (newStack.length > MAX_UNDO_STACK) {
         return newStack.slice(-MAX_UNDO_STACK);
       }
@@ -554,6 +584,9 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         return prev;
       });
     }
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AppLayout.tsx:fetchNodes:start',message:'fetchNodes start',data:{showLoading,projectId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H_FETCH_START'})}).catch(()=>{});
+    // #endregion
     // Supabase REST defaults to 1000 rows; paginate to load everything.
     const pageSize = 1000;
     const allNodes: Node[] = [];
@@ -572,12 +605,18 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         .range(from, to);
 
       if (error) {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AppLayout.tsx:fetchNodes:error',message:'fetchNodes error',data:{error},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H_FETCH_ERROR'})}).catch(()=>{});
+        // #endregion
         console.error("Error fetching nodes:", error);
         setIsLoading(false);
         return [];
       }
 
       const pageData = data || [];
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AppLayout.tsx:fetchNodes:page',message:'fetchNodes page',data:{page,from,to,count:pageData.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H_FETCH_PAGE'})}).catch(()=>{});
+      // #endregion
       allNodes.push(...pageData);
       if (pageData.length < pageSize) break;
       page += 1;
@@ -654,6 +693,9 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   // Undo/Redo handlers (must be after fetchNodes)
   const handleUndo = useCallback(async () => {
     if (undoStack.length === 0) return;
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AppLayout.tsx:handleUndo:start',message:'Undo start',data:{stackSize:undoStack.length,topType:undoStack[undoStack.length-1]?.type},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H_UNDO_START'})}).catch(()=>{});
+    // #endregion
 
     let lastIndex = undoStack.length - 1;
     while (lastIndex >= 0 && undoStack[lastIndex].type === "delete") {
@@ -666,6 +708,9 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
 
     const trimmedStack = undoStack.slice(0, lastIndex + 1);
     const action = trimmedStack[trimmedStack.length - 1];
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AppLayout.tsx:handleUndo:action',message:'Undo action selected',data:{type:action.type,nodeId:("nodeId" in action ? action.nodeId : undefined),nodeIds:("nodeIds" in action ? action.nodeIds : undefined),trimmedSize:trimmedStack.length,originalSize:undoStack.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H_UNDO_ACTION'})}).catch(()=>{});
+    // #endregion
 
     // Show confirmation dialog for create and copy actions
     if (action.type === "create" || action.type === "copy") {
@@ -858,14 +903,35 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
           break;
         }
         case "copy": {
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AppLayout.tsx:handleUndo:copy',message:'Undo copy start',data:{nodeIds:action.nodeIds,knownInState:action.nodeIds.map(id=>nodes.some(n=>n.id===id))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H_COPY'})}).catch(()=>{});
+          // #endregion
+          const snapshotNodes = nodes;
+          const missingInState = action.nodeIds.some((id) => !snapshotNodes.some((n) => n.id === id));
+          if (missingInState) {
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AppLayout.tsx:handleUndo:copy_missing',message:'Undo copy missing in state',data:{missingInState:true},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H_COPY_MISSING'})}).catch(()=>{});
+            // #endregion
+          }
+
           const idsToRemove = new Set<string>();
           const collectChildren = (parentId: string) => {
             idsToRemove.add(parentId);
-            nodes
+            snapshotNodes
               .filter(n => n.parent_id === parentId)
               .forEach(child => collectChildren(child.id));
           };
           action.nodeIds.forEach((nodeId) => collectChildren(nodeId));
+          const tempIdsToRemove: string[] = [];
+          for (const [tempId, realId] of tempIdRealIdMapRef.current.entries()) {
+            if (action.nodeIds.includes(realId)) {
+              tempIdsToRemove.push(tempId);
+              idsToRemove.add(tempId);
+            }
+          }
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AppLayout.tsx:handleUndo:copy_ids',message:'Undo copy idsToRemove',data:{idsCount:idsToRemove.size,ids:Array.from(idsToRemove).slice(0,20)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H_COPY_IDS'})}).catch(()=>{});
+          // #endregion
 
           // Optimistic: remove copied nodes immediately
           setNodes(prev => prev.filter(n => !idsToRemove.has(n.id)));
@@ -879,15 +945,30 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
             idsToRemove.forEach((nodeId) => next.delete(nodeId));
             return next;
           });
+          if (tempIdsToRemove.length > 0) {
+            for (const tempId of tempIdsToRemove) {
+              tempIdPathMapRef.current.delete(tempId);
+              tempIdRealIdMapRef.current.delete(tempId);
+            }
+          }
 
           // Delete the copied nodes
-          await Promise.all(action.nodeIds.map((nodeId) =>
-            fetch("/api/files", {
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AppLayout.tsx:handleUndo:copy_delete',message:'Undo copy delete start',data:{nodeIds:action.nodeIds},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H_COPY_DELETE'})}).catch(()=>{});
+          // #endregion
+          const deleteResults = await Promise.all(action.nodeIds.map(async (nodeId) => {
+            const res = await fetch("/api/files", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ action: "delete_node", id: nodeId }),
-            })
-          ));
+            });
+            return res.status;
+          }));
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AppLayout.tsx:handleUndo:copy_delete_done',message:'Undo copy delete done',data:{statuses:deleteResults},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H_COPY_DELETE_DONE'})}).catch(()=>{});
+          // #endregion
+          // Refresh nodes to sync UI after deletion (in background, no loading)
+          void fetchNodes(false);
           // Push to redo stack (copy action - but we can't easily redo copy, so skip)
           break;
         }
