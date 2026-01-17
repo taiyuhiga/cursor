@@ -42,14 +42,15 @@ curl -fSs -D /tmp/h1.txt \
   ${AUTH_OPT[@]+"${AUTH_OPT[@]}"} \
   -o /tmp/create1.json \
   -X POST "${CREATE_URL}" \
-  -d "{\"projectId\":\"${PROJECT_ID}\",\"parentId\":${PARENT_JSON},\"fileName\":\"${FILE_NAME}\",\"contentType\":\"text/plain\"}"
+  -d "{\"projectId\":\"${PROJECT_ID}\",\"parentId\":${PARENT_JSON},\"fileName\":\"${FILE_NAME}\",\"contentType\":\"text/plain\"}" || { echo "curl failed with exit code $?"; cat /tmp/create1.json; exit 1; }
 
 head -n 1 /tmp/h1.txt
 cat /tmp/create1.json
 echo
 
 if ! grep -qi "^Content-Type: application/json" /tmp/h1.txt; then
-  echo "Error: create-upload-url did not return JSON. Check auth (307 to /auth/login is common)."
+  echo "Error: create-upload-url did not return JSON. Body:"
+  cat /tmp/create1.json
   exit 1
 fi
 
