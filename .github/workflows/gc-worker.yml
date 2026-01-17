@@ -1,0 +1,25 @@
+name: Storage GC Worker
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call GC worker
+        env:
+          GC_WORKER_URL: ${{ secrets.GC_WORKER_URL }}
+          GC_WORKER_TOKEN: ${{ secrets.GC_WORKER_TOKEN }}
+        run: |
+          if [ -z "${GC_WORKER_URL}" ] || [ -z "${GC_WORKER_TOKEN}" ]; then
+            echo "GC_WORKER_URL and GC_WORKER_TOKEN are required"
+            exit 1
+          fi
+          curl -fsS \
+            -H "Authorization: Bearer ${GC_WORKER_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -X POST "${GC_WORKER_URL}" \
+            -d "{}"
