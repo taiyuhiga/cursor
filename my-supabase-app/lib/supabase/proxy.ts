@@ -6,6 +6,11 @@ export async function updateSession(request: NextRequest) {
   let supabaseResponse = NextResponse.next({
     request,
   });
+  const authHeader = request.headers.get("authorization");
+  const cookieCount = request.cookies.getAll().length;
+  // #region agent log
+  fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'lib/supabase/proxy.ts:updateSession:entry',message:'updateSession entry',data:{path:request.nextUrl.pathname,method:request.method,authHeaderPresent:!!authHeader,cookieCount,hasEnvVars:hasEnvVars},timestamp:Date.now(),sessionId:'debug-session',runId:'ci-307-pre',hypothesisId:'H1'})}).catch(()=>{});
+  // #endregion
 
   // If the env vars are not set, skip proxy check. You can remove this
   // once you setup the project.
@@ -19,6 +24,7 @@ export async function updateSession(request: NextRequest) {
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY!,
     {
+      global: authHeader ? { headers: { Authorization: authHeader } } : undefined,
       cookies: {
         getAll() {
           return request.cookies.getAll();
@@ -54,6 +60,9 @@ export async function updateSession(request: NextRequest) {
     !request.nextUrl.pathname.startsWith("/auth")
   ) {
     // no user, potentially respond by redirecting the user to the login page
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'lib/supabase/proxy.ts:updateSession:redirect',message:'redirecting to /auth/login',data:{path:request.nextUrl.pathname,userPresent:!!user,authHeaderPresent:!!authHeader,cookieCount},timestamp:Date.now(),sessionId:'debug-session',runId:'ci-307-pre',hypothesisId:'H1'})}).catch(()=>{});
+    // #endregion
     const url = request.nextUrl.clone();
     url.pathname = "/auth/login";
     return NextResponse.redirect(url);
