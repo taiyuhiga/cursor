@@ -20,7 +20,7 @@ jobs:
         working-directory: ./my-supabase-app
         run: npm ci
 
-      - name: Start app
+      - name: Write env file
         working-directory: ./my-supabase-app
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -28,6 +28,14 @@ jobs:
         run: |
           echo "NEXT_PUBLIC_SUPABASE_URL=${SUPABASE_URL}" > .env.local
           echo "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=${SUPABASE_ANON_KEY}" >> .env.local
+          echo "Env file created (${#SUPABASE_URL} chars URL, ${#SUPABASE_ANON_KEY} chars key)"
+
+      - name: Start app
+        working-directory: ./my-supabase-app
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
           npm run dev -- --port 3001 &
           echo $! > /tmp/app.pid
 
