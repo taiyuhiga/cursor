@@ -2907,7 +2907,8 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         }
         return next;
       });
-      if (activeNodeId === tempId) {
+      // Use ref to get current activeNodeId (closure value may be stale)
+      if (activeNodeIdRef.current === tempId) {
         setActiveNodeId(realId);
       }
       tempIdPathMapRef.current.delete(tempId);
@@ -3048,6 +3049,8 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       // Open tab for the last file immediately (shows uploading state)
       setOpenTabs(prev => prev.includes(lastOriginalFileTempId) ? prev : [...prev, lastOriginalFileTempId]);
       setActiveNodeId(lastOriginalFileTempId);
+      // Manually sync ref immediately (state update is async, ref check happens before next render)
+      activeNodeIdRef.current = lastOriginalFileTempId;
       setSelectedNodeIds(new Set([lastOriginalFileTempId]));
       setRevealNodeId(lastOriginalFileTempId);
       if (activeActivity !== "explorer") {

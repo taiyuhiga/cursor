@@ -1,0 +1,19 @@
+rm -f /Users/higataiyu/cursor/.cursor/debug.log
+
+export SUPABASE_URL="https://ehacgxfowjewldgegvqm.supabase.co"
+export SUPABASE_ANON_KEY="sb_publishable_fkLP4WBGfLNLFC_TGUQShA_NEbAARlE"
+export SMOKE_EMAIL="mi211332@edu.okinawa-ct.ac.jp"
+export SMOKE_PASSWORD="sM49r@gDEt"
+export PROJECT_ID="0be3b769-65b3-47eb-90a6-c8da88d8cff6"
+
+TOKEN=$(curl -fsS -X POST "${SUPABASE_URL}/auth/v1/token?grant_type=password" \
+  -H "apikey: ${SUPABASE_ANON_KEY}" \
+  -H "Content-Type: application/json" \
+  -d "{\"email\":\"${SMOKE_EMAIL}\",\"password\":\"${SMOKE_PASSWORD}\"}" \
+  | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{const j=JSON.parse(s);process.stdout.write(j.access_token||\"\")});')
+
+export AUTH_BEARER="$TOKEN"
+export BASE_URL="http://localhost:3001"
+
+cd /Users/higataiyu/cursor/my-supabase-app
+./scripts/storage-smoke.sh
