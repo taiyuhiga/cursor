@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 
 async function enqueueGcJob(
   supabase: Awaited<ReturnType<typeof createClient>>,
@@ -7,7 +8,10 @@ async function enqueueGcJob(
   projectId: string,
 ) {
   const now = new Date().toISOString();
-  await supabase
+  const client = process.env.SUPABASE_SERVICE_ROLE_KEY
+    ? createAdminClient()
+    : supabase;
+  const { error } = await client
     .from("gc_jobs")
     .upsert(
       {
@@ -21,6 +25,9 @@ async function enqueueGcJob(
       },
       { onConflict: "node_id" },
     );
+  if (error) {
+    console.warn("gc_jobs enqueue failed", error.message);
+  }
 }
 
 // Confirm that an upload was successful and save the storage reference
