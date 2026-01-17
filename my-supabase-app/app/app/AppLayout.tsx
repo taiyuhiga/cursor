@@ -371,7 +371,6 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       }
       const newStack = [...prev, action];
       // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AppLayout.tsx:pushUndoAction',message:'Push undo action',data:{type:action.type,nodeId:("nodeId" in action ? action.nodeId : undefined),nodeIds:("nodeIds" in action ? action.nodeIds : undefined),stackSize:newStack.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H_PUSH'})}).catch(()=>{});
       // #endregion
       if (newStack.length > MAX_UNDO_STACK) {
         return newStack.slice(-MAX_UNDO_STACK);
@@ -604,7 +603,6 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       });
     }
     // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AppLayout.tsx:fetchNodes:start',message:'fetchNodes start',data:{showLoading,projectId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H_FETCH_START'})}).catch(()=>{});
     // #endregion
     // Supabase REST defaults to 1000 rows; paginate to load everything.
     const pageSize = 1000;
@@ -625,7 +623,6 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
 
       if (error) {
         // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AppLayout.tsx:fetchNodes:error',message:'fetchNodes error',data:{error},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H_FETCH_ERROR'})}).catch(()=>{});
         // #endregion
         console.error("Error fetching nodes:", error);
         setIsLoading(false);
@@ -634,7 +631,6 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
 
       const pageData = data || [];
       // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AppLayout.tsx:fetchNodes:page',message:'fetchNodes page',data:{page,from,to,count:pageData.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H_FETCH_PAGE'})}).catch(()=>{});
       // #endregion
       allNodes.push(...pageData);
       if (pageData.length < pageSize) break;
@@ -713,7 +709,6 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const handleUndo = useCallback(async () => {
     if (undoStack.length === 0) return;
     // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AppLayout.tsx:handleUndo:start',message:'Undo start',data:{stackSize:undoStack.length,topType:undoStack[undoStack.length-1]?.type},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H_UNDO_START'})}).catch(()=>{});
     // #endregion
 
     let lastIndex = undoStack.length - 1;
@@ -744,7 +739,6 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       : [];
     const actionsToUndo = uploadGroup.length > 0 ? uploadGroup : [action];
     // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AppLayout.tsx:handleUndo:action',message:'Undo action selected',data:{type:action.type,nodeId:("nodeId" in action ? action.nodeId : undefined),nodeIds:("nodeIds" in action ? action.nodeIds : undefined),trimmedSize:trimmedStack.length,originalSize:undoStack.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H_UNDO_ACTION'})}).catch(()=>{});
     // #endregion
 
     // Show confirmation dialog for create and copy actions
@@ -1083,7 +1077,6 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         }
         case "copy": {
           // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AppLayout.tsx:handleUndo:copy',message:'Undo copy start',data:{nodeIds:action.nodeIds,knownInState:action.nodeIds.map(id=>nodes.some(n=>n.id===id))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H_COPY'})}).catch(()=>{});
           // #endregion
           const snapshotNodes = nodes;
           const resolveCopyNodeId = (id: string) => tempIdRealIdMapRef.current.get(id) ?? id;
@@ -1091,7 +1084,6 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
           const missingInState = resolvedNodeIds.some((id) => !snapshotNodes.some((n) => n.id === id));
           if (missingInState) {
             // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AppLayout.tsx:handleUndo:copy_missing',message:'Undo copy missing in state',data:{missingInState:true},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H_COPY_MISSING'})}).catch(()=>{});
             // #endregion
           }
 
@@ -1114,7 +1106,6 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
           action.nodeIds.forEach((nodeId) => idsToRemove.add(nodeId));
           resolvedNodeIds.forEach((nodeId) => idsToRemove.add(nodeId));
           // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AppLayout.tsx:handleUndo:copy_ids',message:'Undo copy idsToRemove',data:{idsCount:idsToRemove.size,ids:Array.from(idsToRemove).slice(0,20)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H_COPY_IDS'})}).catch(()=>{});
           // #endregion
 
           // Optimistic: remove copied nodes immediately
@@ -1138,7 +1129,6 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
 
           // Delete the copied nodes
           // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AppLayout.tsx:handleUndo:copy_delete',message:'Undo copy delete start',data:{nodeIds:action.nodeIds},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H_COPY_DELETE'})}).catch(()=>{});
           // #endregion
           const deletableIds = resolvedNodeIds.filter((id) => !String(id).startsWith("temp-"));
           const unresolvedTempIds = action.nodeIds.filter((id) => String(id).startsWith("temp-") && !tempIdRealIdMapRef.current.get(id));
@@ -1162,7 +1152,6 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
             })();
           }
           // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AppLayout.tsx:handleUndo:copy_delete_done',message:'Undo copy delete done',data:{statuses:deleteResults},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H_COPY_DELETE_DONE'})}).catch(()=>{});
           // #endregion
           // Refresh nodes to sync UI after deletion (in background, no loading)
           void fetchNodes(false);
@@ -2801,6 +2790,14 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     console.log("[FolderUpload] rootFolderName:", rootFolderName, "rootNames:", rootNames);
     let lastCreatedNodeId: string | null = null;
 
+    // Track the last file in original order (for focusing after upload)
+    const lastOriginalItem = items[items.length - 1];
+    const lastOriginalItemIsFile = lastOriginalItem && !lastOriginalItem.isDirectory;
+    const lastOriginalFilePath = lastOriginalItemIsFile
+      ? lastOriginalItem.relativePath.replace(/\\/g, "/").replace(/^\/+/, "")
+      : null;
+    const createdNodeIdByPath = new Map<string, string>();
+
     const folderIdByPath = new Map<string, string>();
     for (const node of nodes) {
       if (node.type !== "folder") continue;
@@ -3045,10 +3042,21 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       }
     }
 
-    // Select and reveal the root folder
-    if (rootTempId && shouldAutoFocus) {
-        setSelectedNodeIds(new Set([rootTempId]));
-        setRevealNodeId(rootTempId);
+    // Select and reveal: if last original item is a file, always open its tab immediately
+    const lastOriginalFileTempId = lastOriginalFilePath ? tempIdByPath.get(lastOriginalFilePath) : null;
+    if (lastOriginalFileTempId) {
+      // Open tab for the last file immediately (shows uploading state)
+      setOpenTabs(prev => prev.includes(lastOriginalFileTempId) ? prev : [...prev, lastOriginalFileTempId]);
+      setActiveNodeId(lastOriginalFileTempId);
+      setSelectedNodeIds(new Set([lastOriginalFileTempId]));
+      setRevealNodeId(lastOriginalFileTempId);
+      if (activeActivity !== "explorer") {
+        setActiveActivity("explorer");
+      }
+    } else if (rootTempId && shouldAutoFocus) {
+      // Fall back to selecting root folder
+      setSelectedNodeIds(new Set([rootTempId]));
+      setRevealNodeId(rootTempId);
     }
 
     const uploadOne = async (item: UploadItem) => {
@@ -3182,6 +3190,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
             throw new Error(confirmResult.error || "Failed to confirm upload");
           }
           lastCreatedNodeId = createUrlResult.nodeId;
+          createdNodeIdByPath.set(normalized, createUrlResult.nodeId);
         } else {
           // Use pre-read text content
           const res = await fetch("/api/files", {
@@ -3200,6 +3209,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
           }
           if (result?.nodeId) {
             lastCreatedNodeId = result.nodeId as string;
+            createdNodeIdByPath.set(normalized, result.nodeId as string);
           }
         }
         if (tempId) {
@@ -3246,8 +3256,14 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     // Upload sequentially to avoid UI jumping and ensure items appear as they complete
     await runWithConcurrency(sortedItems, 1, uploadOne);
     console.log("[FolderUpload] Upload complete.");
-    if (!initialActiveNodeId && lastCreatedNodeId) {
-      handleOpenNode(lastCreatedNodeId);
+    if (!initialActiveNodeId) {
+      // If the last item in original order was a file, open that file
+      const lastOriginalFileNodeId = lastOriginalFilePath ? createdNodeIdByPath.get(lastOriginalFilePath) : null;
+      if (lastOriginalFileNodeId) {
+        handleOpenNode(lastOriginalFileNodeId);
+      } else if (lastCreatedNodeId) {
+        handleOpenNode(lastCreatedNodeId);
+      }
     }
 
     // Background refresh to reconcile any leftover temp nodes
