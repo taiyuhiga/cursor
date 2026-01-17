@@ -23,9 +23,11 @@ jobs:
       - name: Start app
         working-directory: ./my-supabase-app
         env:
-          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
         run: |
+          echo "NEXT_PUBLIC_SUPABASE_URL=${SUPABASE_URL}" > .env.local
+          echo "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=${SUPABASE_ANON_KEY}" >> .env.local
           npm run dev -- --port 3001 &
           echo $! > /tmp/app.pid
 
