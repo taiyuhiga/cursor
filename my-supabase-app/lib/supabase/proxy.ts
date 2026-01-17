@@ -7,6 +7,8 @@ export async function updateSession(request: NextRequest) {
     request,
   });
   const authHeader = request.headers.get("authorization");
+  const isApiRequest = request.nextUrl.pathname.startsWith("/api/");
+  const hasBearerAuth = !!authHeader && authHeader.toLowerCase().startsWith("bearer ");
   const cookieCount = request.cookies.getAll().length;
   // #region agent log
   fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'lib/supabase/proxy.ts:updateSession:entry',message:'updateSession entry',data:{path:request.nextUrl.pathname,method:request.method,authHeaderPresent:!!authHeader,cookieCount,hasEnvVars:hasEnvVars},timestamp:Date.now(),sessionId:'debug-session',runId:'ci-307-pre',hypothesisId:'H1'})}).catch(()=>{});
@@ -60,7 +62,8 @@ export async function updateSession(request: NextRequest) {
     request.nextUrl.pathname !== "/" &&
     !user &&
     !request.nextUrl.pathname.startsWith("/login") &&
-    !request.nextUrl.pathname.startsWith("/auth")
+    !request.nextUrl.pathname.startsWith("/auth") &&
+    !(isApiRequest && hasBearerAuth)
   ) {
     // no user, potentially respond by redirecting the user to the login page
     // #region agent log
@@ -69,6 +72,12 @@ export async function updateSession(request: NextRequest) {
     const url = request.nextUrl.clone();
     url.pathname = "/auth/login";
     return NextResponse.redirect(url);
+  }
+
+  if (isApiRequest && hasBearerAuth) {
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'lib/supabase/proxy.ts:updateSession:bypass',message:'bypassing redirect for api bearer',data:{path:request.nextUrl.pathname,authHeaderPresent:!!authHeader,hasBearerAuth},timestamp:Date.now(),sessionId:'debug-session',runId:'ci-307-pre2',hypothesisId:'H6'})}).catch(()=>{});
+    // #endregion
   }
 
   // IMPORTANT: You *must* return the supabaseResponse object as it is.
