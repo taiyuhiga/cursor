@@ -1,0 +1,76 @@
+name: Storage Smoke Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: my-supabase-app/package-lock.json
+
+      - name: Install deps
+        working-directory: ./my-supabase-app
+        run: npm ci
+
+      - name: Start app
+        working-directory: ./my-supabase-app
+        run: |
+          npm run dev -- --port 3001 &
+          echo $! > /tmp/app.pid
+
+      - name: Wait for app
+        run: |
+          for i in $(seq 1 60); do
+            curl -fsS "http://localhost:3001" >/dev/null 2>&1 && exit 0
+            sleep 1
+          done
+          echo "App did not start in time"
+          exit 1
+
+      - name: Get short-lived access token
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          SMOKE_EMAIL: ${{ secrets.SMOKE_EMAIL }}
+          SMOKE_PASSWORD: ${{ secrets.SMOKE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          resp=$(curl -fsS \
+            -X POST "${SUPABASE_URL}/auth/v1/token?grant_type=password" \
+            -H "apikey: ${SUPABASE_ANON_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "{\"email\":\"${SMOKE_EMAIL}\",\"password\":\"${SMOKE_PASSWORD}\"}")
+          token=$(echo "$resp" | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{const j=JSON.parse(s);console.log(j.access_token||"")});')
+          if [ -z "$token" ]; then
+            echo "Failed to obtain access_token"
+            echo "$resp"
+            exit 1
+          fi
+          echo "AUTH_BEARER=$token" >> $GITHUB_ENV
+
+      - name: Run storage smoke test
+        env:
+          BASE_URL: http://localhost:3001
+          FILE_NAME: smoke.txt
+          PARENT_ID: ""
+          PROJECT_ID: ${{ secrets.PROJECT_ID }}
+          AUTH_BEARER: ${{ env.AUTH_BEARER }}
+        working-directory: ./my-supabase-app
+        run: |
+          chmod +x scripts/storage-smoke.sh
+          ./scripts/storage-smoke.sh
+
+      - name: Stop app
+        if: always()
+        run: |
+          if [ -f /tmp/app.pid ]; then
+            kill $(cat /tmp/app.pid) || true
+          fi
