@@ -30,6 +30,20 @@ jobs:
           echo "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=${SUPABASE_ANON_KEY}" >> .env.local
           echo "Env file created (${#SUPABASE_URL} chars URL, ${#SUPABASE_ANON_KEY} chars key)"
 
+      - name: Validate Supabase URL secret
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        run: |
+          if [[ "${SUPABASE_URL}" =~ [[:space:]] ]]; then
+            echo "SUPABASE_URL contains whitespace. Remove trailing spaces/newlines in GitHub Secrets."
+            exit 1
+          fi
+          if ! [[ "${SUPABASE_URL}" =~ ^https://[a-z0-9-]+\.supabase\.co$ ]]; then
+            echo "SUPABASE_URL must match https://<ref>.supabase.co"
+            exit 1
+          fi
+          echo "SUPABASE_URL looks valid (length ${#SUPABASE_URL})."
+
       - name: Start app
         working-directory: ./my-supabase-app
         env:
