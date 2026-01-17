@@ -37,16 +37,23 @@ echo "FILE_NAME=${FILE_NAME}"
 
 # ---- Test A: create-upload-url (1) ----
 echo "== Test A: create-upload-url (1)"
-curl -fSs -D /tmp/h1.txt \
+HTTP_CODE1=$(curl -sS -D /tmp/h1.txt \
   -H "Content-Type: application/json" \
   ${AUTH_OPT[@]+"${AUTH_OPT[@]}"} \
   -o /tmp/create1.json \
+  -w "%{http_code}" \
   -X POST "${CREATE_URL}" \
-  -d "{\"projectId\":\"${PROJECT_ID}\",\"parentId\":${PARENT_JSON},\"fileName\":\"${FILE_NAME}\",\"contentType\":\"text/plain\"}" || { echo "curl failed with exit code $?"; cat /tmp/create1.json; exit 1; }
+  -d "{\"projectId\":\"${PROJECT_ID}\",\"parentId\":${PARENT_JSON},\"fileName\":\"${FILE_NAME}\",\"contentType\":\"text/plain\"}")
 
 head -n 1 /tmp/h1.txt
 cat /tmp/create1.json
 echo
+
+if [[ "${HTTP_CODE1}" != "200" ]]; then
+  echo "Error: create-upload-url failed (status ${HTTP_CODE1}). Body:"
+  cat /tmp/create1.json
+  exit 1
+fi
 
 if ! grep -qi "^Content-Type: application/json" /tmp/h1.txt; then
   echo "Error: create-upload-url did not return JSON. Body:"
@@ -110,16 +117,23 @@ echo
 
 # ---- Test B: create-upload-url (2) ----
 echo "== Test B: create-upload-url (2)"
-curl -fSs -D /tmp/h2.txt \
+HTTP_CODE2=$(curl -sS -D /tmp/h2.txt \
   -H "Content-Type: application/json" \
   ${AUTH_OPT[@]+"${AUTH_OPT[@]}"} \
   -o /tmp/create2.json \
+  -w "%{http_code}" \
   -X POST "${CREATE_URL}" \
-  -d "{\"projectId\":\"${PROJECT_ID}\",\"parentId\":${PARENT_JSON},\"fileName\":\"${FILE_NAME}\",\"contentType\":\"text/plain\"}"
+  -d "{\"projectId\":\"${PROJECT_ID}\",\"parentId\":${PARENT_JSON},\"fileName\":\"${FILE_NAME}\",\"contentType\":\"text/plain\"}")
 
 head -n 1 /tmp/h2.txt
 cat /tmp/create2.json
 echo
+
+if [[ "${HTTP_CODE2}" != "200" ]]; then
+  echo "Error: create-upload-url failed (status ${HTTP_CODE2}). Body:"
+  cat /tmp/create2.json
+  exit 1
+fi
 
 if ! grep -qi "^Content-Type: application/json" /tmp/h2.txt; then
   echo "Error: create-upload-url did not return JSON. Check auth (307 to /auth/login is common)."

@@ -8,6 +8,10 @@ export async function POST(req: NextRequest) {
   try {
     const supabase = await createClient();
     const { projectId, parentId, fileName, contentType } = await req.json();
+    const envReady = !!process.env.NEXT_PUBLIC_SUPABASE_URL && !!process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app/api/storage/create-upload-url/route.ts:POST:entry',message:'create-upload-url entry',data:{envReady,projectIdPresent:!!projectId,parentIdPresent:!!parentId,fileNameLength:typeof fileName === 'string' ? fileName.length : null,contentTypePresent:!!contentType},timestamp:Date.now(),sessionId:'debug-session',runId:'ci-500-pre',hypothesisId:'H1'})}).catch(()=>{});
+    // #endregion
 
     if (!projectId || !fileName) {
       return NextResponse.json({
@@ -29,7 +33,10 @@ export async function POST(req: NextRequest) {
       existingFileQuery = existingFileQuery.is("parent_id", null);
     }
 
-    const { data: existingFile } = await existingFileQuery.maybeSingle();
+    const { data: existingFile, error: existingFileError } = await existingFileQuery.maybeSingle();
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app/api/storage/create-upload-url/route.ts:POST:existingFile',message:'existing file lookup',data:{existingFileFound:!!existingFile,existingFileError:existingFileError?.message ?? null},timestamp:Date.now(),sessionId:'debug-session',runId:'ci-500-pre',hypothesisId:'H2'})}).catch(()=>{});
+    // #endregion
 
     let node;
     if (existingFile) {
@@ -47,6 +54,9 @@ export async function POST(req: NextRequest) {
         })
         .select()
         .single();
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app/api/storage/create-upload-url/route.ts:POST:nodeInsert',message:'node insert result',data:{nodeCreated:!!newNode,nodeError:nodeError?.message ?? null},timestamp:Date.now(),sessionId:'debug-session',runId:'ci-500-pre',hypothesisId:'H3'})}).catch(()=>{});
+      // #endregion
 
       if (nodeError) {
         return NextResponse.json({
@@ -87,6 +97,9 @@ export async function POST(req: NextRequest) {
         upsert: false,
         ...(contentType ? { contentType } : {}),
       });
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app/api/storage/create-upload-url/route.ts:POST:createSignedUploadUrl',message:'createSignedUploadUrl result',data:{storagePath,hasSignedUrl:!!signedUrl,urlError:urlError?.message ?? null},timestamp:Date.now(),sessionId:'debug-session',runId:'ci-500-pre',hypothesisId:'H4'})}).catch(()=>{});
+    // #endregion
 
     if (urlError) {
       // Rollback - delete the node only if we created it
@@ -108,6 +121,9 @@ export async function POST(req: NextRequest) {
       currentVersion,
     });
   } catch (error: any) {
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app/api/storage/create-upload-url/route.ts:POST:catch',message:'create-upload-url error',data:{errorName:error?.name ?? null,errorMessage:error?.message ?? null},timestamp:Date.now(),sessionId:'debug-session',runId:'ci-500-pre',hypothesisId:'H5'})}).catch(()=>{});
+    // #endregion
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
