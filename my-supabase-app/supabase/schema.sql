@@ -40,9 +40,11 @@ create table if not exists public.file_contents (
   id uuid default uuid_generate_v4() primary key,
   node_id uuid references public.nodes(id) on delete cascade not null unique,
   text text,
+  version integer default 0 not null,
   created_at timestamp with time zone default timezone('utc'::text, now()) not null,
   updated_at timestamp with time zone default timezone('utc'::text, now()) not null
 );
+alter table public.file_contents add column if not exists version integer default 0 not null;
 
 -- Performance indexes
 create index if not exists nodes_project_id_id_idx on public.nodes (project_id, id);

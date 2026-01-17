@@ -16,7 +16,15 @@ function normalizeBaseName(fileName: string, ext: string) {
   return slug ? `${slug}_${hash}` : `file_${hash}`;
 }
 
-export function buildStoragePath(projectId: string, nodeId: string, fileName: string) {
+export function buildStoragePath(projectId: string, nodeId: string) {
+  return `${projectId}/${nodeId}/blob`;
+}
+
+export function buildUploadStoragePath(projectId: string, nodeId: string, uploadId: string) {
+  return `${projectId}/${nodeId}/uploads/${uploadId}`;
+}
+
+export function buildLegacyStoragePath(projectId: string, nodeId: string, fileName: string) {
   const ext = path.extname(fileName);
   const safeExt = SAFE_EXT_RE.test(ext) ? ext.toLowerCase() : "";
   const safeBase = normalizeBaseName(fileName, safeExt);

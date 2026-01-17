@@ -1,9 +1,105 @@
 import { NextRequest, NextResponse } from "next/server";
+import { unstable_noStore as noStore } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
-import { buildStoragePath } from "@/lib/storage/path";
+import { buildLegacyStoragePath, buildStoragePath } from "@/lib/storage/path";
+
+type NodeInfo = {
+  id: string;
+  name: string;
+  project_id: string;
+};
+
+function getCandidatePaths(node: NodeInfo, text: string) {
+  const candidates: string[] = [];
+
+  if (text.startsWith("storage:")) {
+    candidates.push(text.replace("storage:", ""));
+  }
+
+  candidates.push(buildStoragePath(node.project_id, node.id));
+  candidates.push(buildLegacyStoragePath(node.project_id, node.id, node.name));
+
+  return Array.from(new Set(candidates));
+}
+
+async function resolveFromList(
+  supabase: any,
+  node: NodeInfo
+) {
+  const prefix = `${node.project_id}/${node.id}`;
+  const { data: listData, error: listError } = await supabase.storage
+    .from("files")
+    .list(prefix);
+
+  if (listError || !listData || listData.length === 0) {
+    return null;
+  }
+
+  const blobEntry = listData.find((entry: any) => entry?.name === "blob");
+  if (blobEntry) {
+    return `${prefix}/blob`;
+  }
+
+  if (listData.length === 1) {
+    return `${prefix}/${listData[0].name}`;
+  }
+
+  const getTimestamp = (entry: any) =>
+    entry?.updated_at ||
+    entry?.created_at ||
+    entry?.last_accessed_at ||
+    entry?.metadata?.lastModified ||
+    entry?.metadata?.last_modified ||
+    null;
+
+  const withTimestamps = listData
+    .map((entry: any) => {
+      const raw = getTimestamp(entry);
+      const time = typeof raw === "string" || typeof raw === "number" ? Date.parse(String(raw)) : NaN;
+      return Number.isNaN(time) ? null : { entry, time };
+    })
+    .filter(Boolean) as Array<{ entry: any; time: number }>;
+
+  if (withTimestamps.length === 0) {
+    console.warn("Storage list has multiple entries but no timestamps available.", {
+      prefix,
+      candidates: listData.map((entry: any) => entry?.name).filter(Boolean),
+    });
+    return null;
+  }
+
+  withTimestamps.sort((a, b) => b.time - a.time);
+  return `${prefix}/${withTimestamps[0].entry.name}`;
+}
+
+async function fetchStorageObject(
+  supabase: any,
+  storagePath: string
+) {
+  const { data, error } = await supabase.storage
+    .from("files")
+    .createSignedUrl(storagePath, 60);
+
+  if (error || !data?.signedUrl) {
+    return null;
+  }
+
+  const separator = data.signedUrl.includes("?") ? "&" : "?";
+  const url = `${data.signedUrl}${separator}t=${Date.now()}`;
+  const response = await fetch(url, { cache: "no-store" });
+
+  if (!response.ok) {
+    return null;
+  }
+
+  const arrayBuffer = await response.arrayBuffer();
+  const contentType = response.headers.get("content-type") || "application/octet-stream";
+  return { arrayBuffer, contentType };
+}
 
 export async function GET(req: NextRequest) {
   try {
+    noStore();
     const supabase = await createClient();
     const { searchParams } = new URL(req.url);
     const nodeId = searchParams.get("nodeId");
@@ -32,31 +128,41 @@ export async function GET(req: NextRequest) {
 
     const text = content?.text || "";
 
-    let storagePath: string;
+    const candidates = getCandidatePaths(node, text);
+    let storagePath: string | null = null;
+    let fileData: { arrayBuffer: ArrayBuffer; contentType: string } | null = null;
 
-    if (text.startsWith("storage:")) {
-      // Storage reference exists
-      storagePath = text.replace("storage:", "");
-    } else {
-      // Try to find file directly in storage using convention: projectId/nodeId/fileName
-      storagePath = buildStoragePath(node.project_id, node.id, node.name);
+    for (const candidate of candidates) {
+      const data = await fetchStorageObject(supabase, candidate);
+      if (data) {
+        storagePath = candidate;
+        fileData = data;
+        break;
+      }
     }
 
-    // Get the file from storage
-    const { data: fileData, error: downloadError } = await supabase.storage
-      .from("files")
-      .download(storagePath);
+    if (!fileData) {
+      const fallbackPath = await resolveFromList(supabase, node);
+      if (fallbackPath) {
+        const data = await fetchStorageObject(supabase, fallbackPath);
+        if (data) {
+          storagePath = fallbackPath;
+          fileData = data;
+        }
+      }
+    }
 
-    if (downloadError) {
-      return NextResponse.json({ error: `Failed to download: ${downloadError.message}` }, { status: 500 });
+    if (!fileData || !storagePath) {
+      return NextResponse.json({ error: "Failed to resolve storage path" }, { status: 404 });
     }
 
     // Return the file with properly encoded filename for non-ASCII characters
     const encodedFilename = encodeURIComponent(node.name);
-    return new NextResponse(fileData, {
+    return new NextResponse(fileData.arrayBuffer, {
       headers: {
-        "Content-Type": fileData.type || "application/octet-stream",
+        "Content-Type": fileData.contentType,
         "Content-Disposition": `attachment; filename="${encodedFilename}"; filename*=UTF-8''${encodedFilename}`,
+        "Cache-Control": "no-store",
       },
     });
   } catch (error: any) {
@@ -67,6 +173,7 @@ export async function GET(req: NextRequest) {
 // Get signed URL for viewing/streaming
 export async function POST(req: NextRequest) {
   try {
+    noStore();
     const supabase = await createClient();
     const { nodeId } = await req.json();
 
@@ -94,23 +201,33 @@ export async function POST(req: NextRequest) {
 
     const text = content?.text || "";
 
-    let storagePath: string;
+    const candidates = getCandidatePaths(node, text);
+    let signedUrl: { signedUrl: string } | null = null;
 
-    if (text.startsWith("storage:")) {
-      // Storage reference exists
-      storagePath = text.replace("storage:", "");
-    } else {
-      // Try to find file directly in storage using convention: projectId/nodeId/fileName
-      storagePath = buildStoragePath(node.project_id, node.id, node.name);
+    for (const candidate of candidates) {
+      const { data, error } = await supabase.storage
+        .from("files")
+        .createSignedUrl(candidate, 86400);
+      if (!error && data) {
+        signedUrl = data;
+        break;
+      }
     }
 
-    // Create a signed URL (valid for 24 hours)
-    const { data: signedUrl, error: urlError } = await supabase.storage
-      .from("files")
-      .createSignedUrl(storagePath, 86400);
+    if (!signedUrl) {
+      const fallbackPath = await resolveFromList(supabase, node);
+      if (fallbackPath) {
+        const { data, error } = await supabase.storage
+          .from("files")
+          .createSignedUrl(fallbackPath, 86400);
+        if (!error && data) {
+          signedUrl = data;
+        }
+      }
+    }
 
-    if (urlError) {
-      return NextResponse.json({ error: `Failed to create URL: ${urlError.message}` }, { status: 500 });
+    if (!signedUrl) {
+      return NextResponse.json({ error: "Failed to resolve storage path" }, { status: 404 });
     }
 
     return NextResponse.json({

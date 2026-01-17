@@ -98,6 +98,20 @@ If you wish to just develop locally and not deploy to Vercel, [follow the steps 
 
 > Check out [the docs for Local Development](https://supabase.com/docs/guides/getting-started/local-development) to also run Supabase locally.
 
+## Storage smoke test
+
+Run the storage overwrite smoke test locally:
+
+```bash
+export PROJECT_ID="REPLACE_ME"
+export FILE_NAME="smoke.txt"
+export PARENT_ID="" # empty = root
+export AUTH_BEARER="" # optional
+
+chmod +x scripts/storage-smoke.sh
+./scripts/storage-smoke.sh
+```
+
 ## Feedback and issues
 
 Please file feedback and issues over on the [Supabase GitHub org](https://github.com/supabase/supabase/issues/new/choose).

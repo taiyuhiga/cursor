@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { buildStoragePath } from "@/lib/storage/path";
+import crypto from "crypto";
+import { buildUploadStoragePath } from "@/lib/storage/path";
 
 export async function POST(req: NextRequest) {
   try {
@@ -46,14 +47,15 @@ export async function POST(req: NextRequest) {
     }
 
     // Upload to Supabase Storage
-    const storagePath = buildStoragePath(projectId, node.id, fileName);
+    const uploadId = crypto.randomUUID();
+    const storagePath = buildUploadStoragePath(projectId, node.id, uploadId);
 
     // Convert file to ArrayBuffer for reliable upload
     const arrayBuffer = await file.arrayBuffer();
     const { error: uploadError } = await supabase.storage
       .from("files")
       .upload(storagePath, arrayBuffer, {
-        cacheControl: "3600",
+        cacheControl: "0",
         upsert: true,
         contentType: file.type || "application/octet-stream",
       });
@@ -70,6 +72,7 @@ export async function POST(req: NextRequest) {
       .insert({
         node_id: node.id,
         text: `storage:${storagePath}`,
+        version: 1,
       });
 
     if (contentError) {

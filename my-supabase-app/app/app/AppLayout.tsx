@@ -324,7 +324,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   // Undo/Redo stack for file operations
   type UndoAction =
     | { type: "delete"; nodeId: string; node: Node; content?: string; children?: { node: Node; content?: string }[] }
-    | { type: "create"; nodeId: string; node?: Node; content?: string; source?: "create" | "upload" }
+    | { type: "create"; nodeId: string; node?: Node; content?: string; source?: "create" | "upload"; batchId?: string }
     | { type: "rename"; nodeId: string; oldName: string; newName: string }
     | { type: "move"; nodeIds: string[]; oldParentIds: (string | null)[]; newParentId: string | null }
     | { type: "copy"; nodeIds: string[]; names?: string[] };
@@ -727,6 +727,22 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
 
     const trimmedStack = undoStack.slice(0, lastIndex + 1);
     const action = trimmedStack[trimmedStack.length - 1];
+    const uploadGroup = (action.type === "create" && action.source === "upload")
+      ? (() => {
+        if (!action.batchId) return [action];
+        const group: UndoAction[] = [];
+        for (let i = trimmedStack.length - 1; i >= 0; i -= 1) {
+          const candidate = trimmedStack[i];
+          if (candidate.type === "create" && candidate.source === "upload" && candidate.batchId === action.batchId) {
+            group.unshift(candidate);
+            continue;
+          }
+          break;
+        }
+        return group;
+      })()
+      : [];
+    const actionsToUndo = uploadGroup.length > 0 ? uploadGroup : [action];
     // #region agent log
     fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AppLayout.tsx:handleUndo:action',message:'Undo action selected',data:{type:action.type,nodeId:("nodeId" in action ? action.nodeId : undefined),nodeIds:("nodeIds" in action ? action.nodeIds : undefined),trimmedSize:trimmedStack.length,originalSize:undoStack.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H_UNDO_ACTION'})}).catch(()=>{});
     // #endregion
@@ -737,11 +753,11 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       let actionType: "create" | "copy" | "upload";
 
       if (action.type === "create") {
-        const node = nodes.find(n => n.id === action.nodeId);
         const isUpload = action.source === "upload";
         if (isUpload) {
-          const snapshot = node ? nodes : [...nodes, ...(action.node ? [action.node] : [])];
-          const countResources = (rootId: string) => {
+          const countResources = (rootId: string, fallbackNode?: Node) => {
+            const node = nodes.find(n => n.id === rootId);
+            const snapshot = node ? nodes : [...nodes, ...(fallbackNode ? [fallbackNode] : [])];
             let count = 0;
             const collectChildren = (id: string) => {
               count += 1;
@@ -752,11 +768,15 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
             collectChildren(rootId);
             return count;
           };
-          const count = countResources(action.nodeId);
+          const count = actionsToUndo.reduce((sum, act) => {
+            if (act.type !== "create") return sum;
+            return sum + countResources(act.nodeId, act.node);
+          }, 0);
           actionName = `${count} リソース`;
           actionType = "upload";
         } else {
-          actionName = node?.name || action.node?.name || "ファイル";
+        const node = nodes.find(n => n.id === action.nodeId);
+        actionName = node?.name || action.node?.name || "ファイル";
           actionType = "create";
         }
       } else {
@@ -765,7 +785,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         if (count > 1) {
           actionName = `${count} ファイル`;
         } else {
-          actionName = action.names?.[0] || "項目";
+        actionName = action.names?.[0] || "項目";
         }
         actionType = "copy";
       }
@@ -779,21 +799,23 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       }
     }
 
-    setUndoStack(trimmedStack.slice(0, -1));
+    setUndoStack(trimmedStack.slice(0, -actionsToUndo.length));
 
     try {
       switch (action.type) {
-          case "create": {
-            console.log("[Undo] action.nodeId:", action.nodeId);
+        case "create": {
+          const undoCreateAction = async (createAction: UndoAction) => {
+            if (createAction.type !== "create") return;
+            console.log("[Undo] action.nodeId:", createAction.nodeId);
             const resolveCreateNodeId = async (): Promise<string | null> => {
-              if (!String(action.nodeId).startsWith("temp-")) {
-                console.log("[Undo] nodeId is not temp, returning as is:", action.nodeId);
-                return action.nodeId;
+              if (!String(createAction.nodeId).startsWith("temp-")) {
+                console.log("[Undo] nodeId is not temp, returning as is:", createAction.nodeId);
+                return createAction.nodeId;
               }
-              const mapped = tempIdRealIdMapRef.current.get(action.nodeId);
+              const mapped = tempIdRealIdMapRef.current.get(createAction.nodeId);
               console.log("[Undo] mapped from tempIdRealIdMapRef:", mapped);
               if (mapped) return mapped;
-              const path = tempIdPathMapRef.current.get(action.nodeId) ?? pathByNodeId.get(action.nodeId);
+              const path = tempIdPathMapRef.current.get(createAction.nodeId) ?? pathByNodeId.get(createAction.nodeId);
               console.log("[Undo] path:", path);
               if (path) {
                 const existing = nodeIdByPath.get(path);
@@ -801,13 +823,13 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
                 if (existing) return existing;
               }
               console.log("[Undo] falling back to resolveMaybeTempNodeId");
-              return await resolveMaybeTempNodeId(action.nodeId, 10000);
+              return await resolveMaybeTempNodeId(createAction.nodeId, 10000);
             };
 
             const resolvePromise = resolveCreateNodeId();
-            let nodeFromState = nodes.find(n => n.id === action.nodeId) ?? action.node;
+            const nodeFromState = nodes.find(n => n.id === createAction.nodeId) ?? createAction.node;
             const currentNodes = nodes;
-            const nodeToDelete = nodeFromState ?? action.node;
+            const nodeToDelete = nodeFromState ?? createAction.node;
             const isFolder = nodeToDelete?.type === "folder";
             console.log("[Undo] nodeToDelete (initial):", nodeToDelete);
 
@@ -843,7 +865,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
               });
             };
 
-            const idsToRemove = buildIdsToRemove(action.nodeId, currentNodes);
+            const idsToRemove = buildIdsToRemove(createAction.nodeId, currentNodes);
             console.log("[Undo] idsToRemove (temp):", Array.from(idsToRemove));
 
             // Optimistic: update UI immediately
@@ -852,10 +874,10 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
             const resolvedNodeId = await resolvePromise;
             if (!resolvedNodeId) {
               console.log("[Undo] resolvedNodeId is null, skipping server delete");
-              break;
+              return;
             }
 
-            if (resolvedNodeId !== action.nodeId) {
+            if (resolvedNodeId !== createAction.nodeId) {
               const resolvedIdsToRemove = buildIdsToRemove(resolvedNodeId, nodes);
               if (resolvedIdsToRemove.size > 0) {
                 console.log("[Undo] idsToRemove (resolved):", Array.from(resolvedIdsToRemove));
@@ -863,31 +885,145 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
               }
             }
 
-            const contentPromise = nodeToDelete?.type === "file"
-              ? supabase
+          const contentPromise = nodeToDelete?.type === "file"
+            ? supabase
+              .from("file_contents")
+              .select("text")
+                .eq("node_id", resolvedNodeId)
+              .single()
+                .then(({ data }: { data: { text?: string } | null }) => data?.text)
+              .catch(() => undefined)
+            : Promise.resolve(undefined);
+
+            // Delete the created node
+            console.log("[Undo] Calling API to delete node:", resolvedNodeId);
+            const res = await fetch("/api/files", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: "delete_node", id: resolvedNodeId }),
+            });
+            console.log("[Undo] API response status:", res.status);
+            if (!res.ok) throw new Error("Failed to undo create");
+
+            const contentToSave = await contentPromise;
+            // Push to redo stack (delete action to redo = create again)
+            if (nodeToDelete) {
+              const nodeForRedo = nodeToDelete.id === resolvedNodeId ? nodeToDelete : { ...nodeToDelete, id: resolvedNodeId };
+              setRedoStack(prev => [...prev, { type: "delete", nodeId: resolvedNodeId, node: nodeForRedo, content: contentToSave }]);
+            }
+          };
+
+          const createActions = actionsToUndo.filter((a): a is Extract<UndoAction, { type: "create" }> => a.type === "create");
+          if (createActions.length > 1) {
+            const currentNodes = nodes;
+            const buildIdsToRemove = (rootId: string, snapshot: Node[], isFolder: boolean) => {
+              const ids = new Set<string>();
+              if (isFolder) {
+                const collectChildren = (id: string) => {
+                  ids.add(id);
+                  snapshot.filter((n: Node) => n.parent_id === id).forEach((child: Node) => collectChildren(child.id));
+                };
+                collectChildren(rootId);
+              } else {
+                ids.add(rootId);
+              }
+              return ids;
+            };
+            const removeIdsFromUi = (ids: Set<string>) => {
+              if (ids.size === 0) return;
+              setNodes(prev => prev.filter(n => !ids.has(n.id)));
+              setOpenTabs(prev => prev.filter(id => !ids.has(id)));
+              if (activeNodeId && ids.has(activeNodeId)) {
+            setActiveNodeId(null);
+          }
+          setSelectedNodeIds(prev => {
+                if (prev.size === 0) return prev;
+            const next = new Set(prev);
+                ids.forEach((id) => next.delete(id));
+            return next;
+          });
+            };
+            const resolveCreateNodeId = async (createAction: UndoAction): Promise<string | null> => {
+              if (createAction.type !== "create") return null;
+              if (!String(createAction.nodeId).startsWith("temp-")) {
+                return createAction.nodeId;
+              }
+              const mapped = tempIdRealIdMapRef.current.get(createAction.nodeId);
+              if (mapped) return mapped;
+              const path = tempIdPathMapRef.current.get(createAction.nodeId) ?? pathByNodeId.get(createAction.nodeId);
+              if (path) {
+                const existing = nodeIdByPath.get(path);
+                if (existing) return existing;
+              }
+              return await resolveMaybeTempNodeId(createAction.nodeId, 10000);
+            };
+
+            const actionMeta = createActions.map((createAction) => {
+              const nodeFromState = nodes.find(n => n.id === createAction.nodeId) ?? createAction.node;
+              const nodeToDelete = nodeFromState ?? createAction.node;
+              const isFolder = nodeToDelete?.type === "folder";
+              return { createAction, nodeToDelete, isFolder };
+            });
+
+            const idsToRemove = new Set<string>();
+            for (const meta of actionMeta) {
+              const ids = buildIdsToRemove(meta.createAction.nodeId, currentNodes, Boolean(meta.isFolder));
+              ids.forEach((id) => idsToRemove.add(id));
+            }
+            removeIdsFromUi(idsToRemove);
+
+            const resolvedIds = await Promise.all(actionMeta.map((meta) => resolveCreateNodeId(meta.createAction)));
+            const resolvedIdsToRemove = new Set<string>();
+            for (let i = 0; i < actionMeta.length; i += 1) {
+              const resolvedNodeId = resolvedIds[i];
+              if (!resolvedNodeId) continue;
+              const meta = actionMeta[i];
+              if (resolvedNodeId !== meta.createAction.nodeId) {
+                const ids = buildIdsToRemove(resolvedNodeId, nodes, Boolean(meta.isFolder));
+                ids.forEach((id) => resolvedIdsToRemove.add(id));
+              }
+            }
+            removeIdsFromUi(resolvedIdsToRemove);
+
+            const deletePromises = resolvedIds
+              .filter((id): id is string => Boolean(id))
+              .map((resolvedNodeId) => fetch("/api/files", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ action: "delete_node", id: resolvedNodeId }),
+              }));
+            await Promise.all(deletePromises);
+
+            const contentResults = await Promise.all(actionMeta.map(async (meta, index) => {
+              const resolvedNodeId = resolvedIds[index];
+              if (!resolvedNodeId) return { resolvedNodeId: null, content: undefined, nodeToDelete: meta.nodeToDelete };
+              if (meta.nodeToDelete?.type !== "file") {
+                return { resolvedNodeId, content: undefined, nodeToDelete: meta.nodeToDelete };
+              }
+              const { data } = await supabase
                 .from("file_contents")
                 .select("text")
                 .eq("node_id", resolvedNodeId)
-                .single()
-                .then(({ data }: { data: { text?: string } | null }) => data?.text)
-                .catch(() => undefined)
-              : Promise.resolve(undefined);
+                .single();
+              return { resolvedNodeId, content: data?.text, nodeToDelete: meta.nodeToDelete };
+            }));
 
-          // Delete the created node
-          console.log("[Undo] Calling API to delete node:", resolvedNodeId);
-          const res = await fetch("/api/files", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ action: "delete_node", id: resolvedNodeId }),
-          });
-          console.log("[Undo] API response status:", res.status);
-          if (!res.ok) throw new Error("Failed to undo create");
+            const redoActions = contentResults
+              .filter((entry) => entry.resolvedNodeId && entry.nodeToDelete)
+              .map((entry) => {
+                const resolvedNodeId = entry.resolvedNodeId as string;
+                const nodeToDelete = entry.nodeToDelete as Node;
+                const nodeForRedo = nodeToDelete.id === resolvedNodeId ? nodeToDelete : { ...nodeToDelete, id: resolvedNodeId };
+                return { type: "delete", nodeId: resolvedNodeId, node: nodeForRedo, content: entry.content } as UndoAction;
+              });
+            if (redoActions.length > 0) {
+              setRedoStack(prev => [...prev, ...redoActions]);
+            }
+            break;
+          }
 
-          const contentToSave = await contentPromise;
-          // Push to redo stack (delete action to redo = create again)
-          if (nodeToDelete) {
-            const nodeForRedo = nodeToDelete.id === resolvedNodeId ? nodeToDelete : { ...nodeToDelete, id: resolvedNodeId };
-            setRedoStack(prev => [...prev, { type: "delete", nodeId: resolvedNodeId, node: nodeForRedo, content: contentToSave }]);
+          for (const act of createActions) {
+            await undoCreateAction(act);
           }
           break;
         }
@@ -1437,24 +1573,24 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         } catch (refreshError) {
           console.error("Failed to refresh nodes after create error:", refreshError);
         }
-        if (!recovered) {
-          // 失敗したらロールバック
+      if (!recovered) {
+        // 失敗したらロールバック
           removeUndoCreateAction(tempId);
           tempIdPathMapRef.current.delete(tempId);
-          setNodes(prev => prev.filter(n => n.id !== tempId));
-          setOpenTabs(prev => prev.filter(id => id !== tempId));
-          setActiveNodeId(prevActiveId ?? null);
-          setSelectedNodeIds(new Set(prevSelectedIds));
-          editableTempNodeIdsRef.current.delete(tempId);
-          setTempFileContents((prev) => {
-            if (!Object.prototype.hasOwnProperty.call(prev, tempId)) return prev;
-            const next = { ...prev };
-            delete next[tempId];
-            tempFileContentsRef.current = next;
-            return next;
-          });
-          alert(`Error: ${error.message}`);
-        }
+        setNodes(prev => prev.filter(n => n.id !== tempId));
+        setOpenTabs(prev => prev.filter(id => id !== tempId));
+        setActiveNodeId(prevActiveId ?? null);
+        setSelectedNodeIds(new Set(prevSelectedIds));
+        editableTempNodeIdsRef.current.delete(tempId);
+        setTempFileContents((prev) => {
+          if (!Object.prototype.hasOwnProperty.call(prev, tempId)) return prev;
+          const next = { ...prev };
+          delete next[tempId];
+          tempFileContentsRef.current = next;
+          return next;
+        });
+        alert(`Error: ${error.message}`);
+      }
       }
     })();
   };
@@ -2330,6 +2466,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     const STORAGE_THRESHOLD_TEXT = 5 * 1024 * 1024;
 
     const filesArray = Array.from(filteredFiles);
+    const uploadBatchId = `upload-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const replaceKeyByFile = new Map<File, string>();
     const replaceCandidates: { file: File; existingNode: Node; key: string }[] = [];
     for (const file of filesArray) {
@@ -2427,7 +2564,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       }
 
       tempIdPathMapRef.current.set(tempId, fullPath);
-      pushUndoAction({ type: "create", nodeId: tempId, source: "upload", node: tempNode });
+      pushUndoAction({ type: "create", nodeId: tempId, source: "upload", node: tempNode, batchId: uploadBatchId });
 
       let uploadToStorage = useStorage;
       let textContent: string | null = null;
@@ -2472,6 +2609,9 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
           if (!createUrlResult.uploadUrl || !createUrlResult.storagePath) {
             throw new Error("Invalid upload URL response");
           }
+          const expectedVersion = typeof createUrlResult.currentVersion === "number"
+            ? createUrlResult.currentVersion
+            : 0;
 
           setUploadProgress(prev => ({ ...prev, [tempId]: 0 }));
 
@@ -2482,17 +2622,51 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
           });
 
           // Step 3: Confirm the upload
+          const confirmPayload = {
+            nodeId: createUrlResult.nodeId,
+            storagePath: createUrlResult.storagePath,
+            expectedVersion,
+          };
           const confirmRes = await fetch("/api/storage/confirm-upload", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              nodeId: createUrlResult.nodeId,
-              storagePath: createUrlResult.storagePath,
-            }),
+            body: JSON.stringify(confirmPayload),
           });
 
-          const confirmResult = await confirmRes.json();
-          if (!confirmRes.ok) {
+          let confirmResult = await confirmRes.json();
+          if (confirmRes.status === 409) {
+            const refreshRes = await fetch("/api/storage/create-upload-url", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                projectId,
+                parentId: parentId || null,
+                fileName,
+                contentType: file.type || "application/octet-stream",
+              }),
+            });
+            const refreshResult = await refreshRes.json();
+            if (!refreshRes.ok) {
+              throw new Error(refreshResult.error || "Upload conflict. Please retry.");
+            }
+            const refreshedVersion = typeof refreshResult.currentVersion === "number"
+              ? refreshResult.currentVersion
+              : 0;
+
+            const retryRes = await fetch("/api/storage/confirm-upload", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                nodeId: createUrlResult.nodeId,
+                storagePath: createUrlResult.storagePath,
+                expectedVersion: refreshedVersion,
+              }),
+            });
+            confirmResult = await retryRes.json();
+            if (!retryRes.ok) {
+              throw new Error(confirmResult.error || "Upload conflict. Please retry.");
+            }
+          } else if (!confirmRes.ok) {
             throw new Error(confirmResult.error || "Failed to confirm upload");
           }
 
@@ -2606,6 +2780,9 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const uploadFolderItems = useCallback(async (items: UploadItem[], parentId: string | null) => {
     console.log("[FolderUpload] START - items:", items.length, "parentId:", parentId);
     if (items.length === 0) return;
+    const uploadBatchId = `upload-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const initialActiveNodeId = activeNodeIdRef.current;
+    const shouldAutoFocus = !initialActiveNodeId;
 
     const baseParentPath = parentId ? pathByNodeId.get(parentId) || "" : "";
     const rootNames: string[] = [];
@@ -2677,44 +2854,67 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       return aDepth - bDepth;
     });
 
-    // Pre-read all file contents BEFORE showing any dialogs to avoid file reference expiration
-    const preReadContents = new Map<string, { content: string; blob: Blob | null; useStorage: boolean; contentType: string }>();
-    await Promise.all(sortedItems.filter(item => !item.isDirectory && item.file).map(async (item) => {
-      const normalized = item.relativePath.replace(/\\/g, "/").replace(/^\/+/, "");
-      const fileName = normalized.split("/").pop() || item.file.name;
+    // Lazy read per file to avoid blocking mixed uploads
+    const preReadCache = new Map<string, Promise<{ content: string; blob: Blob | null; useStorage: boolean; contentType: string } | null>>();
+    const getPreReadContent = (item: UploadItem, normalized: string, fileName: string) => {
+      if (preReadCache.has(normalized)) return preReadCache.get(normalized)!;
+      const task = (async () => {
+        if (!item.file) return null;
       const isBinary = isBinaryFile(fileName);
       const useStorage = isBinary || item.file.size > (isBinary ? STORAGE_THRESHOLD_BINARY : STORAGE_THRESHOLD_TEXT);
       const contentType = item.file.type || "application/octet-stream";
-
       try {
         if (useStorage) {
-          // Read file as blob for storage uploads
           const arrayBuffer = await item.file.arrayBuffer();
           const blob = new Blob([arrayBuffer], { type: contentType });
-          preReadContents.set(normalized, { content: "", blob, useStorage: true, contentType });
-        } else {
-          // Try to read text content, fall back to storage if it fails
+            return { content: "", blob, useStorage: true, contentType };
+          }
           try {
             const content = await readFileContent(item.file);
             if (hasUnsupportedJsonUnicode(content)) {
               throw new Error("Unsupported Unicode in text content");
             }
-            preReadContents.set(normalized, { content, blob: null, useStorage: false, contentType });
+            return { content, blob: null, useStorage: false, contentType };
           } catch {
-            // Text reading failed (invalid encoding), use storage instead
             const arrayBuffer = await item.file.arrayBuffer();
             const blob = new Blob([arrayBuffer], { type: contentType });
-            preReadContents.set(normalized, { content: "", blob, useStorage: true, contentType });
-          }
+            return { content: "", blob, useStorage: true, contentType };
         }
       } catch (error) {
-        console.error(`Failed to pre-read file ${normalized}:`, error);
+          console.error(`Failed to read file ${normalized}:`, error);
+          return null;
       }
-    }));
+      })();
+      preReadCache.set(normalized, task);
+      return task;
+    };
 
     // Create temp nodes immediately for instant UI feedback (BEFORE replace dialog)
     const tempIdByPath = new Map<string, string>();
     const tempNodes: Node[] = [];
+    const replaceTempNodeId = (tempId: string, realId: string) => {
+      if (!tempId || !realId || tempId === realId) return;
+      registerTempIdMapping(tempId, realId);
+      setNodes(prev => prev.map((n) => {
+        if (n.id === tempId) return { ...n, id: realId };
+        if (n.parent_id === tempId) return { ...n, parent_id: realId };
+        return n;
+      }));
+      setOpenTabs(prev => prev.map(id => id === tempId ? realId : id));
+      setSelectedNodeIds(prev => {
+        if (prev.size === 0) return prev;
+        const next = new Set(prev);
+        if (next.has(tempId)) {
+          next.delete(tempId);
+          next.add(realId);
+        }
+        return next;
+      });
+      if (activeNodeId === tempId) {
+        setActiveNodeId(realId);
+      }
+      tempIdPathMapRef.current.delete(tempId);
+    };
 
     for (const item of sortedItems) {
       const normalized = item.relativePath.replace(/\\/g, "/").replace(/^\/+/, "");
@@ -2814,21 +3014,21 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         const existingNode = existingNodesToReplace[index];
         const decisionKey = replaceItems[index].key;
         const shouldReplace = replaceDecisions.get(decisionKey) ?? false;
-        if (!shouldReplace) {
-          // Restore all existing nodes and remove all temp nodes
-          setNodes(prev => [...prev.filter(n => !tempIdsSet.has(n.id)), ...existingNodesToReplace]);
+      if (!shouldReplace) {
+        // Restore all existing nodes and remove all temp nodes
+        setNodes(prev => [...prev.filter(n => !tempIdsSet.has(n.id)), ...existingNodesToReplace]);
           for (const tempId of tempIdsSet) {
             tempIdPathMapRef.current.delete(tempId);
           }
-          return; // Cancel entire folder upload
-        }
-        // Clear deleted folder paths from cache to ensure new folders are created
-        const existingPath = pathByNodeId.get(existingNode.id);
-        if (existingPath) {
-          // Remove the deleted folder and all its child paths from cache
-          for (const [path] of folderIdByPath) {
-            if (path === existingPath || path.startsWith(existingPath + "/")) {
-              folderIdByPath.delete(path);
+        return; // Cancel entire folder upload
+      }
+      // Clear deleted folder paths from cache to ensure new folders are created
+      const existingPath = pathByNodeId.get(existingNode.id);
+      if (existingPath) {
+        // Remove the deleted folder and all its child paths from cache
+        for (const [path] of folderIdByPath) {
+          if (path === existingPath || path.startsWith(existingPath + "/")) {
+            folderIdByPath.delete(path);
             }
           }
         }
@@ -2836,23 +3036,20 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     }
 
     console.log("[FolderUpload] rootTempId:", rootTempId);
-    if (rootTempId) {
+      if (rootTempId) {
       const rootTempNode = tempNodes.find(node => node.id === rootTempId);
       console.log("[FolderUpload] rootTempNode:", rootTempNode);
       if (rootTempNode) {
         console.log("[FolderUpload] Pushing undo action with nodeId:", rootTempId);
-        pushUndoAction({ type: "create", nodeId: rootTempId, source: "upload", node: rootTempNode });
+        pushUndoAction({ type: "create", nodeId: rootTempId, source: "upload", node: rootTempNode, batchId: uploadBatchId });
       }
     }
 
     // Select and reveal the root folder
-    if (rootTempId) {
-      setSelectedNodeIds(new Set([rootTempId]));
-      setRevealNodeId(rootTempId);
+    if (rootTempId && shouldAutoFocus) {
+        setSelectedNodeIds(new Set([rootTempId]));
+        setRevealNodeId(rootTempId);
     }
-
-    // Track temp IDs to remove later
-    const tempIdsToRemove = new Set(tempIdByPath.values());
 
     const uploadOne = async (item: UploadItem) => {
       const normalized = item.relativePath.replace(/\\/g, "/").replace(/^\/+/, "");
@@ -2861,7 +3058,19 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       // Handle directory entries - just ensure the folder exists
       if (item.isDirectory) {
         try {
-          await ensureFolderId(fullPath);
+          const createdFolderId = await ensureFolderId(fullPath);
+          const tempId = tempIdByPath.get(normalized);
+          if (tempId && createdFolderId) {
+            replaceTempNodeId(tempId, createdFolderId);
+            tempIdByPath.delete(normalized);
+            if (rootTempId && tempId === rootTempId) {
+              updateUndoCreateNodeId(tempId, createdFolderId);
+              if (shouldAutoFocus) {
+                setSelectedNodeIds(new Set([createdFolderId]));
+                setRevealNodeId(createdFolderId);
+              }
+            }
+          }
         } catch (error: any) {
           console.error(`Folder creation error: ${error.message}`);
         }
@@ -2872,14 +3081,18 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       const fileName = parts.pop() || item.file.name;
       const folderPath = parts.join("/");
 
-      // Get pre-read content
-      const preRead = preReadContents.get(normalized);
+      // Get content on demand
+      const preRead = await getPreReadContent(item, normalized, fileName);
       if (!preRead) {
-        console.error(`No pre-read content for ${normalized}`);
+        console.error(`No content for ${normalized}`);
         return;
       }
 
       let createdNodeId: string | null = null;
+      const tempId = tempIdByPath.get(normalized);
+      if (tempId) {
+        setUploadProgress(prev => ({ ...prev, [tempId]: 0 }));
+      }
 
       try {
         if (preRead.useStorage) {
@@ -2908,23 +3121,64 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
           if (!createUrlResult.uploadUrl || !createUrlResult.storagePath) {
             throw new Error("Invalid upload URL response");
           }
+          const expectedVersion = typeof createUrlResult.currentVersion === "number"
+            ? createUrlResult.currentVersion
+            : 0;
 
           // Use pre-read blob instead of original file
           if (preRead.blob) {
-            await uploadFileToSignedUrl(createUrlResult.uploadUrl, preRead.blob, () => {});
+            await uploadFileToSignedUrl(createUrlResult.uploadUrl, preRead.blob, (percent) => {
+              if (!tempId) return;
+              if (percent === null) return;
+              setUploadProgress(prev => ({ ...prev, [tempId]: percent }));
+            });
           }
 
+          const confirmPayload = {
+            nodeId: createUrlResult.nodeId,
+            storagePath: createUrlResult.storagePath,
+            expectedVersion,
+          };
           const confirmRes = await fetch("/api/storage/confirm-upload", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              nodeId: createUrlResult.nodeId,
-              storagePath: createUrlResult.storagePath,
-            }),
+            body: JSON.stringify(confirmPayload),
           });
 
-          const confirmResult = await confirmRes.json();
-          if (!confirmRes.ok) {
+          let confirmResult = await confirmRes.json();
+          if (confirmRes.status === 409) {
+            const refreshRes = await fetch("/api/storage/create-upload-url", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                projectId,
+                parentId: targetParentId || null,
+                fileName,
+                contentType: preRead.contentType,
+              }),
+            });
+            const refreshResult = await refreshRes.json();
+            if (!refreshRes.ok) {
+              throw new Error(refreshResult.error || "Upload conflict. Please retry.");
+            }
+            const refreshedVersion = typeof refreshResult.currentVersion === "number"
+              ? refreshResult.currentVersion
+              : 0;
+
+            const retryRes = await fetch("/api/storage/confirm-upload", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                nodeId: createUrlResult.nodeId,
+                storagePath: createUrlResult.storagePath,
+                expectedVersion: refreshedVersion,
+              }),
+            });
+            confirmResult = await retryRes.json();
+            if (!retryRes.ok) {
+              throw new Error(confirmResult.error || "Upload conflict. Please retry.");
+            }
+          } else if (!confirmRes.ok) {
             throw new Error(confirmResult.error || "Failed to confirm upload");
           }
           lastCreatedNodeId = createUrlResult.nodeId;
@@ -2948,7 +3202,34 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
             lastCreatedNodeId = result.nodeId as string;
           }
         }
+        if (tempId) {
+          setUploadProgress(prev => {
+            const next = { ...prev };
+            delete next[tempId];
+            return next;
+          });
+        }
+        if (lastCreatedNodeId) {
+          if (tempId) {
+            replaceTempNodeId(tempId, lastCreatedNodeId);
+            tempIdByPath.delete(normalized);
+            if (rootTempId && tempId === rootTempId) {
+              updateUndoCreateNodeId(tempId, lastCreatedNodeId);
+              if (shouldAutoFocus) {
+                setSelectedNodeIds(new Set([lastCreatedNodeId]));
+                setRevealNodeId(lastCreatedNodeId);
+              }
+            }
+          }
+        }
       } catch (error: any) {
+        if (tempId) {
+          setUploadProgress(prev => {
+            const next = { ...prev };
+            delete next[tempId];
+            return next;
+          });
+        }
         if (createdNodeId) {
           try {
             await supabase.from("file_contents").delete().eq("node_id", createdNodeId);
@@ -2962,62 +3243,31 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     };
 
     console.log("[FolderUpload] Starting upload of", sortedItems.length, "items...");
-    await runWithConcurrency(sortedItems, sortedItems.length, uploadOne);
-    console.log("[FolderUpload] Upload complete, fetching nodes...");
+    // Upload sequentially to avoid UI jumping and ensure items appear as they complete
+    await runWithConcurrency(sortedItems, 1, uploadOne);
+    console.log("[FolderUpload] Upload complete.");
+    if (!initialActiveNodeId && lastCreatedNodeId) {
+      handleOpenNode(lastCreatedNodeId);
+    }
 
-    // Remove temp nodes and fetch real nodes
-    const refreshedNodes = await fetchNodes();
-    console.log("[FolderUpload] fetchNodes complete, got", refreshedNodes.length, "nodes");
-    setNodes(prev => prev.filter(n => !tempIdsToRemove.has(n.id)));
-
-    let resolvedRootNodeId: string | null = null;
-    console.log("[FolderUpload] rootFolderName:", rootFolderName, "parentId:", parentId, "rootTempId:", rootTempId);
-    console.log("[FolderUpload] refreshedNodes count:", refreshedNodes.length);
-    if (rootFolderName) {
-      const folderNode = refreshedNodes.find((node: Node) =>
-        node.type === "folder" &&
-        node.name === rootFolderName &&
-        node.parent_id === parentId
-      );
-      console.log("[FolderUpload] folderNode found:", folderNode);
-      if (folderNode) {
-        // Update undo action for folder upload
-        if (rootTempId) {
-          console.log("[FolderUpload] Registering mapping:", rootTempId, "->", folderNode.id);
-          registerTempIdMapping(rootTempId, folderNode.id);
-          updateUndoCreateNodeId(rootTempId, folderNode.id);
-        }
-        resolvedRootNodeId = folderNode.id;
-        setSelectedNodeIds(new Set([folderNode.id]));
-        setRevealNodeId(folderNode.id);
-        if (activeActivity !== "explorer") {
-          setActiveActivity("explorer");
-        }
-        if (tempIdsToRemove.size > 0) {
-          for (const tempId of tempIdsToRemove) {
-            tempIdPathMapRef.current.delete(tempId);
+    // Background refresh to reconcile any leftover temp nodes
+    if (tempIdByPath.size > 0) {
+      const leftoverTempIds = new Set(tempIdByPath.values());
+      void fetchNodes(false).then(() => {
+        setNodes(prev => prev.filter(n => !leftoverTempIds.has(n.id)));
+        const activeId = activeNodeIdRef.current;
+        if (activeId && leftoverTempIds.has(activeId)) {
+          const mapped = tempIdRealIdMapRef.current.get(activeId);
+          if (mapped) {
+            setActiveNodeId(mapped);
+          } else {
+            setActiveNodeId(null);
           }
         }
-        return;
-      } else if (rootTempId) {
-        // folderNode not found, try to resolve using path
-        const rootPath = baseParentPath ? `${baseParentPath}/${rootFolderName}` : rootFolderName;
-        const rootNodeId = nodeIdByPath.get(rootPath);
-        if (rootNodeId) {
-          registerTempIdMapping(rootTempId, rootNodeId);
-          updateUndoCreateNodeId(rootTempId, rootNodeId);
-          resolvedRootNodeId = rootNodeId;
+        for (const tempId of leftoverTempIds) {
+          tempIdPathMapRef.current.delete(tempId);
         }
-      }
-    }
-    if (tempIdsToRemove.size > 0) {
-      for (const tempId of tempIdsToRemove) {
-        if (rootTempId && !resolvedRootNodeId && tempId === rootTempId) continue;
-        tempIdPathMapRef.current.delete(tempId);
-      }
-    }
-    if (lastCreatedNodeId) {
-      handleOpenNode(lastCreatedNodeId);
+      });
     }
   }, [activeActivity, fetchNodes, handleOpenNode, nodes, nodeIdByPath, pathByNodeId, projectId, runWithConcurrency, supabase, uploadFileToSignedUrl, findExistingNode, promptReplaceConfirmations, pushUndoAction, registerTempIdMapping, updateUndoCreateNodeId]);
 

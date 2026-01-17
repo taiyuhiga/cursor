@@ -5,11 +5,35 @@ import { createClient } from "@/lib/supabase/server";
 export async function POST(req: NextRequest) {
   try {
     const supabase = await createClient();
-    const { nodeId, storagePath } = await req.json();
+    const { nodeId, storagePath, expectedVersion } = await req.json();
 
     if (!nodeId || !storagePath) {
       return NextResponse.json({
         error: "nodeId and storagePath are required"
+      }, { status: 400 });
+    }
+    if (typeof expectedVersion !== "number") {
+      return NextResponse.json({
+        error: "expectedVersion must be a number"
+      }, { status: 400 });
+    }
+
+    const { data: node, error: nodeError } = await supabase
+      .from("nodes")
+      .select("id, project_id")
+      .eq("id", nodeId)
+      .maybeSingle();
+
+    if (nodeError || !node) {
+      return NextResponse.json({
+        error: `Node not found: ${nodeError?.message || "unknown"}`
+      }, { status: 404 });
+    }
+
+    const expectedPrefix = `${node.project_id}/${nodeId}/`;
+    if (!storagePath.startsWith(expectedPrefix)) {
+      return NextResponse.json({
+        error: "storagePath does not match node/project"
       }, { status: 400 });
     }
 
@@ -29,25 +53,63 @@ export async function POST(req: NextRequest) {
       }, { status: 400 });
     }
 
-    // Store the storage path in file_contents (upsert for replace)
-    const { error: contentError } = await supabase
-      .from("file_contents")
-      .upsert({
-        node_id: nodeId,
-        text: `storage:${storagePath}`,
-      }, { onConflict: "node_id" });
+    const nextVersion = expectedVersion + 1;
 
-    if (contentError) {
+    // Optimistic lock: update only if version matches
+    const { data: updated, error: updateError } = await supabase
+      .from("file_contents")
+      .update({
+        text: `storage:${storagePath}`,
+        version: nextVersion,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("node_id", nodeId)
+      .eq("version", expectedVersion)
+      .select("version")
+      .maybeSingle();
+
+    if (updateError) {
       // Rollback storage object only
       await supabase.storage.from("files").remove([storagePath]);
       return NextResponse.json({
-        error: `Failed to save content reference: ${contentError.message}`
+        error: `Failed to save content reference: ${updateError.message}`
       }, { status: 500 });
+    }
+
+    if (!updated) {
+      if (expectedVersion === 0) {
+        const { data: inserted, error: insertError } = await supabase
+          .from("file_contents")
+          .insert({
+            node_id: nodeId,
+            text: `storage:${storagePath}`,
+            version: nextVersion,
+          })
+          .select("version")
+          .single();
+
+        if (insertError) {
+          return NextResponse.json({
+            error: "Upload conflict - content already updated"
+          }, { status: 409 });
+        }
+
+        return NextResponse.json({
+          success: true,
+          nodeId: nodeId,
+          version: inserted.version,
+        });
+      }
+
+      return NextResponse.json({
+        error: "Upload conflict - content already updated"
+      }, { status: 409 });
     }
 
     return NextResponse.json({
       success: true,
       nodeId: nodeId,
+      version: updated.version,
     });
   } catch (error: any) {
     return NextResponse.json({ error: error.message }, { status: 500 });
