@@ -46,9 +46,22 @@ create table if not exists public.file_contents (
 );
 alter table public.file_contents add column if not exists version integer default 0 not null;
 
+create table if not exists public.gc_jobs (
+  id uuid default uuid_generate_v4() primary key,
+  node_id uuid references public.nodes(id) on delete cascade not null unique,
+  project_id uuid references public.projects(id) on delete cascade not null,
+  status text not null check (status in ('queued', 'running', 'done', 'error')) default 'queued',
+  attempts integer default 0 not null,
+  run_after timestamp with time zone default timezone('utc'::text, now()) not null,
+  last_error text,
+  created_at timestamp with time zone default timezone('utc'::text, now()) not null,
+  updated_at timestamp with time zone default timezone('utc'::text, now()) not null
+);
+
 -- Performance indexes
 create index if not exists nodes_project_id_id_idx on public.nodes (project_id, id);
 create index if not exists nodes_parent_id_idx on public.nodes (parent_id);
+create index if not exists gc_jobs_status_run_after_idx on public.gc_jobs (status, run_after);
 
 -- New tables for Chat History
 create table if not exists public.chat_sessions (
@@ -79,6 +92,7 @@ alter table public.workspace_members enable row level security;
 alter table public.projects enable row level security;
 alter table public.nodes enable row level security;
 alter table public.file_contents enable row level security;
+alter table public.gc_jobs enable row level security;
 alter table public.chat_sessions enable row level security;
 alter table public.chat_messages enable row level security;
 
@@ -184,6 +198,25 @@ create policy "Project members can manage file contents"
     join public.projects on projects.id = nodes.project_id
     join public.workspace_members on workspace_members.workspace_id = projects.workspace_id
     where nodes.id = file_contents.node_id
+    and workspace_members.user_id = auth.uid()
+  ));
+
+-- GC job policies
+create policy "Project members can enqueue gc jobs"
+  on public.gc_jobs for insert
+  with check (exists (
+    select 1 from public.projects
+    join public.workspace_members on workspace_members.workspace_id = projects.workspace_id
+    where projects.id = gc_jobs.project_id
+    and workspace_members.user_id = auth.uid()
+  ));
+
+create policy "Project members can update gc jobs"
+  on public.gc_jobs for update
+  using (exists (
+    select 1 from public.projects
+    join public.workspace_members on workspace_members.workspace_id = projects.workspace_id
+    where projects.id = gc_jobs.project_id
     and workspace_members.user_id = auth.uid()
   ));
 

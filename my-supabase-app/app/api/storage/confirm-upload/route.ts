@@ -1,6 +1,28 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 
+async function enqueueGcJob(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  nodeId: string,
+  projectId: string,
+) {
+  const now = new Date().toISOString();
+  await supabase
+    .from("gc_jobs")
+    .upsert(
+      {
+        node_id: nodeId,
+        project_id: projectId,
+        status: "queued",
+        run_after: now,
+        attempts: 0,
+        updated_at: now,
+        last_error: null,
+      },
+      { onConflict: "node_id" },
+    );
+}
+
 // Confirm that an upload was successful and save the storage reference
 export async function POST(req: NextRequest) {
   try {
@@ -94,6 +116,12 @@ export async function POST(req: NextRequest) {
           }, { status: 409 });
         }
 
+        try {
+          await enqueueGcJob(supabase, nodeId, node.project_id);
+        } catch {
+          // GC enqueue failure should not block uploads.
+        }
+
         return NextResponse.json({
           success: true,
           nodeId: nodeId,
@@ -104,6 +132,12 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({
         error: "Upload conflict - content already updated"
       }, { status: 409 });
+    }
+
+    try {
+      await enqueueGcJob(supabase, nodeId, node.project_id);
+    } catch {
+      // GC enqueue failure should not block uploads.
     }
 
     return NextResponse.json({
