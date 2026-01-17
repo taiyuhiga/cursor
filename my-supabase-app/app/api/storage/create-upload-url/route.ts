@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
+import crypto from "crypto";
 import { createClient } from "@/lib/supabase/server";
-import { buildStoragePath } from "@/lib/storage/path";
+import { buildUploadStoragePath } from "@/lib/storage/path";
 
 // Create a signed upload URL for direct client-to-Supabase uploads
 export async function POST(req: NextRequest) {
@@ -55,32 +56,37 @@ export async function POST(req: NextRequest) {
       node = newNode;
     }
 
-    // Create the storage path
-    const storagePath = buildStoragePath(projectId, node.id, fileName);
-
-    // If reusing existing node, remove old storage object to avoid conflicts
-    if (existingFile) {
-      await supabase.storage.from("files").remove([storagePath]);
+    if (!node?.id) {
+      console.error("create-upload-url: node id missing", {
+        projectId,
+        parentId,
+        fileName,
+        existingFile,
+        node,
+      });
+      return NextResponse.json({
+        error: "Failed to resolve node id for storage path"
+      }, { status: 500 });
     }
+
+    const { data: contentRow } = await supabase
+      .from("file_contents")
+      .select("version")
+      .eq("node_id", node.id)
+      .maybeSingle();
+    const currentVersion = typeof contentRow?.version === "number" ? contentRow.version : 0;
+
+    // Create a unique storage path for this upload (no delete/upsert needed)
+    const uploadId = crypto.randomUUID();
+    const storagePath = buildUploadStoragePath(projectId, node.id, uploadId);
 
     // Create a signed upload URL (valid for 5 minutes)
-    let { data: signedUrl, error: urlError } = await supabase.storage
+    const { data: signedUrl, error: urlError } = await supabase.storage
       .from("files")
-      .createSignedUploadUrl(storagePath);
-
-    if (urlError) {
-      const isExists = typeof urlError.message === "string" &&
-        urlError.message.toLowerCase().includes("already exists");
-      if (isExists) {
-        // Try one more time after removing the existing object
-        await supabase.storage.from("files").remove([storagePath]);
-        const retry = await supabase.storage
-          .from("files")
-          .createSignedUploadUrl(storagePath);
-        signedUrl = retry.data;
-        urlError = retry.error;
-      }
-    }
+      .createSignedUploadUrl(storagePath, {
+        upsert: false,
+        ...(contentType ? { contentType } : {}),
+      });
 
     if (urlError) {
       // Rollback - delete the node only if we created it
@@ -98,6 +104,8 @@ export async function POST(req: NextRequest) {
       storagePath: storagePath,
       uploadUrl: signedUrl.signedUrl,
       token: signedUrl.token,
+      uploadId: uploadId,
+      currentVersion,
     });
   } catch (error: any) {
     return NextResponse.json({ error: error.message }, { status: 500 });

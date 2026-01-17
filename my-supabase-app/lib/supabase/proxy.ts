@@ -9,10 +9,6 @@ export async function updateSession(request: NextRequest) {
   const authHeader = request.headers.get("authorization");
   const isApiRequest = request.nextUrl.pathname.startsWith("/api/");
   const hasBearerAuth = !!authHeader && authHeader.toLowerCase().startsWith("bearer ");
-  const cookieCount = request.cookies.getAll().length;
-  // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'lib/supabase/proxy.ts:updateSession:entry',message:'updateSession entry',data:{path:request.nextUrl.pathname,method:request.method,authHeaderPresent:!!authHeader,cookieCount,hasEnvVars:hasEnvVars},timestamp:Date.now(),sessionId:'debug-session',runId:'ci-307-pre',hypothesisId:'H1'})}).catch(()=>{});
-  // #endregion
 
   // If the env vars are not set, skip proxy check. You can remove this
   // once you setup the project.
@@ -52,11 +48,8 @@ export async function updateSession(request: NextRequest) {
 
   // IMPORTANT: If you remove getClaims() and you use server-side rendering
   // with the Supabase client, your users may be randomly logged out.
-  const { data, error } = await supabase.auth.getClaims();
+  const { data } = await supabase.auth.getClaims();
   const user = data?.claims;
-  // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'lib/supabase/proxy.ts:updateSession:getClaims',message:'getClaims result',data:{hasUser:!!user,errorPresent:!!error,errorMessage:error?.message ?? null,authHeaderPresent:!!authHeader},timestamp:Date.now(),sessionId:'debug-session',runId:'ci-307-pre2',hypothesisId:'H5'})}).catch(()=>{});
-  // #endregion
 
   if (
     request.nextUrl.pathname !== "/" &&
@@ -66,18 +59,12 @@ export async function updateSession(request: NextRequest) {
     !(isApiRequest && hasBearerAuth)
   ) {
     // no user, potentially respond by redirecting the user to the login page
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'lib/supabase/proxy.ts:updateSession:redirect',message:'redirecting to /auth/login',data:{path:request.nextUrl.pathname,userPresent:!!user,authHeaderPresent:!!authHeader,cookieCount},timestamp:Date.now(),sessionId:'debug-session',runId:'ci-307-pre',hypothesisId:'H1'})}).catch(()=>{});
-    // #endregion
     const url = request.nextUrl.clone();
     url.pathname = "/auth/login";
     return NextResponse.redirect(url);
   }
 
   if (isApiRequest && hasBearerAuth) {
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/68f24dc3-f94d-493b-8034-e2c7e7c843e1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'lib/supabase/proxy.ts:updateSession:bypass',message:'bypassing redirect for api bearer',data:{path:request.nextUrl.pathname,authHeaderPresent:!!authHeader,hasBearerAuth},timestamp:Date.now(),sessionId:'debug-session',runId:'ci-307-pre2',hypothesisId:'H6'})}).catch(()=>{});
-    // #endregion
   }
 
   // IMPORTANT: You *must* return the supabaseResponse object as it is.
