@@ -132,3 +132,99 @@ Guidance:
 - Backlog grows: increase `GC_BATCH_SIZE` or frequency
 - Many failures: fix root cause before increasing retries
 - Storage growth: consider lowering `GC_KEEP_COUNT` after stability is confirmed
+
+---
+
+## Manual recovery (stop the bleeding first)
+
+When things look unstable, use this order:
+
+1. Pause the worker trigger (cron / scheduled action)
+2. Inspect queue health using the SQL above
+3. Recover stuck jobs (see below)
+4. Resume the worker trigger
+
+### Re-queue stuck running jobs
+
+```sql
+update gc_jobs
+set status = 'queued',
+    run_after = now(),
+    updated_at = now()
+where status = 'running'
+  and updated_at < now() - interval '15 minutes';
+```
+
+### Force-stop and mark as error
+
+```sql
+update gc_jobs
+set status = 'error',
+    updated_at = now()
+where status = 'running'
+  and updated_at < now() - interval '30 minutes';
+```
+
+---
+
+## Common issues and fixes (FAQ)
+
+### `list` returns empty or timestamps are missing
+
+Symptoms:
+
+- `last_error` is empty but `last_summary.note = "no_timestamps"`
+- Deletions are skipped even when uploads exist
+
+Actions:
+
+- Check if storage objects have `updated_at` or `created_at` set
+- Confirm the storage path prefix and bucket are correct
+
+### `remove` fails with permissions error
+
+Symptoms:
+
+- `last_error_phase = "delete"`
+- Errors mention permission/authorization
+
+Actions:
+
+- Ensure the worker uses `SUPABASE_SERVICE_ROLE_KEY`
+- Verify bucket policies allow deletes for service role
+
+### `prefix` looks wrong after path rule changes
+
+Symptoms:
+
+- `last_summary.prefix` does not match current path rules
+
+Actions:
+
+- Validate upload path construction in `create-upload-url`
+- Reconcile any migration or path format changes
+
+---
+
+## Alert thresholds (suggested)
+
+Use these as initial SLO-style thresholds and tune later:
+
+- `queued_stale > 0` for 10+ minutes
+- `running_stuck > 0` for 15+ minutes
+- `error` count grows continuously for 30+ minutes
+
+---
+
+## Enqueue source and configuration
+
+### Enqueue source
+
+- `confirm-upload` enqueues `gc_jobs` after a successful reference switch
+
+### Config values (env)
+
+- `GC_KEEP_COUNT` (default 3)
+- `GC_BATCH_SIZE` (default 25)
+- `GC_MAX_ATTEMPTS` (default 5)
+- `GC_BACKOFF_BASE_SECONDS` (default 30)
