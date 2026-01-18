@@ -84,3 +84,17 @@
 .file-pill.cursor-on-pill *::selection {
   background: transparent;
 }
+
+/* Monaco editor line highlight (exclude gutter) */
+.monaco-editor .view-overlays .current-line,
+.monaco-editor .view-overlays .line-highlight {
+  background: rgba(37, 99, 235, 0.12) !important;
+}
+.monaco-editor .margin .current-line-margin,
+.monaco-editor .margin .line-highlight {
+  background: transparent !important;
+}
+.monaco-editor .line-highlight-border,
+.monaco-editor .current-line-border {
+  border: none !important;
+}

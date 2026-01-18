@@ -1,6 +1,6 @@
 "use client";
 
-import Editor, { OnMount } from "@monaco-editor/react";
+import Editor, { BeforeMount, OnMount } from "@monaco-editor/react";
 import { useRef } from "react";
 
 type Props = {
@@ -39,6 +39,18 @@ function getLanguage(fileName: string) {
 export function MainEditor({ value, onChange, fileName, onSave }: Props) {
   const editorRef = useRef<any>(null);
 
+  const handleBeforeMount: BeforeMount = (monaco) => {
+    monaco.editor.defineTheme("cursor-light", {
+      base: "vs",
+      inherit: true,
+      rules: [],
+      colors: {
+        "editor.lineHighlightBackground": "rgba(37, 99, 235, 0.12)",
+        "editor.lineHighlightBorder": "#00000000",
+      },
+    });
+  };
+
   const handleEditorDidMount: OnMount = (editor, monaco) => {
     editorRef.current = editor;
 
@@ -51,7 +63,8 @@ export function MainEditor({ value, onChange, fileName, onSave }: Props) {
   return (
     <Editor
       height="100%"
-      theme="light"
+      theme="cursor-light"
+      beforeMount={handleBeforeMount}
       path={fileName} // これでモデルが再作成され、言語切り替えがスムーズになる
       defaultLanguage={getLanguage(fileName)}
       value={value}
