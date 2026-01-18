@@ -7,38 +7,11 @@
 
 | ID | Time | T | Title | Read |
 |----|------|---|-------|------|
-| #307 | 11:49 PM | 🔴 | Added nullish coalescing operator for upload progress percentage | ~330 |
-| #303 | 11:47 PM | 🔵 | Upload progress condition checks for temp ID and numeric progress value | ~366 |
-| #302 | " | 🔵 | Virtual plan document UI with unsaved indicator and save button | ~443 |
-| #298 | 11:45 PM | 🔵 | Main editor rendering logic with upload progress and media preview | ~418 |
-| #297 | " | 🔵 | File content management with special handling for temp and virtual nodes | ~471 |
-| #289 | 11:30 PM | 🔵 | Delete confirmation dialog integration in handleDeleteNodes | ~443 |
-| #288 | " | ✅ | Removed delete confirmation dialog state from AppLayout | ~341 |
-| #277 | 11:16 PM | 🔵 | Optimistic delete pattern with background API calls | ~465 |
-| #274 | 11:15 PM | 🔵 | No replaceConfirm usage found in AppLayout | ~319 |
-| #262 | 11:05 PM | 🔵 | No additional setActiveNodeId or setOpenTabs calls after line 1889 | ~356 |
-| #260 | 11:04 PM | 🔵 | Temporary node handling pattern in file operations | ~419 |
-| #256 | 10:58 PM | 🟣 | Added scroll-to-center for newly created folders | ~385 |
-| #255 | " | 🔵 | Optimistic UI pattern for file creation in AppLayout | ~347 |
-| #254 | " | 🟣 | Centering scroll behavior for newly created and uploaded files/folders | ~471 |
-| #253 | 10:55 PM | 🔵 | handleCreateFolder Success Path Needs revealNodeId | ~291 |
-| #252 | " | 🔵 | handleCreateFile Success Path Needs revealNodeId | ~282 |
-| #251 | 10:54 PM | 🔵 | Existing setRevealNodeId Usage in AppLayout | ~260 |
-| #248 | " | ✅ | Reverted Folder Creation Centering Feature | ~259 |
-| #242 | 10:53 PM | 🔵 | Upload Functions Set revealNodeId with Final IDs | ~296 |
-| #241 | " | 🔵 | uploadFolderItems Sets revealNodeId for Root Folder | ~288 |
-| #240 | " | 🔵 | uploadFiles Function Tracks Last File for Focus | ~308 |
-| #239 | " | 🔵 | uploadFolderItems Creates Temporary Nodes Upfront | ~306 |
-| #238 | 10:52 PM | 🔵 | Upload Function Definitions Located | ~247 |
-| #237 | " | 🔵 | FileTree Component Props Integration | ~282 |
-| #236 | " | 🔵 | Upload Function Already Sets revealNodeId for Focused Items | ~311 |
-| #235 | " | 🔵 | Drop Files Handler Delegates to Upload Functions | ~255 |
-| #234 | " | 🔵 | File Drop Handler Location | ~193 |
-| #233 | " | 🔵 | revealNodeId State and Usage Pattern | ~278 |
-| #232 | 10:51 PM | 🔵 | handleCreateFile Complete Implementation Details | ~294 |
-| #231 | " | 🔵 | File and Folder Creation Handler Implementation | ~308 |
-| #230 | " | 🔵 | Upload Handler Structure and File Processing Logic | ~295 |
-| #228 | " | 🔵 | File Creation and Upload Handler Locations | ~243 |
-| #227 | " | 🔵 | AppLayout Client Component Overview | ~291 |
 | #225 | 10:50 PM | 🔵 | AppContent Server Component Architecture | ~259 |
+
+### Jan 18, 2026
+
+| ID | Time | T | Title | Read |
+|----|------|---|-------|------|
+| #413 | 4:11 PM | 🔵 | TabBar Integration in AppLayout | ~254 |
 </claude-mem-context>

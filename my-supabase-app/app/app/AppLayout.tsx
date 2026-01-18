@@ -4904,18 +4904,24 @@ ${diffs}`;
 
       <div className="flex flex-1 min-w-0">
         <aside
-          className={`bg-zinc-50 border-r border-zinc-200 flex flex-col flex-shrink-0 transition-opacity duration-100 ${panelWidthsLoaded ? "opacity-100" : "opacity-0"}`}
+          className={`bg-zinc-50 flex flex-col flex-shrink-0 transition-opacity duration-100 ${panelWidthsLoaded ? "opacity-100" : "opacity-0"}`}
           style={{ width: leftPanelWidth }}
         >
           {renderSidebarContent()}
         </aside>
 
         {/* Left resize handle */}
-        <div
-          className="w-1 bg-transparent hover:bg-blue-500 cursor-col-resize transition-colors flex-shrink-0 group"
-          onMouseDown={() => setIsResizingLeft(true)}
-        >
-          <div className="w-full h-full group-hover:bg-blue-500" />
+        <div className="relative w-0 flex-shrink-0 group">
+          <div
+            className="absolute inset-y-0 -left-4 -right-4 cursor-col-resize z-20"
+            onMouseDown={() => setIsResizingLeft(true)}
+          >
+            <div
+              className={`absolute inset-y-0 left-1/2 w-1 -translate-x-1/2 bg-blue-500 transition-opacity ${
+                isResizingLeft ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+              }`}
+            />
+          </div>
         </div>
 
         {/* 新規ワークスペース作成ダイアログ */}
@@ -5144,15 +5150,17 @@ ${diffs}`;
       </div>
 
       {/* Right resize handle */}
-      <div
-        className="w-1 bg-transparent hover:bg-blue-500 cursor-col-resize transition-colors flex-shrink-0 group"
-        onMouseDown={() => setIsResizingRight(true)}
-      >
-        <div className="w-full h-full group-hover:bg-blue-500" />
+      <div className="relative w-0 flex-shrink-0">
+        <div
+          className="absolute inset-y-0 -left-4 -right-4 cursor-col-resize group z-20"
+          onMouseDown={() => setIsResizingRight(true)}
+        >
+          <div className="absolute inset-y-0 left-1/2 w-1 -translate-x-1/2 bg-blue-500 opacity-0 transition-opacity group-hover:opacity-100" />
+        </div>
       </div>
 
       <aside
-        className={`border-l border-zinc-200 flex-shrink-0 bg-zinc-50 transition-opacity duration-100 ${panelWidthsLoaded ? "opacity-100" : "opacity-0"}`}
+        className={`flex-shrink-0 bg-zinc-50 transition-opacity duration-100 ${panelWidthsLoaded ? "opacity-100" : "opacity-0"}`}
         style={{ width: rightPanelWidth }}
       >
           <AiPanel
