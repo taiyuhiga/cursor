@@ -228,3 +228,55 @@ Use these as initial SLO-style thresholds and tune later:
 - `GC_BATCH_SIZE` (default 25)
 - `GC_MAX_ATTEMPTS` (default 5)
 - `GC_BACKOFF_BASE_SECONDS` (default 30)
+
+---
+
+## Safety guardrails
+
+Non-negotiables:
+
+- Never delete the current reference (`file_contents.text` -> `storage:<path>`)
+- Keep at least `GC_KEEP_COUNT >= 1`
+
+Safety limits (recommendations):
+
+- Cap deletions per job to a safe upper bound
+- If you add a hard cap, record the cap hit in logs and `last_summary`
+
+---
+
+## Monitoring baselines (examples)
+
+Healthy steady-state examples:
+
+- `queued_stale = 0`
+- `running_stuck = 0`
+- `error` rate near 0 (sporadic errors are acceptable if they recover)
+
+Typical patterns:
+
+- `queued` grows while `error` stays low: capacity shortfall (increase batch or frequency)
+- `error` grows while `queued` stays low: permission or path issues
+
+---
+
+## Secrets and rotation (operational ownership)
+
+GC requires delete privileges. Treat these as high-risk secrets:
+
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `GC_WORKER_TOKEN`
+
+Guidance:
+
+- Store only in server-side env (never client)
+- Rotate on suspected leak; redeploy worker immediately
+- Keep a documented owner for pause/resume of the worker trigger
+
+---
+
+## Optional SLO (directional)
+
+Example SLO:
+
+- "Cleanup backlog returns to <= `GC_KEEP_COUNT` within 30 minutes of reference switch."
