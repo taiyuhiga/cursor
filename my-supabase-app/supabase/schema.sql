@@ -54,9 +54,16 @@ create table if not exists public.gc_jobs (
   attempts integer default 0 not null,
   run_after timestamp with time zone default timezone('utc'::text, now()) not null,
   last_error text,
+  last_error_phase text,
+  last_summary jsonb,
+  duration_ms integer,
   created_at timestamp with time zone default timezone('utc'::text, now()) not null,
   updated_at timestamp with time zone default timezone('utc'::text, now()) not null
 );
+
+alter table public.gc_jobs add column if not exists last_error_phase text;
+alter table public.gc_jobs add column if not exists last_summary jsonb;
+alter table public.gc_jobs add column if not exists duration_ms integer;
 
 -- Performance indexes
 create index if not exists nodes_project_id_id_idx on public.nodes (project_id, id);

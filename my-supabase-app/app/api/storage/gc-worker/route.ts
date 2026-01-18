@@ -50,6 +50,11 @@ export async function POST(req: NextRequest) {
 
   const keepCount = Number.parseInt(process.env.GC_KEEP_COUNT || "3", 10);
   const batchSize = Number.parseInt(process.env.GC_BATCH_SIZE || "50", 10);
+  const maxAttempts = Number.parseInt(process.env.GC_MAX_ATTEMPTS || "5", 10);
+  const backoffBaseSeconds = Number.parseInt(
+    process.env.GC_BACKOFF_BASE_SECONDS || "30",
+    10,
+  );
   const now = new Date();
   const nowIso = now.toISOString();
 
@@ -70,6 +75,7 @@ export async function POST(req: NextRequest) {
   const results: Array<{ id: string; status: string; message?: string }> = [];
 
   for (const job of jobs || []) {
+    const startedAt = Date.now();
     const { data: locked, error: lockError } = await supabase
       .from("gc_jobs")
       .update({
@@ -90,6 +96,65 @@ export async function POST(req: NextRequest) {
     const nodeId = locked.node_id as string;
     const projectId = locked.project_id as string;
     const prefix = `${projectId}/${nodeId}/uploads`;
+    const attempts = locked.attempts || 0;
+
+    const logEvent = (payload: Record<string, unknown>) => {
+      console.log(JSON.stringify(payload));
+    };
+    const makeSummary = (summary: {
+      current_storage_path: string | null;
+      prefix: string;
+      list_count: number;
+      kept_count: number;
+      deleted_count: number;
+      note?: string;
+    }) => summary;
+
+    const finalizeError = async (
+      phase: string,
+      message: string,
+      summary?: ReturnType<typeof makeSummary>,
+    ) => {
+      const shouldRetry = attempts < maxAttempts;
+      const backoffSeconds = backoffBaseSeconds * Math.max(1, attempts);
+      const nextRun = new Date(Date.now() + backoffSeconds * 1000).toISOString();
+      await supabase
+        .from("gc_jobs")
+        .update({
+          status: shouldRetry ? "queued" : "error",
+          last_error: message,
+          last_error_phase: phase,
+          last_summary: summary ?? null,
+          duration_ms: Date.now() - startedAt,
+          updated_at: nowIso,
+          ...(shouldRetry ? { run_after: nextRun } : {}),
+        })
+        .eq("id", job.id);
+      logEvent({
+        event: "gc_job_error",
+        job_id: job.id,
+        node_id: nodeId,
+        project_id: projectId,
+        phase,
+        message,
+        attempts,
+        retrying: shouldRetry,
+        duration_ms: Date.now() - startedAt,
+        summary,
+      });
+      results.push({ id: job.id, status: shouldRetry ? "queued" : "error", message });
+    };
+
+    logEvent({
+      event: "gc_job_start",
+      job_id: job.id,
+      node_id: nodeId,
+      project_id: projectId,
+      attempts,
+      keep_count: keepCount,
+      batch_size: batchSize,
+      prefix,
+    });
 
     const { data: contentRow, error: contentError } = await supabase
       .from("file_contents")
@@ -98,16 +163,7 @@ export async function POST(req: NextRequest) {
       .maybeSingle();
 
     if (contentError) {
-      await supabase
-        .from("gc_jobs")
-        .update({
-          status: "error",
-          last_error: contentError.message,
-          updated_at: nowIso,
-          run_after: new Date(Date.now() + 60_000).toISOString(),
-        })
-        .eq("id", job.id);
-      results.push({ id: job.id, status: "error", message: contentError.message });
+      await finalizeError("fetch_current", contentError.message);
       continue;
     }
 
@@ -118,24 +174,43 @@ export async function POST(req: NextRequest) {
       .list(prefix);
 
     if (listError) {
-      await supabase
-        .from("gc_jobs")
-        .update({
-          status: "error",
-          last_error: listError.message,
-          updated_at: nowIso,
-          run_after: new Date(Date.now() + 60_000).toISOString(),
-        })
-        .eq("id", job.id);
-      results.push({ id: job.id, status: "error", message: listError.message });
+      await finalizeError("list", listError.message, {
+        current_storage_path: currentPath,
+        prefix,
+        list_count: 0,
+        kept_count: 0,
+        deleted_count: 0,
+      });
       continue;
     }
 
     if (!listData || listData.length === 0) {
+      const summary = makeSummary({
+        current_storage_path: currentPath,
+        prefix,
+        list_count: 0,
+        kept_count: 0,
+        deleted_count: 0,
+      });
       await supabase
         .from("gc_jobs")
-        .update({ status: "done", last_error: null, updated_at: nowIso })
+        .update({
+          status: "done",
+          last_error: null,
+          last_error_phase: null,
+          last_summary: summary,
+          duration_ms: Date.now() - startedAt,
+          updated_at: nowIso,
+        })
         .eq("id", job.id);
+      logEvent({
+        event: "gc_job_done",
+        job_id: job.id,
+        node_id: nodeId,
+        project_id: projectId,
+        duration_ms: Date.now() - startedAt,
+        summary,
+      });
       results.push({ id: job.id, status: "done" });
       continue;
     }
@@ -154,14 +229,33 @@ export async function POST(req: NextRequest) {
       .filter(Boolean) as Array<{ name: string; time: number }>;
 
     if (withTimes.length === 0 && keepNames.size === 0) {
+      const summary = makeSummary({
+        current_storage_path: currentPath,
+        prefix,
+        list_count: listData.length,
+        kept_count: 0,
+        deleted_count: 0,
+        note: "no_timestamps",
+      });
       await supabase
         .from("gc_jobs")
         .update({
           status: "done",
           last_error: "No timestamps available; skipped deletion",
+          last_error_phase: "timestamp",
+          last_summary: summary,
+          duration_ms: Date.now() - startedAt,
           updated_at: nowIso,
         })
         .eq("id", job.id);
+      logEvent({
+        event: "gc_job_done",
+        job_id: job.id,
+        node_id: nodeId,
+        project_id: projectId,
+        duration_ms: Date.now() - startedAt,
+        summary,
+      });
       results.push({ id: job.id, status: "done", message: "no timestamps" });
       continue;
     }
@@ -182,25 +276,44 @@ export async function POST(req: NextRequest) {
           .from("files")
           .remove(group);
         if (removeError) {
-          await supabase
-            .from("gc_jobs")
-            .update({
-              status: "error",
-              last_error: removeError.message,
-              updated_at: nowIso,
-              run_after: new Date(Date.now() + 60_000).toISOString(),
-            })
-            .eq("id", job.id);
-          results.push({ id: job.id, status: "error", message: removeError.message });
+          await finalizeError("delete", removeError.message, {
+            current_storage_path: currentPath,
+            prefix,
+            list_count: listData.length,
+            kept_count: keepNames.size,
+            deleted_count: deletePaths.length,
+          });
           continue;
         }
       }
     }
 
+    const summary = makeSummary({
+      current_storage_path: currentPath,
+      prefix,
+      list_count: listData.length,
+      kept_count: keepNames.size,
+      deleted_count: deletePaths.length,
+    });
     await supabase
       .from("gc_jobs")
-      .update({ status: "done", last_error: null, updated_at: nowIso })
+      .update({
+        status: "done",
+        last_error: null,
+        last_error_phase: null,
+        last_summary: summary,
+        duration_ms: Date.now() - startedAt,
+        updated_at: nowIso,
+      })
       .eq("id", job.id);
+    logEvent({
+      event: "gc_job_done",
+      job_id: job.id,
+      node_id: nodeId,
+      project_id: projectId,
+      duration_ms: Date.now() - startedAt,
+      summary,
+    });
     results.push({ id: job.id, status: "done" });
   }
 
