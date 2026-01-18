@@ -4913,7 +4913,7 @@ ${diffs}`;
         {/* Left resize handle */}
         <div className="relative w-0 flex-shrink-0 group">
           <div
-            className="absolute inset-y-0 -left-4 -right-4 cursor-col-resize z-20"
+            className="absolute inset-y-0 -left-2 -right-2 cursor-col-resize z-20"
             onMouseDown={() => setIsResizingLeft(true)}
           >
             <div
@@ -5152,7 +5152,7 @@ ${diffs}`;
       {/* Right resize handle */}
       <div className="relative w-0 flex-shrink-0">
         <div
-          className="absolute inset-y-0 -left-4 -right-4 cursor-col-resize group z-20"
+          className="absolute inset-y-0 -left-2 -right-2 cursor-col-resize group z-20"
           onMouseDown={() => setIsResizingRight(true)}
         >
           <div className="absolute inset-y-0 left-1/2 w-1 -translate-x-1/2 bg-blue-500 opacity-0 transition-opacity group-hover:opacity-100" />
