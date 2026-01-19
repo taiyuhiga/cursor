@@ -8,6 +8,7 @@ import { diffLines } from "diff";
 import JSZip from "jszip";
 import { AiPanel, AiPanelHandle } from "@/components/AiPanel";
 import { TabBar } from "@/components/TabBar";
+import { getFileIcon, FileIcons } from "@/components/fileIcons";
 import { MainEditor } from "@/components/MainEditor";
 import { DiffView } from "@/components/DiffView";
 import { CommandPalette } from "@/components/CommandPalette";
@@ -4995,7 +4996,57 @@ ${diffs}`;
               }
             }}
             onClose={handleCloseTab}
+            onDownload={() => {
+              if (!activeNodeId) return;
+
+              // Get filename from active node or virtual doc
+              let filename = "download.txt";
+              let content = "";
+
+              if (activeVirtual) {
+                filename = activeVirtual.fileName;
+                content = activeVirtual.content;
+              } else {
+                const node = nodeById.get(activeNodeId);
+                if (node) {
+                  filename = node.name;
+                }
+                content = activeEditorContent;
+              }
+
+              // Create blob and download
+              const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement("a");
+              a.href = url;
+              a.download = filename;
+              document.body.appendChild(a);
+              a.click();
+              document.body.removeChild(a);
+              URL.revokeObjectURL(url);
+            }}
           />
+          {/* パンくずリスト */}
+          {activeNodeId && !activeVirtual && (() => {
+            const path = pathByNodeId.get(activeNodeId) || tempIdPathMapRef.current.get(activeNodeId);
+            if (!path) return null;
+            const segments = path.split("/");
+            return (
+              <div className="flex items-center gap-1 px-3 py-1.5 bg-white text-xs text-zinc-600 overflow-x-auto no-scrollbar">
+                {segments.map((segment, index) => {
+                  const isLast = index === segments.length - 1;
+                  const Icon = isLast ? getFileIcon(segment) : FileIcons.Folder;
+                  return (
+                    <span key={index} className="flex items-center gap-1 whitespace-nowrap">
+                      {index > 0 && <span className="text-zinc-400 mx-0.5">{">"}</span>}
+                      <Icon className="w-4 h-4 flex-shrink-0" />
+                      <span className={isLast ? "text-zinc-900" : ""}>{segment}</span>
+                    </span>
+                  );
+                })}
+              </div>
+            );
+          })()}
           {activeVirtual ? (
             <div className="px-6 py-3 border-b border-zinc-200 bg-zinc-50 flex items-center justify-between">
               <div>

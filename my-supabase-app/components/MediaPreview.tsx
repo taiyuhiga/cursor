@@ -326,16 +326,6 @@ export function MediaPreview({ fileName, nodeId, onError }: MediaPreviewProps) {
 
   return (
     <div className="h-full flex flex-col bg-white">
-      {/* Header */}
-      <div className="px-4 py-2 flex items-center gap-2">
-        <span className="flex-shrink-0">
-          {getFileIcon(fileName)}
-        </span>
-        <span className="text-zinc-600 text-sm truncate">
-          {fileName}
-        </span>
-      </div>
-
       {/* Content */}
       <div className="flex-1 flex items-center justify-center p-4 overflow-auto">
         {isLoading ? (
