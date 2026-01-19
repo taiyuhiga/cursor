@@ -211,6 +211,7 @@ export function FileTree({
   const workspaceTriggerRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(0);
+  const [headerTooltip, setHeaderTooltip] = useState<"new-file" | "new-folder" | "more" | null>(null);
   const scrollRafRef = useRef<number | null>(null);
   // 一度スクロールしたrevealNodeIdを追跡（同じIDで再スクロールしない）
   const lastRevealedNodeIdRef = useRef<string | null>(null);
@@ -1344,7 +1345,7 @@ export function FileTree({
     >
       {/* Project name header */}
       {projectName && (
-        <div className="group flex items-center px-3 py-2 border-b border-zinc-200 gap-0.5 relative">
+        <div className="group flex items-center px-3 py-2 border-b border-zinc-200 gap-0.5 relative z-20">
           {/* Workspace trigger area (icon + name) */}
           <div ref={workspaceTriggerRef} className="flex items-center min-w-0 flex-1">
             {/* Workspace icon with first character */}
@@ -1530,25 +1531,61 @@ export function FileTree({
           )}
           <div className="flex items-center flex-shrink-0 ml-auto -mr-0.5">
             <button
-              onClick={handleHeaderNewFile}
-              className="p-0.5 rounded text-zinc-700 hover:text-zinc-900 bg-transparent hover:bg-transparent"
-              title="新規ファイル"
+              onClick={(e) => {
+                setHeaderTooltip(null);
+                handleHeaderNewFile(e);
+              }}
+              onMouseEnter={() => setHeaderTooltip("new-file")}
+              onMouseLeave={() => setHeaderTooltip(null)}
+              className="relative p-0.5 rounded text-zinc-700 hover:text-zinc-900 bg-transparent hover:bg-transparent"
+              aria-label="新規ファイル"
             >
               <ActionIcons.FilePlus className="w-5 h-5" />
+              <span
+                className={`pointer-events-none absolute left-1/2 top-full mt-1 -translate-x-1/2 whitespace-nowrap rounded bg-zinc-800 text-white text-[10px] px-2 py-1 transition-opacity z-50 ${
+                  headerTooltip === "new-file" ? "opacity-100" : "opacity-0"
+                }`}
+              >
+                新規ファイル
+              </span>
             </button>
             <button
-              onClick={handleHeaderNewFolder}
-              className="p-0.5 rounded text-zinc-700 hover:text-zinc-900 bg-transparent hover:bg-transparent ml-1"
-              title="新規フォルダ"
+              onClick={(e) => {
+                setHeaderTooltip(null);
+                handleHeaderNewFolder(e);
+              }}
+              onMouseEnter={() => setHeaderTooltip("new-folder")}
+              onMouseLeave={() => setHeaderTooltip(null)}
+              className="relative p-0.5 rounded text-zinc-700 hover:text-zinc-900 bg-transparent hover:bg-transparent ml-1"
+              aria-label="新規フォルダ"
             >
               <ActionIcons.FolderPlus className="w-5 h-5" />
+              <span
+                className={`pointer-events-none absolute left-1/2 top-full mt-1 -translate-x-1/2 whitespace-nowrap rounded bg-zinc-800 text-white text-[10px] px-2 py-1 transition-opacity z-50 ${
+                  headerTooltip === "new-folder" ? "opacity-100" : "opacity-0"
+                }`}
+              >
+                新規フォルダ
+              </span>
             </button>
             <button
-              onClick={handleMoreClick}
-              className="p-0.5 rounded text-zinc-700 hover:text-zinc-900 bg-transparent hover:bg-transparent -mr-2"
-              title="その他"
+              onClick={(e) => {
+                setHeaderTooltip(null);
+                handleMoreClick(e);
+              }}
+              onMouseEnter={() => setHeaderTooltip("more")}
+              onMouseLeave={() => setHeaderTooltip(null)}
+              className="relative p-0.5 rounded text-zinc-700 hover:text-zinc-900 bg-transparent hover:bg-transparent -mr-2"
+              aria-label="その他"
             >
               <ActionIcons.More className="w-5 h-5" />
+              <span
+                className={`pointer-events-none absolute left-1/2 top-full mt-1 -translate-x-1/2 whitespace-nowrap rounded bg-zinc-800 text-white text-[10px] px-2 py-1 transition-opacity z-50 ${
+                  headerTooltip === "more" ? "opacity-100" : "opacity-0"
+                }`}
+              >
+                その他
+              </span>
             </button>
           </div>
         </div>

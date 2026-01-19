@@ -4999,31 +4999,20 @@ ${diffs}`;
             onDownload={() => {
               if (!activeNodeId) return;
 
-              // Get filename from active node or virtual doc
-              let filename = "download.txt";
-              let content = "";
-
               if (activeVirtual) {
-                filename = activeVirtual.fileName;
-                content = activeVirtual.content;
-              } else {
-                const node = nodeById.get(activeNodeId);
-                if (node) {
-                  filename = node.name;
-                }
-                content = activeEditorContent;
+                const blob = new Blob([activeVirtual.content], { type: "text/plain;charset=utf-8" });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = activeVirtual.fileName;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                return;
               }
 
-              // Create blob and download
-              const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
-              const url = URL.createObjectURL(blob);
-              const a = document.createElement("a");
-              a.href = url;
-              a.download = filename;
-              document.body.appendChild(a);
-              a.click();
-              document.body.removeChild(a);
-              URL.revokeObjectURL(url);
+              void handleDownload([activeNodeId]);
             }}
           />
           {/* パンくずリスト */}

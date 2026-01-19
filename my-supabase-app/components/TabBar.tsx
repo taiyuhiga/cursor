@@ -1,3 +1,5 @@
+import { useState } from "react";
+
 import { getFileIcon } from "./fileIcons";
 
 type Tab = {
@@ -15,8 +17,9 @@ type TabBarProps = {
 };
 
 export function TabBar({ tabs, activeId, onSelect, onClose, onShare, onDownload }: TabBarProps) {
+  const [actionTooltip, setActionTooltip] = useState<"share" | "download" | null>(null);
   return (
-    <div className="flex h-9 border-b border-zinc-200 bg-zinc-50 text-sm">
+    <div className="relative z-20 flex h-9 border-b border-zinc-200 bg-zinc-50 text-sm">
       {/* タブ部分 */}
       <div className="flex overflow-x-auto no-scrollbar">
         {tabs.map((tab) => {
@@ -81,9 +84,14 @@ export function TabBar({ tabs, activeId, onSelect, onClose, onShare, onDownload 
       <div className="flex items-center gap-1 px-2 border-l border-zinc-200">
         {/* 共有ボタン */}
         <button
-          onClick={onShare}
-          className="p-1.5 rounded hover:bg-zinc-200 text-zinc-500 hover:text-zinc-700 transition-colors"
-          title="共有"
+          onClick={() => {
+            setActionTooltip(null);
+            onShare?.();
+          }}
+          onMouseEnter={() => setActionTooltip("share")}
+          onMouseLeave={() => setActionTooltip(null)}
+          className="relative p-1.5 rounded hover:bg-zinc-200 text-zinc-500 hover:text-zinc-700 transition-colors"
+          aria-label="共有"
         >
           <svg
             xmlns="http://www.w3.org/2000/svg"
@@ -102,13 +110,25 @@ export function TabBar({ tabs, activeId, onSelect, onClose, onShare, onDownload 
             <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
             <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
           </svg>
+          <span
+            className={`pointer-events-none absolute left-1/2 top-full mt-1 -translate-x-1/2 whitespace-nowrap rounded bg-zinc-800 text-white text-[10px] px-2 py-1 transition-opacity z-50 ${
+              actionTooltip === "share" ? "opacity-100" : "opacity-0"
+            }`}
+          >
+            共有
+          </span>
         </button>
 
         {/* ダウンロードボタン */}
         <button
-          onClick={onDownload}
-          className="p-1.5 rounded hover:bg-zinc-200 text-zinc-500 hover:text-zinc-700 transition-colors"
-          title="ダウンロード"
+          onClick={() => {
+            setActionTooltip(null);
+            onDownload?.();
+          }}
+          onMouseEnter={() => setActionTooltip("download")}
+          onMouseLeave={() => setActionTooltip(null)}
+          className="relative p-1.5 rounded hover:bg-zinc-200 text-zinc-500 hover:text-zinc-700 transition-colors"
+          aria-label="ダウンロード"
         >
           <svg
             xmlns="http://www.w3.org/2000/svg"
@@ -125,6 +145,13 @@ export function TabBar({ tabs, activeId, onSelect, onClose, onShare, onDownload 
             <polyline points="7 10 12 15 17 10" />
             <line x1="12" y1="15" x2="12" y2="3" />
           </svg>
+          <span
+            className={`pointer-events-none absolute left-1/2 top-full mt-1 -translate-x-1/2 whitespace-nowrap rounded bg-zinc-800 text-white text-[10px] px-2 py-1 transition-opacity z-50 ${
+              actionTooltip === "download" ? "opacity-100" : "opacity-0"
+            }`}
+          >
+            ダウンロード
+          </span>
         </button>
       </div>
     </div>
