@@ -26,6 +26,7 @@ function getLanguage(fileName: string) {
     case "css":
       return "css";
     case "html":
+    case "htm":
       return "html";
     case "json":
       return "json";
@@ -58,6 +59,68 @@ export function MainEditor({ value, onChange, fileName, onSave }: Props) {
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
       onSave?.();
     });
+
+    const autoCloseLanguages = new Set(["html", "markdown"]);
+    const voidTags = new Set([
+      "area",
+      "base",
+      "br",
+      "col",
+      "embed",
+      "hr",
+      "img",
+      "input",
+      "link",
+      "meta",
+      "param",
+      "source",
+      "track",
+      "wbr",
+    ]);
+
+    editor.onDidType((text) => {
+      if (text !== ">") return;
+
+      const model = editor.getModel();
+      if (!model) return;
+
+      const languageId = model.getLanguageId();
+      if (!autoCloseLanguages.has(languageId)) return;
+
+      const position = editor.getPosition();
+      if (!position) return;
+
+      const line = model.getLineContent(position.lineNumber);
+      let left = line.slice(0, Math.max(position.column - 1, 0));
+      if (left.endsWith(">")) {
+        left = left.slice(0, -1);
+      }
+
+      const match = left.match(/<([A-Za-z][\w:-]*)[^<>]*$/);
+      if (!match) return;
+
+      const tagName = match[1];
+      if (voidTags.has(tagName.toLowerCase())) return;
+      if (left.trim().endsWith("/")) return;
+
+      const right = line.slice(Math.max(position.column - 1, 0));
+      if (right.startsWith(`</${tagName}`)) return;
+
+      editor.pushUndoStop();
+      editor.executeEdits("auto-close-tag", [
+        {
+          range: new monaco.Range(
+            position.lineNumber,
+            position.column,
+            position.lineNumber,
+            position.column,
+          ),
+          text: `</${tagName}>`,
+        },
+      ]);
+      editor.pushUndoStop();
+      editor.setPosition(position);
+    });
   };
 
   return (
@@ -86,6 +149,11 @@ export function MainEditor({ value, onChange, fileName, onSave }: Props) {
         scrollbar: { horizontal: "hidden", vertical: "auto" },
         tabSize: 4,
         renderLineHighlight: "line",
+        autoClosingTags: "always",
+        autoClosingBrackets: "always",
+        autoClosingQuotes: "always",
+        autoIndent: "full",
+        formatOnType: true,
       }}
     />
   );

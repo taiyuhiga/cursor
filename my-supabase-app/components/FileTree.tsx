@@ -1109,7 +1109,13 @@ export function FileTree({
   const renderRow = (row: VisibleRow) => {
     if (row.kind === "create") {
       const isCreatingFolder = row.nodeType === "folder";
-      const IconComponent = isCreatingFolder ? FileIcons.Folder : FileIcons.Plain;
+      const trimmedInput = inputValue.trim();
+      const previewIcon = getFileIcon(trimmedInput);
+      const IconComponent = isCreatingFolder
+        ? FileIcons.Folder
+        : previewIcon === FileIcons.File
+          ? FileIcons.Plain
+          : previewIcon;
       const editPaddingLeft = row.depth * 16 + (isCreatingFolder ? 4 : 22);
       return (
         <div className="relative h-full">
@@ -1152,7 +1158,13 @@ export function FileTree({
     const isRenaming = editingState?.type === "rename" && editingState.targetId === node.id;
 
     if (isRenaming) {
-      const IconComponent = node.type === "file" ? getFileIcon(node.name) : FileIcons.Folder;
+      const trimmedInput = inputValue.trim();
+      const previewIcon = getFileIcon(trimmedInput);
+      const IconComponent = node.type === "file"
+        ? previewIcon === FileIcons.File
+          ? FileIcons.Plain
+          : previewIcon
+        : FileIcons.Folder;
       return (
         <div className="relative h-full">
           <div
