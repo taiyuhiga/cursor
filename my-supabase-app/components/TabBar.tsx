@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { getFileIcon } from "./fileIcons";
 
@@ -19,10 +19,20 @@ type TabBarProps = {
 
 export function TabBar({ tabs, activeId, onSelect, onClose, onShare, onDownload, dirtyIds }: TabBarProps) {
   const [actionTooltip, setActionTooltip] = useState<"share" | "download" | null>(null);
+  const tabsContainerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!activeId) return;
+    const container = tabsContainerRef.current;
+    if (!container) return;
+    const tabEl = container.querySelector(`[data-tab-id="${activeId}"]`) as HTMLElement | null;
+    if (!tabEl) return;
+    tabEl.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [activeId, tabs.length]);
   return (
     <div className="relative z-20 flex h-9 border-b border-zinc-200 bg-zinc-50 text-sm">
       {/* タブ部分 */}
-      <div className="flex overflow-x-auto no-scrollbar">
+      <div ref={tabsContainerRef} className="flex overflow-x-auto no-scrollbar">
         {tabs.map((tab) => {
           const isActive = tab.id === activeId;
           const isDirty = dirtyIds?.has(tab.id);
@@ -30,6 +40,7 @@ export function TabBar({ tabs, activeId, onSelect, onClose, onShare, onDownload,
           return (
             <div
               key={tab.id}
+              data-tab-id={tab.id}
               className={`
                 group flex items-center gap-2 px-3 border-r border-zinc-200 min-w-[120px] max-w-[200px] cursor-pointer select-none relative
                 ${

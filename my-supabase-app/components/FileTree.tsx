@@ -20,7 +20,7 @@ type Workspace = {
 type FileTreeProps = {
   nodes: Node[];
   selectedNodeIds: Set<string>;
-  onSelectNode: (nodeId: string) => void;
+  onSelectNode: (nodeId: string, options?: { preview?: boolean }) => void;
   onToggleSelectNode: (nodeId: string) => void;
   onClearSelection: () => void;
   onHoverNode?: (nodeId: string) => void;
@@ -1311,8 +1311,13 @@ export function FileTree({
             toggleFolder(node.id);
             onSelectFolder?.(node.id);
           } else {
-            onSelectNode(node.id);
+            onSelectNode(node.id, { preview: true });
           }
+        }}
+        onDoubleClick={(e) => {
+          if (node.type === "folder") return;
+          e.stopPropagation();
+          onSelectNode(node.id, { preview: false });
         }}
         onContextMenu={(e) => {
           e.preventDefault();

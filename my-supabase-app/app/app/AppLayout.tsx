@@ -191,6 +191,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const [openTabs, setOpenTabs] = useState<string[]>([]);
   const [activeNodeId, setActiveNodeId] = useState<string | null>(null);
   const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(new Set());
+  const [previewTabId, setPreviewTabId] = useState<string | null>(null);
   const [activeActivity, setActiveActivity] = useState<Activity>("explorer");
   const [fileContent, setFileContent] = useState<string>("");
   const [tempFileContents, setTempFileContents] = useState<Record<string, string>>({});
@@ -314,6 +315,8 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const draftContentsRef = useRef<Record<string, string>>({});
   const contentCacheRef = useRef<Record<string, string>>({});
   const activeNodeIdRef = useRef<string | null>(null);
+  const previewTabIdRef = useRef<string | null>(null);
+  const openTabsRef = useRef<string[]>([]);
   const supabase = createClient();
 
   useEffect(() => {
@@ -331,6 +334,21 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   useEffect(() => {
     activeNodeIdRef.current = activeNodeId;
   }, [activeNodeId]);
+
+  useEffect(() => {
+    previewTabIdRef.current = previewTabId;
+  }, [previewTabId]);
+
+  useEffect(() => {
+    openTabsRef.current = openTabs;
+  }, [openTabs]);
+
+  const dirtyTabIds = useMemo(() => {
+    const ids = new Set(Object.keys(draftContents));
+    Object.keys(tempFileContents).forEach((id) => ids.add(id));
+    return ids;
+  }, [draftContents, tempFileContents]);
+
 
   const getNodeKey = (node: Node) => `${node.type}:${node.parent_id ?? "root"}:${node.name}`;
 
@@ -2136,7 +2154,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     })();
   };
 
-  const handleOpenNode = (nodeId: string) => {
+  const handleOpenNode = useCallback((nodeId: string, options?: { preview?: boolean }) => {
     // フォルダかどうかはFileTree側で判断して展開/ファイルオープンを呼び分けてもらう形にするが、
     // ここではファイルを開く処理のみ
     const isTempNode = nodeId.startsWith("temp-");
@@ -2144,15 +2162,36 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     if (!isTempNode && node && isMediaFile(node.name)) {
       prefetchMediaUrl(nodeId);
     }
-    setOpenTabs((prev) =>
-      prev.includes(nodeId) ? prev : [...prev, nodeId]
-    );
+    const isPreview = options?.preview ?? false;
+    const alreadyOpen = openTabsRef.current.includes(nodeId);
+    const currentPreview = previewTabIdRef.current;
+    const currentPreviewIsDirty = currentPreview ? dirtyTabIds.has(currentPreview) : false;
+
+    setOpenTabs((prev) => {
+      if (prev.includes(nodeId)) return prev;
+      if (isPreview) {
+        if (currentPreview && !currentPreviewIsDirty) {
+          return prev.map((id) => (id === currentPreview ? nodeId : id));
+        }
+      }
+      return [...prev, nodeId];
+    });
     setActiveNodeId(nodeId);
     setSelectedNodeIds(new Set([nodeId]));
     if (activeActivity !== "explorer") {
       setActiveActivity("explorer");
     }
-  };
+    if (isPreview) {
+      if (!alreadyOpen || currentPreview === nodeId) {
+        if (currentPreview && currentPreviewIsDirty) {
+          setPreviewTabId(null);
+        }
+        setPreviewTabId(nodeId);
+      }
+    } else if (currentPreview === nodeId) {
+      setPreviewTabId(null);
+    }
+  }, [activeActivity, dirtyTabIds, nodeById]);
 
   const handleHoverNode = useCallback((nodeId: string) => {
     if (nodeId.startsWith("temp-")) return;
@@ -3664,6 +3703,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         return newTabs;
       });
     }
+    setPreviewTabId((prev) => (prev === id ? null : prev));
   };
 
   // ファイル内容取得
@@ -3826,6 +3866,9 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
 
   const setActiveEditorContent = useCallback((next: string) => {
     if (!activeNodeId) return;
+    if (previewTabIdRef.current === activeNodeId) {
+      setPreviewTabId(null);
+    }
     if (activeNodeId.startsWith("virtual-plan:")) {
       setVirtualDocs((prev) => {
         const doc = prev[activeNodeId];
@@ -4718,12 +4761,6 @@ ${diffs}`;
       (editableTempNodeIdsRef.current.has(activeNode.id) ||
         (activeTempMappedId ? pendingContentByRealIdRef.current.has(activeTempMappedId) : false))
     : false;
-  const dirtyTabIds = useMemo(() => {
-    const ids = new Set(Object.keys(draftContents));
-    Object.keys(tempFileContents).forEach((id) => ids.add(id));
-    return ids;
-  }, [draftContents, tempFileContents]);
-
   // ワークスペース切り替え
   const handleSwitchWorkspace = async (workspaceId: string) => {
     if (workspaceId === activeWorkspace.id) return;
