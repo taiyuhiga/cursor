@@ -42,7 +42,7 @@ export function TabBar({ tabs, activeId, onSelect, onClose, onShare, onDownload,
               key={tab.id}
               data-tab-id={tab.id}
               className={`
-                group flex items-center gap-2 px-3 border-r border-zinc-200 min-w-[120px] max-w-[200px] cursor-pointer select-none relative
+                group flex flex-none items-center gap-2 px-3 border-r border-zinc-200 min-w-[120px] cursor-pointer select-none relative
                 ${
                   isActive
                     ? "bg-white text-zinc-900"
@@ -58,7 +58,7 @@ export function TabBar({ tabs, activeId, onSelect, onClose, onShare, onDownload,
 
               <FileIcon className="w-4 h-4 flex-shrink-0" />
 
-              <span className="truncate flex-1 text-xs">{tab.title}</span>
+              <span className="whitespace-nowrap text-xs">{tab.title}</span>
 
               <span
                 className={`text-blue-500 text-[40px] leading-none ml-0.5 ${isDirty ? "opacity-100" : "opacity-0"}`}
