@@ -47,36 +47,6 @@ export function MainEditor({ value, onChange, fileName, onSave }: Props) {
     onSaveRef.current = onSave;
   }, [onSave]);
 
-  const handleBeforeMount: BeforeMount = (monaco) => {
-    monaco.editor.defineTheme("cursor-light", {
-      base: "vs",
-      inherit: true,
-      rules: [
-        { token: "comment", foreground: "6A737D" },
-        { token: "keyword", foreground: "D73A49" },
-        { token: "string", foreground: "032F62" },
-        { token: "number", foreground: "005CC5" },
-        { token: "type", foreground: "6F42C1" },
-      ],
-      colors: {
-        "editor.foreground": "#1F2328",
-        "editor.background": "#FFFFFF",
-        "editorLineNumber.foreground": "#8C959F",
-        "editorLineNumber.activeForeground": "#1F2328",
-        "editorCursor.foreground": "#1F2328",
-        "editor.selectionBackground": "#BBDFFF",
-        "editor.inactiveSelectionBackground": "#DDEBFF",
-        "editor.selectionHighlightBackground": "#E6F0FF",
-        "editor.selectionHighlightBorder": "#00000000",
-        "editor.lineHighlightBackground": "transparent",
-        "editor.lineHighlightBorder": "#00000000",
-        "editorIndentGuide.background": "#E5E7EB",
-        "editorIndentGuide.activeBackground": "#C7D2FE",
-        "editorWhitespace.foreground": "#E5E7EB",
-      },
-    });
-  };
-
   const handleEditorDidMount: OnMount = (editor, monaco) => {
     editorRef.current = editor;
 
@@ -162,8 +132,7 @@ export function MainEditor({ value, onChange, fileName, onSave }: Props) {
   return (
     <Editor
       height="100%"
-      theme="cursor-light"
-      beforeMount={handleBeforeMount}
+      theme="vs"
       path={fileName} // これでモデルが再作成され、言語切り替えがスムーズになる
       defaultLanguage={getLanguage(fileName)}
       value={value}
@@ -192,6 +161,8 @@ export function MainEditor({ value, onChange, fileName, onSave }: Props) {
         autoClosingQuotes: "always",
         autoIndent: "full",
         formatOnType: true,
+        selectionHighlight: false,
+        occurrencesHighlight: "singleFile",
         unicodeHighlight: {
           ambiguousCharacters: false,
           invisibleCharacters: false,
