@@ -41,6 +41,7 @@ export function MainEditor({ value, onChange, fileName, onSave }: Props) {
   const editorRef = useRef<any>(null);
   const onSaveRef = useRef(onSave);
   const isMarkdown = fileName.toLowerCase().endsWith(".md");
+  const isApplyingAutoCloseRef = useRef(false);
 
   useEffect(() => {
     onSaveRef.current = onSave;
@@ -63,9 +64,9 @@ export function MainEditor({ value, onChange, fileName, onSave }: Props) {
         "editorLineNumber.foreground": "#8C959F",
         "editorLineNumber.activeForeground": "#1F2328",
         "editorCursor.foreground": "#1F2328",
-        "editor.selectionBackground": "transparent",
-        "editor.inactiveSelectionBackground": "transparent",
-        "editor.selectionHighlightBackground": "transparent",
+        "editor.selectionBackground": "#BBDFFF",
+        "editor.inactiveSelectionBackground": "#DDEBFF",
+        "editor.selectionHighlightBackground": "#E6F0FF",
         "editor.selectionHighlightBorder": "#00000000",
         "editor.lineHighlightBackground": "transparent",
         "editor.lineHighlightBorder": "#00000000",
@@ -102,8 +103,14 @@ export function MainEditor({ value, onChange, fileName, onSave }: Props) {
       "wbr",
     ]);
 
-    editor.onDidType((text) => {
-      if (text !== ">") return;
+    editor.onDidChangeModelContent((event) => {
+      if (isApplyingAutoCloseRef.current) return;
+      if (event.isFlush || event.isUndoing || event.isRedoing) return;
+
+      const change = event.changes.find(
+        (item) => item.text === ">" && item.rangeLength === 0,
+      );
+      if (!change) return;
 
       const model = editor.getModel();
       if (!model) return;
@@ -130,20 +137,25 @@ export function MainEditor({ value, onChange, fileName, onSave }: Props) {
       const right = line.slice(Math.max(position.column - 1, 0));
       if (right.startsWith(`</${tagName}`)) return;
 
-      editor.pushUndoStop();
-      editor.executeEdits("auto-close-tag", [
-        {
-          range: new monaco.Range(
-            position.lineNumber,
-            position.column,
-            position.lineNumber,
-            position.column,
-          ),
-          text: `</${tagName}>`,
-        },
-      ]);
-      editor.pushUndoStop();
-      editor.setPosition(position);
+      isApplyingAutoCloseRef.current = true;
+      try {
+        editor.pushUndoStop();
+        editor.executeEdits("auto-close-tag", [
+          {
+            range: new monaco.Range(
+              position.lineNumber,
+              position.column,
+              position.lineNumber,
+              position.column,
+            ),
+            text: `</${tagName}>`,
+          },
+        ]);
+        editor.pushUndoStop();
+        editor.setPosition(position);
+      } finally {
+        isApplyingAutoCloseRef.current = false;
+      }
     });
   };
 
@@ -176,7 +188,6 @@ export function MainEditor({ value, onChange, fileName, onSave }: Props) {
         },
         tabSize: 4,
         renderLineHighlight: "line",
-        autoClosingTags: "always",
         autoClosingBrackets: "always",
         autoClosingQuotes: "always",
         autoIndent: "full",
