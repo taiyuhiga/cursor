@@ -1,7 +1,7 @@
 "use client";
 
 import Editor, { BeforeMount, OnMount } from "@monaco-editor/react";
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 
 type Props = {
   value: string;
@@ -39,15 +39,35 @@ function getLanguage(fileName: string) {
 
 export function MainEditor({ value, onChange, fileName, onSave }: Props) {
   const editorRef = useRef<any>(null);
+  const onSaveRef = useRef(onSave);
+
+  useEffect(() => {
+    onSaveRef.current = onSave;
+  }, [onSave]);
 
   const handleBeforeMount: BeforeMount = (monaco) => {
     monaco.editor.defineTheme("cursor-light", {
       base: "vs",
       inherit: true,
-      rules: [],
+      rules: [
+        { token: "comment", foreground: "6A737D" },
+        { token: "keyword", foreground: "D73A49" },
+        { token: "string", foreground: "032F62" },
+        { token: "number", foreground: "005CC5" },
+        { token: "type", foreground: "6F42C1" },
+      ],
       colors: {
+        "editor.foreground": "#1F2328",
+        "editor.background": "#FFFFFF",
+        "editorLineNumber.foreground": "#8C959F",
+        "editorLineNumber.activeForeground": "#1F2328",
+        "editorCursor.foreground": "#1F2328",
+        "editor.selectionBackground": "#BBDFFF",
         "editor.lineHighlightBackground": "rgba(37, 99, 235, 0.12)",
         "editor.lineHighlightBorder": "#00000000",
+        "editorIndentGuide.background": "#E5E7EB",
+        "editorIndentGuide.activeBackground": "#C7D2FE",
+        "editorWhitespace.foreground": "#E5E7EB",
       },
     });
   };
@@ -57,7 +77,7 @@ export function MainEditor({ value, onChange, fileName, onSave }: Props) {
 
     // Cmd+S / Ctrl+S のバインディング
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
-      onSave?.();
+      onSaveRef.current?.();
     });
 
     const autoCloseLanguages = new Set(["html", "markdown"]);
@@ -135,12 +155,12 @@ export function MainEditor({ value, onChange, fileName, onSave }: Props) {
       onMount={handleEditorDidMount}
       options={{
         minimap: { enabled: false },
-        fontSize: 14,
-        lineHeight: 0,
+        fontSize: 13,
+        lineHeight: 20,
         letterSpacing: 0,
         padding: { top: 0, bottom: 0 },
         fontFamily:
-          '"SF Mono", Monaco, Menlo, Consolas, "Ubuntu Mono", "Liberation Mono", "DejaVu Sans Mono", "Courier New", monospace',
+          '"JetBrains Mono", "SF Mono", Monaco, Menlo, Consolas, "Ubuntu Mono", "Liberation Mono", "DejaVu Sans Mono", "Courier New", monospace',
         fontLigatures: false,
         fontWeight: "normal",
         automaticLayout: true,
@@ -154,6 +174,10 @@ export function MainEditor({ value, onChange, fileName, onSave }: Props) {
         autoClosingQuotes: "always",
         autoIndent: "full",
         formatOnType: true,
+        unicodeHighlight: {
+          ambiguousCharacters: false,
+          invisibleCharacters: false,
+        },
       }}
     />
   );

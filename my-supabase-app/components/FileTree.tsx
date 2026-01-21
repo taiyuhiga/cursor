@@ -540,18 +540,15 @@ export function FileTree({
       // Only handle if Cmd (Mac) or Ctrl (Windows) is pressed
       if (!(e.metaKey || e.ctrlKey)) return;
 
-      // Don't handle if focus is in an input or textarea
-      const activeElement = document.activeElement;
+      // Don't handle when focus is in the editor or other text inputs
+      const activeElement = document.activeElement as HTMLElement | null;
+      const isMonacoEditor = !!activeElement?.closest?.(".monaco-editor");
+      if (isMonacoEditor) return;
+
       const isTextInput =
         activeElement instanceof HTMLInputElement ||
         activeElement instanceof HTMLTextAreaElement;
-      if (isTextInput) {
-        const isMonacoEditor = !!activeElement.closest?.(".monaco-editor");
-        const selectionIsActiveFile = !!activeNodeId && selectedNodeIds.has(activeNodeId);
-        if (!isMonacoEditor || selectionIsActiveFile || selectedNodeIds.size === 0) {
-          return;
-        }
-      }
+      if (isTextInput) return;
 
       // Check if we have selected nodes
       const hasSelection = selectedNodeIds.size > 0;

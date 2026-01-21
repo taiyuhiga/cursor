@@ -148,6 +148,14 @@ export const FileIcons = {
     </svg>
   ),
 
+  // SQL
+  Sql: ({ className }: IconProps) => (
+    <svg viewBox="0 0 16 16" className={className}>
+      <rect x="1" y="1" width="14" height="14" rx="2" fill="#16a34a" />
+      <path d="M4.5 5.5h7M4.5 8h7M4.5 10.5h7" stroke="white" strokeWidth="1.2" strokeLinecap="round" />
+    </svg>
+  ),
+
   // Image files
   Image: ({ className }: IconProps) => (
     <svg viewBox="0 0 16 16" className={`${className} text-emerald-500`} fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
@@ -507,6 +515,10 @@ export const getFileIcon = (fileName: string): IconComponent => {
     case "py":
     case "pyw":
       return FileIcons.Python;
+    case "sql":
+    case "sqlite":
+    case "sqlite3":
+      return FileIcons.Sql;
     case "txt":
       return FileIcons.Text;
     case "png":
@@ -533,7 +545,7 @@ export const getFileIcon = (fileName: string): IconComponent => {
     case "aac":
       return FileIcons.Audio;
     default:
-      return hasExtension ? FileIcons.File : FileIcons.Plain;
+      return FileIcons.Plain;
   }
 };
 

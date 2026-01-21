@@ -14,9 +14,10 @@ type TabBarProps = {
   onClose: (id: string) => void;
   onShare?: () => void;
   onDownload?: () => void;
+  dirtyIds?: Set<string>;
 };
 
-export function TabBar({ tabs, activeId, onSelect, onClose, onShare, onDownload }: TabBarProps) {
+export function TabBar({ tabs, activeId, onSelect, onClose, onShare, onDownload, dirtyIds }: TabBarProps) {
   const [actionTooltip, setActionTooltip] = useState<"share" | "download" | null>(null);
   return (
     <div className="relative z-20 flex h-9 border-b border-zinc-200 bg-zinc-50 text-sm">
@@ -24,6 +25,7 @@ export function TabBar({ tabs, activeId, onSelect, onClose, onShare, onDownload 
       <div className="flex overflow-x-auto no-scrollbar">
         {tabs.map((tab) => {
           const isActive = tab.id === activeId;
+          const isDirty = dirtyIds?.has(tab.id);
           const FileIcon = getFileIcon(tab.title);
           return (
             <div
@@ -46,6 +48,12 @@ export function TabBar({ tabs, activeId, onSelect, onClose, onShare, onDownload 
               <FileIcon className="w-4 h-4 flex-shrink-0" />
 
               <span className="truncate flex-1 text-xs">{tab.title}</span>
+
+              {isDirty && (
+                <span className="text-blue-500 text-[40px] leading-none ml-0.5" aria-hidden="true">
+                  •
+                </span>
+              )}
 
               <span
                 className={`

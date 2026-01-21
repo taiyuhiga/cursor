@@ -194,6 +194,8 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const [activeActivity, setActiveActivity] = useState<Activity>("explorer");
   const [fileContent, setFileContent] = useState<string>("");
   const [tempFileContents, setTempFileContents] = useState<Record<string, string>>({});
+  const [draftContents, setDraftContents] = useState<Record<string, string>>({});
+  const [contentCache, setContentCache] = useState<Record<string, string>>({});
   const [isSaving, setIsSaving] = useState(false);
   // Start with loading=false if we have initial data (server-side or cached)
   const [isLoading, setIsLoading] = useState(() => {
@@ -309,12 +311,22 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const editableTempNodeIdsRef = useRef<Set<string>>(new Set());
   const pendingContentByRealIdRef = useRef<Map<string, string>>(new Map());
   const tempFileContentsRef = useRef<Record<string, string>>({});
+  const draftContentsRef = useRef<Record<string, string>>({});
+  const contentCacheRef = useRef<Record<string, string>>({});
   const activeNodeIdRef = useRef<string | null>(null);
   const supabase = createClient();
 
   useEffect(() => {
     tempFileContentsRef.current = tempFileContents;
   }, [tempFileContents]);
+
+  useEffect(() => {
+    draftContentsRef.current = draftContents;
+  }, [draftContents]);
+
+  useEffect(() => {
+    contentCacheRef.current = contentCache;
+  }, [contentCache]);
 
   useEffect(() => {
     activeNodeIdRef.current = activeNodeId;
@@ -3630,6 +3642,12 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         return next;
       });
     }
+    setContentCache((prev) => {
+      if (!Object.prototype.hasOwnProperty.call(prev, id)) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
     if (activeNodeId === id) {
       setOpenTabs((prev) => {
         const newTabs = prev.filter((x) => x !== id);
@@ -3662,30 +3680,57 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       setFileContent("");
       return;
     }
+    const draft = draftContentsRef.current[activeNodeId];
+    if (draft !== undefined) {
+      setFileContent(draft);
+      return;
+    }
     const pendingContent = pendingContentByRealIdRef.current.get(activeNodeId);
     if (pendingContent !== undefined) {
       setFileContent(pendingContent);
+      setDraftContents((prev) => {
+        if (prev[activeNodeId] === pendingContent) return prev;
+        return { ...prev, [activeNodeId]: pendingContent };
+      });
       return;
+    }
+    const cachedContent = contentCacheRef.current[activeNodeId];
+    if (cachedContent !== undefined) {
+      setFileContent(cachedContent);
+    } else {
+      setFileContent("");
     }
     const activeNode = nodeById.get(activeNodeId);
     if (activeNode && isMediaFile(activeNode.name)) {
       setFileContent("");
       return;
     }
+    const currentId = activeNodeId;
+    let cancelled = false;
     const fetchContent = async () => {
       const { data, error } = await supabase
         .from("file_contents")
         .select("text")
         .eq("node_id", activeNodeId)
         .maybeSingle();
+      if (cancelled || activeNodeIdRef.current !== currentId) return;
+      if (draftContentsRef.current[currentId] !== undefined) return;
       if (error) {
         console.error("Error fetching file content:", error?.message ?? error);
         setFileContent("");
       } else {
-        setFileContent(data?.text || "");
+        const nextContent = data?.text || "";
+        setFileContent(nextContent);
+        setContentCache((prev) => {
+          if (prev[currentId] === nextContent) return prev;
+          return { ...prev, [currentId]: nextContent };
+        });
       }
     };
     fetchContent();
+    return () => {
+      cancelled = true;
+    };
   }, [activeNodeId, nodeById, supabase]);
 
   // 保存
@@ -3697,20 +3742,71 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       ? tempIdRealIdMapRef.current.get(activeNodeId)
       : activeNodeId;
     if (!resolvedId) return;
+    const prevDraftActive = draftContentsRef.current[activeNodeId];
+    const prevDraftResolved = draftContentsRef.current[resolvedId];
+    if (prevDraftActive !== undefined || prevDraftResolved !== undefined) {
+      setDraftContents((prev) => {
+        const next = { ...prev };
+        delete next[activeNodeId];
+        delete next[resolvedId];
+        return next;
+      });
+    }
     setIsSaving(true);
     const { error } = await supabase
       .from("file_contents")
       .upsert({ node_id: resolvedId, text: fileContent }, { onConflict: "node_id" });
     if (error) {
       console.error("Error saving content:", error?.message ?? error);
+      if (prevDraftActive !== undefined || prevDraftResolved !== undefined) {
+        setDraftContents((prev) => ({
+          ...prev,
+          ...(prevDraftActive !== undefined ? { [activeNodeId]: prevDraftActive } : {}),
+          ...(prevDraftResolved !== undefined ? { [resolvedId]: prevDraftResolved } : {}),
+        }));
+      }
     } else {
       pendingContentByRealIdRef.current.delete(resolvedId);
+      setDraftContents((prev) => {
+        const hasResolved = Object.prototype.hasOwnProperty.call(prev, resolvedId);
+        const hasTemp = activeNodeId.startsWith("temp-") &&
+          Object.prototype.hasOwnProperty.call(prev, activeNodeId);
+        if (!hasResolved && !hasTemp) return prev;
+        const next = { ...prev };
+        delete next[resolvedId];
+        if (hasTemp) delete next[activeNodeId];
+        return next;
+      });
+      setContentCache((prev) => {
+        if (prev[resolvedId] === fileContent) return prev;
+        return { ...prev, [resolvedId]: fileContent };
+      });
     }
     setIsSaving(false);
     if (activeActivity === "git") {
       void refreshSourceControl();
     }
   }, [activeActivity, activeNodeId, fileContent, refreshSourceControl, supabase]);
+
+  useEffect(() => {
+    const handleGlobalSave = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey)) return;
+      if (e.key.toLowerCase() !== "s") return;
+
+      const activeElement = document.activeElement as HTMLElement | null;
+      const isTextInput =
+        activeElement instanceof HTMLInputElement ||
+        activeElement instanceof HTMLTextAreaElement ||
+        activeElement?.isContentEditable;
+      if (isTextInput) return;
+
+      e.preventDefault();
+      saveContent();
+    };
+
+    document.addEventListener("keydown", handleGlobalSave);
+    return () => document.removeEventListener("keydown", handleGlobalSave);
+  }, [saveContent]);
 
   // AIアクション
   const handleAiAction = (action: string) => {
@@ -3755,6 +3851,14 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       return;
     }
     setFileContent(next);
+    setDraftContents((prev) => {
+      if (prev[activeNodeId] === next) return prev;
+      return { ...prev, [activeNodeId]: next };
+    });
+    setContentCache((prev) => {
+      if (prev[activeNodeId] === next) return prev;
+      return { ...prev, [activeNodeId]: next };
+    });
   }, [activeNodeId]);
 
   const handleAppend = (text: string) => {
@@ -4614,6 +4718,11 @@ ${diffs}`;
       (editableTempNodeIdsRef.current.has(activeNode.id) ||
         (activeTempMappedId ? pendingContentByRealIdRef.current.has(activeTempMappedId) : false))
     : false;
+  const dirtyTabIds = useMemo(() => {
+    const ids = new Set(Object.keys(draftContents));
+    Object.keys(tempFileContents).forEach((id) => ids.add(id));
+    return ids;
+  }, [draftContents, tempFileContents]);
 
   // ワークスペース切り替え
   const handleSwitchWorkspace = async (workspaceId: string) => {
@@ -4996,6 +5105,7 @@ ${diffs}`;
               }
             }}
             onClose={handleCloseTab}
+            dirtyIds={dirtyTabIds}
             onDownload={() => {
               if (!activeNodeId) return;
 
