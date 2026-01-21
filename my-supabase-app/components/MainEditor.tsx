@@ -162,7 +162,7 @@ export function MainEditor({ value, onChange, fileName, onSave }: Props) {
         autoIndent: "full",
         formatOnType: true,
         selectionHighlight: false,
-        occurrencesHighlight: "singleFile",
+        occurrencesHighlight: "off",
         unicodeHighlight: {
           ambiguousCharacters: false,
           invisibleCharacters: false,
