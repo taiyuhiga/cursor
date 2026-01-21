@@ -49,11 +49,12 @@ export function TabBar({ tabs, activeId, onSelect, onClose, onShare, onDownload,
 
               <span className="truncate flex-1 text-xs">{tab.title}</span>
 
-              {isDirty && (
-                <span className="text-blue-500 text-[40px] leading-none ml-0.5" aria-hidden="true">
-                  •
-                </span>
-              )}
+              <span
+                className={`text-blue-500 text-[40px] leading-none ml-0.5 ${isDirty ? "opacity-100" : "opacity-0"}`}
+                aria-hidden="true"
+              >
+                •
+              </span>
 
               <span
                 className={`
