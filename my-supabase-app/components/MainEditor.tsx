@@ -40,6 +40,7 @@ function getLanguage(fileName: string) {
 export function MainEditor({ value, onChange, fileName, onSave }: Props) {
   const editorRef = useRef<any>(null);
   const onSaveRef = useRef(onSave);
+  const isMarkdown = fileName.toLowerCase().endsWith(".md");
 
   useEffect(() => {
     onSaveRef.current = onSave;
@@ -62,7 +63,10 @@ export function MainEditor({ value, onChange, fileName, onSave }: Props) {
         "editorLineNumber.foreground": "#8C959F",
         "editorLineNumber.activeForeground": "#1F2328",
         "editorCursor.foreground": "#1F2328",
-        "editor.selectionBackground": "#BBDFFF",
+        "editor.selectionBackground": "transparent",
+        "editor.inactiveSelectionBackground": "transparent",
+        "editor.selectionHighlightBackground": "transparent",
+        "editor.selectionHighlightBorder": "#00000000",
         "editor.lineHighlightBackground": "transparent",
         "editor.lineHighlightBorder": "#00000000",
         "editorIndentGuide.background": "#E5E7EB",
@@ -165,8 +169,11 @@ export function MainEditor({ value, onChange, fileName, onSave }: Props) {
         fontWeight: "normal",
         automaticLayout: true,
         scrollBeyondLastLine: true,
-        wordWrap: "on",
-        scrollbar: { horizontal: "hidden", vertical: "auto" },
+        wordWrap: isMarkdown ? "on" : "off",
+        scrollbar: {
+          horizontal: isMarkdown ? "hidden" : "auto",
+          vertical: "auto",
+        },
         tabSize: 4,
         renderLineHighlight: "line",
         autoClosingTags: "always",
