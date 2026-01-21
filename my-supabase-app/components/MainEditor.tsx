@@ -63,7 +63,7 @@ export function MainEditor({ value, onChange, fileName, onSave }: Props) {
         "editorLineNumber.activeForeground": "#1F2328",
         "editorCursor.foreground": "#1F2328",
         "editor.selectionBackground": "#BBDFFF",
-        "editor.lineHighlightBackground": "rgba(37, 99, 235, 0.12)",
+        "editor.lineHighlightBackground": "transparent",
         "editor.lineHighlightBorder": "#00000000",
         "editorIndentGuide.background": "#E5E7EB",
         "editorIndentGuide.activeBackground": "#C7D2FE",
