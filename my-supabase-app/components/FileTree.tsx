@@ -67,6 +67,7 @@ type FileTreeProps = {
   onRenameWorkspaceById?: (workspaceId: string, newName: string) => void;
   onDeleteWorkspaceById?: (workspaceId: string, workspaceName: string) => void;
   onShareWorkspace?: (workspaceId: string) => void;
+  onWorkspacePopoverOpenChange?: (isOpen: boolean) => void;
   // 共有セクション関連
   sharedNodes?: SharedNode[];
   onSelectSharedNode?: (nodeId: string, options?: { preview?: boolean }) => void;
@@ -172,6 +173,7 @@ export function FileTree({
   onRenameWorkspaceById,
   onDeleteWorkspaceById,
   onShareWorkspace,
+  onWorkspacePopoverOpenChange,
   sharedNodes,
   onSelectSharedNode,
 }: FileTreeProps) {
@@ -232,6 +234,17 @@ export function FileTree({
   const scrollRafRef = useRef<number | null>(null);
   // 一度スクロールしたrevealNodeIdを追跡（同じIDで再スクロールしない）
   const lastRevealedNodeIdRef = useRef<string | null>(null);
+
+  const prevWorkspacePopoverOpenRef = useRef(isWorkspacePopoverOpen);
+  const setWorkspacePopoverOpen = useCallback((next: boolean | ((prev: boolean) => boolean)) => {
+    setIsWorkspacePopoverOpen((prev) => (typeof next === "function" ? next(prev) : next));
+  }, []);
+
+  useEffect(() => {
+    if (prevWorkspacePopoverOpenRef.current === isWorkspacePopoverOpen) return;
+    prevWorkspacePopoverOpenRef.current = isWorkspacePopoverOpen;
+    onWorkspacePopoverOpenChange?.(isWorkspacePopoverOpen);
+  }, [isWorkspacePopoverOpen, onWorkspacePopoverOpenChange]);
 
   const nodeMap = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
   const nameCollator = useMemo(
@@ -545,12 +558,12 @@ export function FileTree({
       if (workspaceTriggerRef.current && workspaceTriggerRef.current.contains(target)) {
         return;
       }
-      setIsWorkspacePopoverOpen(false);
+      setWorkspacePopoverOpen(false);
       setWsContextMenu(null);
     };
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, [isWorkspacePopoverOpen]);
+  }, [isWorkspacePopoverOpen, setWorkspacePopoverOpen]);
 
   // Keyboard shortcuts for cut/copy/paste
   useEffect(() => {
@@ -1394,7 +1407,7 @@ export function FileTree({
               className="w-8 h-8 rounded bg-blue-100 flex items-center justify-center flex-shrink-0 mr-1.5 cursor-pointer hover:bg-blue-200 transition-colors"
               onClick={(e) => {
                 e.stopPropagation();
-                setIsWorkspacePopoverOpen(!isWorkspacePopoverOpen);
+                setWorkspacePopoverOpen((prev) => !prev);
                 if (isWorkspacePopoverOpen) {
                   setWsContextMenu(null);
                 }
@@ -1420,7 +1433,7 @@ export function FileTree({
                 className="flex items-center min-w-0 flex-1 cursor-pointer"
                 onClick={(e) => {
                   e.stopPropagation();
-                  setIsWorkspacePopoverOpen(!isWorkspacePopoverOpen);
+                  setWorkspacePopoverOpen((prev) => !prev);
                   if (isWorkspacePopoverOpen) {
                     setWsContextMenu(null);
                   }
@@ -1447,7 +1460,7 @@ export function FileTree({
                 style={{ zIndex: 9998 }}
                 onClick={(e) => {
                   e.stopPropagation();
-                  setIsWorkspacePopoverOpen(false);
+                  setWorkspacePopoverOpen(false);
                   setWsContextMenu(null);
                 }}
                 onMouseMove={(e) => e.stopPropagation()}
@@ -1522,7 +1535,7 @@ export function FileTree({
                             className="flex items-center gap-2 flex-1 min-w-0 text-left"
                             onClick={() => {
                               onSelectWorkspace?.(ws.id);
-                              setIsWorkspacePopoverOpen(false);
+                              setWorkspacePopoverOpen(false);
                               setWsContextMenu(null);
                             }}
                             onContextMenu={(e) => {
@@ -1582,7 +1595,7 @@ export function FileTree({
                   className="w-full px-3 py-2 text-left hover:bg-zinc-50 flex items-center gap-2 text-blue-600"
                   onClick={() => {
                     onCreateWorkspace?.();
-                    setIsWorkspacePopoverOpen(false);
+                    setWorkspacePopoverOpen(false);
                     setWsContextMenu(null);
                   }}
                 >

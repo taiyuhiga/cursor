@@ -106,6 +106,7 @@ async function resolveFromList(
 
   const withTimestamps = listData
     .map((entry: StorageEntry) => {
+      if (entry?.name === "uploads") return null;
       const time = getEntryTimestamp(entry);
       return time ? { entry, time } : null;
     })

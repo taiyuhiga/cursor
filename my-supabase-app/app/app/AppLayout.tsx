@@ -233,6 +233,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   >({});
   const [scIssues, setScIssues] = useState<ReviewIssue[] | null>(null);
   const [isFindingScIssues, setIsFindingScIssues] = useState(false);
+  const [isWorkspacePopoverOpen, setIsWorkspacePopoverOpen] = useState(false);
   const [showCreateWorkspace, setShowCreateWorkspace] = useState(false);
   const [currentWorkspaces, setCurrentWorkspaces] = useState(workspaces);
   const [activeWorkspace, setActiveWorkspace] = useState(currentWorkspace);
@@ -4724,7 +4725,7 @@ ${diffs}`;
     setIsHoveringLeftResize(next);
   }, []);
 
-  const isLayoutInteractionBlocked = showCreateWorkspace;
+  const isLayoutInteractionBlocked = showCreateWorkspace || isWorkspacePopoverOpen;
 
   const handleLayoutMouseMove = useCallback((event: React.MouseEvent) => {
     if (isLayoutInteractionBlocked) return;
@@ -5073,6 +5074,7 @@ ${diffs}`;
             onRenameWorkspaceById={handleRenameWorkspaceById}
             onDeleteWorkspaceById={handleDeleteWorkspaceById}
             onShareWorkspace={handleShareWorkspace}
+            onWorkspacePopoverOpenChange={setIsWorkspacePopoverOpen}
           />
         );
       case "git":
@@ -5166,8 +5168,13 @@ ${diffs}`;
             }`}
           />
           <div
-            className="absolute bottom-0 top-12 -left-2 -right-2 cursor-col-resize z-20"
-            onMouseDown={() => setIsResizingLeft(true)}
+            className={`absolute bottom-0 top-12 -left-2 -right-2 z-20 ${
+              isLayoutInteractionBlocked ? "pointer-events-none cursor-default" : "cursor-col-resize"
+            }`}
+            onMouseDown={() => {
+              if (isLayoutInteractionBlocked) return;
+              setIsResizingLeft(true);
+            }}
           >
           </div>
         </div>
@@ -5472,8 +5479,13 @@ ${diffs}`;
       {/* Right resize handle */}
       <div className="relative w-0 flex-shrink-0">
         <div
-          className="absolute inset-y-0 -left-2 -right-2 cursor-col-resize group z-20"
-          onMouseDown={() => setIsResizingRight(true)}
+          className={`absolute inset-y-0 -left-2 -right-2 group z-20 ${
+            isLayoutInteractionBlocked ? "pointer-events-none cursor-default" : "cursor-col-resize"
+          }`}
+          onMouseDown={() => {
+            if (isLayoutInteractionBlocked) return;
+            setIsResizingRight(true);
+          }}
         >
           <div className="absolute inset-y-0 left-1/2 w-1 -translate-x-1/2 bg-blue-500 opacity-0 transition-opacity group-hover:opacity-100" />
         </div>
