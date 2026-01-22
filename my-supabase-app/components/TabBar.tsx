@@ -101,16 +101,16 @@ export function TabBar({ tabs, activeId, onSelect, onClose, onShare, onDownload,
       <div className="flex-1" />
 
       {/* 右側のアクションボタン */}
-      <div className="flex items-center gap-1 px-2 border-l border-zinc-200">
+      <div className="flex items-center gap-1 px-2 border-l border-zinc-200 flex-shrink-0">
         {/* 共有ボタン */}
         <button
           onClick={() => {
             onShare?.();
           }}
-          className="flex flex-col items-center justify-center px-2 py-0.5 rounded hover:bg-zinc-200 text-zinc-500 hover:text-zinc-700 transition-colors"
+          className="flex items-center justify-center px-2 py-0.5 rounded hover:bg-zinc-200 text-zinc-500 hover:text-zinc-700 transition-colors"
           aria-label="共有"
         >
-          <span className="text-[14px] mt-0.5">共有</span>
+          <span className="text-[14px] whitespace-nowrap">共有</span>
         </button>
 
         {/* ダウンロードボタン */}

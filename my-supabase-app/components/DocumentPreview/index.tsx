@@ -1,16 +1,74 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import dynamic from "next/dynamic";
 import {
   getDocumentType,
   isDocumentFile,
   getDocumentExtension,
   type DocumentType,
 } from "./utils/documentTypes";
-import { PDFViewer } from "./PDFViewer";
-import { ExcelViewer } from "./ExcelViewer";
-import { WordViewer } from "./WordViewer";
-import { PowerPointViewer } from "./PowerPointViewer";
+
+// Dynamic imports with SSR disabled for browser-only libraries
+const PDFViewer = dynamic(() => import("./PDFViewer").then((mod) => mod.PDFViewer), {
+  ssr: false,
+  loading: () => (
+    <div className="h-full flex items-center justify-center text-zinc-400">
+      <div className="flex items-center gap-2">
+        <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
+          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+        </svg>
+        <span>Loading PDF viewer...</span>
+      </div>
+    </div>
+  ),
+});
+
+const ExcelViewer = dynamic(() => import("./ExcelViewer").then((mod) => mod.ExcelViewer), {
+  ssr: false,
+  loading: () => (
+    <div className="h-full flex items-center justify-center text-zinc-400">
+      <div className="flex items-center gap-2">
+        <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
+          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+        </svg>
+        <span>Loading spreadsheet...</span>
+      </div>
+    </div>
+  ),
+});
+
+const WordViewer = dynamic(() => import("./WordViewer").then((mod) => mod.WordViewer), {
+  ssr: false,
+  loading: () => (
+    <div className="h-full flex items-center justify-center text-zinc-400">
+      <div className="flex items-center gap-2">
+        <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
+          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+        </svg>
+        <span>Loading document...</span>
+      </div>
+    </div>
+  ),
+});
+
+const PowerPointViewer = dynamic(() => import("./PowerPointViewer").then((mod) => mod.PowerPointViewer), {
+  ssr: false,
+  loading: () => (
+    <div className="h-full flex items-center justify-center text-zinc-400">
+      <div className="flex items-center gap-2">
+        <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
+          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+        </svg>
+        <span>Loading presentation...</span>
+      </div>
+    </div>
+  ),
+});
 
 // Re-export utilities
 export { isDocumentFile, getDocumentType } from "./utils/documentTypes";
@@ -34,6 +92,22 @@ function pruneCache() {
   }
 }
 
+// Convert base64 or data URL to ArrayBuffer
+function dataUrlToArrayBuffer(dataUrl: string): ArrayBuffer {
+  // Handle data URL format: data:mime/type;base64,xxxxx
+  const base64Match = dataUrl.match(/^data:[^;]+;base64,(.+)$/);
+  if (base64Match) {
+    const base64 = base64Match[1];
+    const binaryString = atob(base64);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    return bytes.buffer;
+  }
+  throw new Error("Invalid data URL format");
+}
+
 async function fetchDocumentData(nodeId: string): Promise<ArrayBuffer> {
   // Check cache first
   const cached = DOCUMENT_DATA_CACHE.get(nodeId);
@@ -45,18 +119,58 @@ async function fetchDocumentData(nodeId: string): Promise<ArrayBuffer> {
 
   // Fetch from API
   const promise = (async () => {
-    const res = await fetch(`/api/storage/download?nodeId=${nodeId}`);
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      throw new Error(data.error || "Failed to fetch document");
+    let lastError = "Failed to fetch document";
+
+    // First try storage download
+    try {
+      const storageRes = await fetch(`/api/storage/download?nodeId=${nodeId}`);
+
+      if (storageRes.ok) {
+        const contentType = storageRes.headers.get("content-type") || "";
+        // Make sure we got binary data, not an error JSON
+        if (!contentType.includes("application/json")) {
+          const arrayBuffer = await storageRes.arrayBuffer();
+          if (arrayBuffer.byteLength > 0) {
+            DOCUMENT_DATA_CACHE.set(nodeId, arrayBuffer);
+            pruneCache();
+            return arrayBuffer;
+          }
+        }
+      }
+
+      // Try to get error message from response
+      const errorData = await storageRes.json().catch(() => ({}));
+      lastError = errorData.error || "Storage download failed";
+    } catch (e) {
+      lastError = e instanceof Error ? e.message : "Storage download failed";
     }
-    const arrayBuffer = await res.arrayBuffer();
 
-    // Cache the result
-    DOCUMENT_DATA_CACHE.set(nodeId, arrayBuffer);
-    pruneCache();
+    // If storage fails, try fetching from file_contents directly (for inline data URLs)
+    try {
+      const filesRes = await fetch("/api/files", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "read_file_content", nodeId }),
+      });
 
-    return arrayBuffer;
+      if (filesRes.ok) {
+        const data = await filesRes.json();
+        if (data.content && typeof data.content === "string") {
+          // Check if it's a data URL (base64 encoded)
+          if (data.content.startsWith("data:")) {
+            const arrayBuffer = dataUrlToArrayBuffer(data.content);
+            DOCUMENT_DATA_CACHE.set(nodeId, arrayBuffer);
+            pruneCache();
+            return arrayBuffer;
+          }
+        }
+      }
+    } catch (e) {
+      // Fallback fetch also failed
+    }
+
+    // If both methods fail, throw error
+    throw new Error(lastError);
   })();
 
   DOCUMENT_DATA_INFLIGHT.set(nodeId, promise);
