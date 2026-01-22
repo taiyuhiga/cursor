@@ -5234,12 +5234,17 @@ ${diffs}`;
             activeId={activeNodeId}
             onSelect={(id) => {
               const node = nodeById.get(id);
+              const hasNode = !!node;
               if (node && !id.startsWith("temp-") && isMediaFile(node.name)) {
                 prefetchMediaUrl(id);
               }
               setActiveNodeId(id);
-              if (nodes.some((n) => n.id === id)) {
+              if (hasNode) {
                 setSelectedNodeIds(new Set([id]));
+                setRevealNodeId(id);
+                if (activeActivity !== "explorer") {
+                  setActiveActivity("explorer");
+                }
               }
             }}
             onClose={handleCloseTab}

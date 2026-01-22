@@ -9,17 +9,74 @@ type NodeInfo = {
   project_id: string;
 };
 
+type StorageEntry = {
+  name?: string;
+  created_at?: string | null;
+  updated_at?: string | null;
+  last_accessed_at?: string | null;
+  metadata?: Record<string, unknown> | null;
+};
+
+function extractStoragePath(text: string) {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  const match = trimmed.match(/^storage:(\S+)/);
+  return match ? match[1] : null;
+}
+
 function getCandidatePaths(node: NodeInfo, text: string) {
   const candidates: string[] = [];
 
-  if (text.startsWith("storage:")) {
-    candidates.push(text.replace("storage:", ""));
+  const extractedPath = extractStoragePath(text);
+  if (extractedPath) {
+    candidates.push(extractedPath);
   }
 
   candidates.push(buildStoragePath(node.project_id, node.id));
   candidates.push(buildLegacyStoragePath(node.project_id, node.id, node.name));
 
   return Array.from(new Set(candidates));
+}
+
+function getEntryTimestamp(entry: StorageEntry) {
+  const raw =
+    entry.updated_at ||
+    entry.created_at ||
+    entry.last_accessed_at ||
+    entry.metadata?.lastModified ||
+    entry.metadata?.last_modified ||
+    null;
+  const time = typeof raw === "string" || typeof raw === "number" ? Date.parse(String(raw)) : NaN;
+  return Number.isNaN(time) ? null : time;
+}
+
+async function resolveFromUploads(supabase: any, uploadsPrefix: string) {
+  const { data: listData, error: listError } = await supabase.storage
+    .from("files")
+    .list(uploadsPrefix);
+
+  if (listError || !listData || listData.length === 0) {
+    return null;
+  }
+
+  if (listData.length === 1 && listData[0]?.name) {
+    return `${uploadsPrefix}/${listData[0].name}`;
+  }
+
+  const withTimestamps = listData
+    .map((entry: StorageEntry) => {
+      if (entry?.name === "uploads") return null;
+      const time = getEntryTimestamp(entry);
+      return time ? { entry, time } : null;
+    })
+    .filter(Boolean) as Array<{ entry: StorageEntry; time: number }>;
+
+  if (withTimestamps.length === 0) {
+    return null;
+  }
+
+  withTimestamps.sort((a, b) => b.time - a.time);
+  return `${uploadsPrefix}/${withTimestamps[0].entry.name}`;
 }
 
 async function resolveFromList(
@@ -41,26 +98,24 @@ async function resolveFromList(
   }
 
   if (listData.length === 1) {
-    return `${prefix}/${listData[0].name}`;
+    const entryName = listData[0]?.name;
+    if (entryName && entryName !== "uploads") {
+      return `${prefix}/${entryName}`;
+    }
   }
 
-  const getTimestamp = (entry: any) =>
-    entry?.updated_at ||
-    entry?.created_at ||
-    entry?.last_accessed_at ||
-    entry?.metadata?.lastModified ||
-    entry?.metadata?.last_modified ||
-    null;
-
   const withTimestamps = listData
-    .map((entry: any) => {
-      const raw = getTimestamp(entry);
-      const time = typeof raw === "string" || typeof raw === "number" ? Date.parse(String(raw)) : NaN;
-      return Number.isNaN(time) ? null : { entry, time };
+    .map((entry: StorageEntry) => {
+      const time = getEntryTimestamp(entry);
+      return time ? { entry, time } : null;
     })
-    .filter(Boolean) as Array<{ entry: any; time: number }>;
+    .filter(Boolean) as Array<{ entry: StorageEntry; time: number }>;
 
   if (withTimestamps.length === 0) {
+    const uploadPath = await resolveFromUploads(supabase, `${prefix}/uploads`);
+    if (uploadPath) {
+      return uploadPath;
+    }
     console.warn("Storage list has multiple entries but no timestamps available.", {
       prefix,
       candidates: listData.map((entry: any) => entry?.name).filter(Boolean),
