@@ -204,6 +204,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
   const contentEditableRef = useRef<HTMLDivElement>(null);
   const isInputFromUserRef = useRef(false); // Track if change came from user input
   const lastSegmentsRef = useRef<InputSegment[]>([]); // Track last rendered segments
+  const lastInsertedIdRef = useRef<string | null>(null); // Track last inserted segment ID for cursor positioning
 
   const ZERO_WIDTH_SPACE = "\u200B";
   const ZERO_WIDTH_SPACE_REGEX = /\u200B/g;
@@ -1445,9 +1446,27 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
     const newHTML = renderSegmentsToHTML(inputSegments);
     if (currentHTML !== newHTML) {
       el.innerHTML = newHTML;
-      // Move cursor to end after updating
-      const range = document.createRange();
+
       const sel = window.getSelection();
+      const range = document.createRange();
+
+      // If we have a last inserted ID, position cursor after that element
+      if (lastInsertedIdRef.current) {
+        const insertedEl = el.querySelector(`[data-file-id="${lastInsertedIdRef.current}"], [data-code-id="${lastInsertedIdRef.current}"]`);
+        if (insertedEl) {
+          // Position cursor right after the inserted element
+          range.setStartAfter(insertedEl);
+          range.collapse(true);
+          sel?.removeAllRanges();
+          sel?.addRange(range);
+          lastInsertedIdRef.current = null;
+          lastSegmentsRef.current = inputSegments;
+          return;
+        }
+        lastInsertedIdRef.current = null;
+      }
+
+      // Default: Move cursor to end after updating
       range.selectNodeContents(el);
       range.collapse(false);
       sel?.removeAllRanges();
@@ -1802,13 +1821,129 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
     onSubmit(text, opts);
   };
 
+  // Helper: Get cursor position info for inserting segments at cursor
+  const getCursorInsertPosition = (): { segmentIndex: number; textOffset: number } | null => {
+    const el = contentEditableRef.current;
+    if (!el) return null;
+
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) return null;
+
+    const range = selection.getRangeAt(0);
+    let container = range.startContainer;
+    const offset = range.startOffset;
+
+    // If cursor is directly in contenteditable (between child nodes)
+    if (container === el) {
+      // offset is the index of the child node
+      let segmentIndex = 0;
+      for (let i = 0; i < offset; i++) {
+        const child = el.childNodes[i];
+        if (child.nodeType === Node.TEXT_NODE) {
+          const text = (child.textContent || "").replace(ZERO_WIDTH_SPACE_REGEX, "");
+          if (text) segmentIndex++;
+        } else if (child.nodeType === Node.ELEMENT_NODE) {
+          segmentIndex++;
+        }
+      }
+      return { segmentIndex, textOffset: 0 };
+    }
+
+    // Find which child of contenteditable contains the cursor
+    let targetNode: Node | null = container;
+    while (targetNode && targetNode.parentNode !== el) {
+      targetNode = targetNode.parentNode;
+    }
+
+    if (!targetNode) return null;
+
+    // Count segments up to this node
+    let segmentIndex = 0;
+    let textOffset = 0;
+    for (let i = 0; i < el.childNodes.length; i++) {
+      const child = el.childNodes[i];
+      if (child === targetNode) {
+        // Found the node containing cursor
+        if (child.nodeType === Node.TEXT_NODE) {
+          // Cursor is in a text segment - calculate offset excluding zero-width spaces
+          const textBefore = (child.textContent || "").substring(0, offset);
+          textOffset = textBefore.replace(ZERO_WIDTH_SPACE_REGEX, "").length;
+        }
+        break;
+      }
+      // Count this as a segment
+      if (child.nodeType === Node.TEXT_NODE) {
+        const text = (child.textContent || "").replace(ZERO_WIDTH_SPACE_REGEX, "");
+        if (text) segmentIndex++;
+      } else if (child.nodeType === Node.ELEMENT_NODE) {
+        segmentIndex++;
+      }
+    }
+
+    return { segmentIndex, textOffset };
+  };
+
+  // Helper: Insert a segment at cursor position
+  const insertSegmentAtCursor = (newSegment: InputSegment) => {
+    const cursorPos = getCursorInsertPosition();
+
+    // Store the ID for cursor positioning after DOM update
+    if (newSegment.type === 'file' || newSegment.type === 'code') {
+      lastInsertedIdRef.current = newSegment.id;
+    }
+
+    setInputSegments(prev => {
+      if (!cursorPos || prev.length === 0) {
+        // No cursor or empty - append at end
+        return [...prev, newSegment];
+      }
+
+      const { segmentIndex, textOffset } = cursorPos;
+      const result: InputSegment[] = [];
+      let currentIndex = 0;
+
+      for (let i = 0; i < prev.length; i++) {
+        const seg = prev[i];
+
+        if (currentIndex === segmentIndex && seg.type === 'text' && textOffset > 0 && textOffset < seg.content.length) {
+          // Split text segment at cursor position
+          const before = seg.content.substring(0, textOffset);
+          const after = seg.content.substring(textOffset);
+          if (before) result.push({ type: 'text', content: before });
+          result.push(newSegment);
+          if (after) result.push({ type: 'text', content: after });
+        } else if (currentIndex === segmentIndex) {
+          // Insert before this segment (or at end of text if textOffset matches length)
+          if (seg.type === 'text' && textOffset >= seg.content.length) {
+            result.push(seg);
+            result.push(newSegment);
+          } else {
+            result.push(newSegment);
+            result.push(seg);
+          }
+        } else {
+          result.push(seg);
+        }
+
+        if (seg.type === 'text' || seg.type === 'file' || seg.type === 'code') {
+          currentIndex++;
+        }
+      }
+
+      // If we didn't insert yet (cursor after all segments), append
+      if (currentIndex <= segmentIndex) {
+        result.push(newSegment);
+      }
+
+      return result;
+    });
+  };
+
   // Add code context to input (called from MainEditor via ref)
   const addCodeContext = (fileName: string, lineStart: number, lineEnd: number, content: string) => {
     const id = `code-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-    setInputSegments(prev => {
-      // Allow duplicates - each selection gets a unique ID
-      return [...prev, { type: 'code', id, fileName, lineStart, lineEnd, content }];
-    });
+    const newSegment: InputSegment = { type: 'code', id, fileName, lineStart, lineEnd, content };
+    insertSegmentAtCursor(newSegment);
     // Focus the contenteditable
     setTimeout(() => contentEditableRef.current?.focus(), 0);
   };
@@ -1825,14 +1960,12 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
     e.preventDefault();
     setIsDragging(false);
   };
-  // Insert file segment at end of input (or could be enhanced for cursor position)
+  // Insert file segment at cursor position
   const insertFileSegment = (file: { id: string; name: string; type: 'file' | 'folder' }) => {
     // Generate unique ID for each insertion to allow duplicates
     const uniqueId = `file-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-    setInputSegments(prev => {
-      // Add file segment at end (allow duplicates)
-      return [...prev, { type: 'file', id: uniqueId, name: file.name, fileType: file.type }];
-    });
+    const newSegment: InputSegment = { type: 'file', id: uniqueId, name: file.name, fileType: file.type };
+    insertSegmentAtCursor(newSegment);
     // Focus the contenteditable
     setTimeout(() => contentEditableRef.current?.focus(), 0);
   };
