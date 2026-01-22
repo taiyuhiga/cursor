@@ -43,6 +43,7 @@ type FileTreeProps = {
   onDownload?: (nodeIds: string[]) => void;
   onNewNote?: () => void;
   onShare?: () => void;
+  onShareNode?: (nodeId: string) => void;
   onDropFiles?: (dataTransfer: DataTransfer, targetFolderId: string | null) => void;
   onMoveNodes?: (nodeIds: string[], newParentId: string | null) => void;
   onCopyNodes?: (nodeIds: string[], newParentId: string | null) => Promise<string[]> | void;
@@ -149,6 +150,7 @@ export function FileTree({
   onDownload,
   onNewNote,
   onShare,
+  onShareNode,
   onDropFiles,
   onMoveNodes,
   onCopyNodes,
@@ -758,7 +760,11 @@ export function FileTree({
         onNewNote?.();
         break;
       case "share":
-        onShare?.();
+        if (targetId) {
+          onShareNode?.(targetId);
+        } else if (activeWorkspaceId) {
+          onShareWorkspace?.(activeWorkspaceId);
+        }
         break;
       case "upload_files":
         onUploadFiles?.(parentId);
@@ -1093,13 +1099,18 @@ export function FileTree({
 
   const handleDropdownAction = (action: string) => {
     const parentId = getSelectedParentId();
+    const selectedId = selectedNodeIds.size === 1 ? Array.from(selectedNodeIds)[0] : null;
 
     switch (action) {
       case "new_note":
         onNewNote?.();
         break;
       case "share":
-        onShare?.();
+        if (selectedId) {
+          onShareNode?.(selectedId);
+        } else if (activeWorkspaceId) {
+          onShareWorkspace?.(activeWorkspaceId);
+        }
         break;
       case "upload_files":
         onUploadFiles?.(parentId);

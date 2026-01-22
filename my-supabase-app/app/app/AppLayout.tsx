@@ -201,6 +201,8 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const [isSaving, setIsSaving] = useState(false);
   const [isShareOpen, setIsShareOpen] = useState(false);
   const [isSharePublic, setIsSharePublic] = useState(false);
+  const [shareTargetNodeId, setShareTargetNodeId] = useState<string | null>(null);
+  const [shareWorkspaceId, setShareWorkspaceId] = useState<string | null>(null);
   // Start with loading=false if we have initial data (server-side or cached)
   const [isLoading, setIsLoading] = useState(() => {
     if (initialNodes.length > 0) return false;
@@ -4764,7 +4766,15 @@ ${diffs}`;
   const activeNode = activeNodeId && !activeNodeId.startsWith("virtual-plan:")
     ? (nodes.find((n) => n.id === activeNodeId) ?? null)
     : null;
-  const shareTarget = activeNode && !activeNode.id.startsWith("temp-") ? activeNode : null;
+  // shareTargetNodeIdが指定されている場合はそのノードを、そうでなければactiveNodeを使用
+  const shareTargetNode = shareTargetNodeId
+    ? nodes.find((n) => n.id === shareTargetNodeId) ?? null
+    : activeNode;
+  const shareTarget = shareTargetNode && !shareTargetNode.id.startsWith("temp-") ? shareTargetNode : null;
+  // ワークスペース共有用のターゲット
+  const shareWorkspace = shareWorkspaceId
+    ? currentWorkspaces.find((w) => w.id === shareWorkspaceId) ?? null
+    : null;
   const activeTempMappedId = activeNodeId && activeNodeId.startsWith("temp-")
     ? tempIdRealIdMapRef.current.get(activeNodeId) ?? null
     : null;
@@ -4974,10 +4984,19 @@ ${diffs}`;
     }
   };
 
-  // ワークスペースを共有（機能は未実装）
-  const handleShareWorkspace = (workspaceId: string) => {
-    alert("共有機能は準備中です");
-  };
+  // ワークスペースを共有
+  const handleShareWorkspace = useCallback((workspaceId: string) => {
+    setShareWorkspaceId(workspaceId);
+    setShareTargetNodeId(null);
+    setIsShareOpen(true);
+  }, []);
+
+  // 特定のノード（ファイル/フォルダ）を共有
+  const handleShareNode = useCallback((nodeId: string) => {
+    setShareTargetNodeId(nodeId);
+    setShareWorkspaceId(null);
+    setIsShareOpen(true);
+  }, []);
 
   const renderSidebarContent = () => {
     switch (activeActivity) {
@@ -4999,6 +5018,7 @@ ${diffs}`;
             onUploadFiles={handleUploadFiles}
             onUploadFolder={handleUploadFolder}
             onDownload={handleDownload}
+            onShareNode={handleShareNode}
             onDropFiles={handleDropFilesOnFolder}
             onMoveNodes={handleMoveNodes}
             onCopyNodes={handleCopyNodes}
@@ -5207,15 +5227,20 @@ ${diffs}`;
               void handleDownload([activeNodeId]);
             }}
           />
-          {shareTarget ? (
+          {(shareTarget || shareWorkspace) ? (
             <SharePopover
               isOpen={isShareOpen}
-              onClose={() => setIsShareOpen(false)}
-              nodeName={shareTarget.name}
-              nodeId={shareTarget.id}
+              onClose={() => {
+                setIsShareOpen(false);
+                setShareTargetNodeId(null);
+                setShareWorkspaceId(null);
+              }}
+              nodeName={shareWorkspace ? shareWorkspace.name : shareTarget!.name}
+              nodeId={shareWorkspace ? shareWorkspace.id : shareTarget!.id}
               isPublic={isSharePublic}
               onTogglePublic={handleToggleSharePublic}
               ownerEmail={userEmail}
+              isWorkspace={!!shareWorkspace}
             />
           ) : null}
           {/* パンくずリスト */}

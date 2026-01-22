@@ -10,6 +10,7 @@ type Props = {
   isPublic: boolean;
   onTogglePublic: (isPublic: boolean) => Promise<void>;
   ownerEmail?: string;
+  isWorkspace?: boolean;
 };
 
 type AccessRole = "viewer" | "editor";
@@ -22,6 +23,7 @@ export function SharePopover({
   isPublic,
   onTogglePublic,
   ownerEmail,
+  isWorkspace = false,
 }: Props) {
   const [isCopied, setIsCopied] = useState(false);
   const [accessRole, setAccessRole] = useState<AccessRole>("editor");
@@ -30,9 +32,10 @@ export function SharePopover({
   const roleButtonRef = useRef<HTMLButtonElement | null>(null);
   const roleMenuRef = useRef<HTMLDivElement | null>(null);
 
+  const sharePath = isWorkspace ? `/share/workspace/${nodeId}` : `/share/${nodeId}`;
   const publicUrl = typeof window !== "undefined"
-    ? `${window.location.origin}/share/${nodeId}`
-    : `https://cursor-clone.com/share/${nodeId}`;
+    ? `${window.location.origin}${sharePath}`
+    : `https://cursor-clone.com${sharePath}`;
   const safeNodeName = nodeName?.trim() || "ファイルやフォルダー名";
   const trimmedOwnerEmail = ownerEmail?.trim() || "";
   const ownerName = trimmedOwnerEmail ? trimmedOwnerEmail.split("@")[0] : "自分";
