@@ -4761,6 +4761,13 @@ ${diffs}`;
       (editableTempNodeIdsRef.current.has(activeNode.id) ||
         (activeTempMappedId ? pendingContentByRealIdRef.current.has(activeTempMappedId) : false))
     : false;
+
+  // Handle adding code selection to chat
+  const handleAddToChat = useCallback((selectedText: string, lineStart: number, lineEnd: number) => {
+    const fileName = activeNode?.name || activeVirtual?.fileName || "untitled";
+    aiPanelRef.current?.addCodeContext(fileName, lineStart, lineEnd, selectedText);
+  }, [activeNode?.name, activeVirtual?.fileName]);
+
   // ワークスペース切り替え
   const handleSwitchWorkspace = async (workspaceId: string) => {
     if (workspaceId === activeWorkspace.id) return;
@@ -5221,6 +5228,7 @@ ${diffs}`;
                   }}
                   fileName={activeVirtual.fileName}
                   onSave={() => handleSavePlanToWorkspace(activeVirtual.id)}
+                  onAddToChat={handleAddToChat}
                 />
               ) : activeNode ? (
                 activeNode.id.startsWith("temp-") && activeUploadProgress !== null ? (
@@ -5291,6 +5299,7 @@ ${diffs}`;
                     onChange={setActiveEditorContent}
                     fileName={activeNode.name}
                     onSave={saveContent}
+                    onAddToChat={handleAddToChat}
                   />
                 )
               ) : (

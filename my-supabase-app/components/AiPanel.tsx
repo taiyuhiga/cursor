@@ -119,6 +119,7 @@ export type AiPanelHandle = {
   triggerAction: (action: "explain" | "fix" | "test" | "refactor") => void;
   sendPrompt: (prompt: string, opts?: { mode?: "agent" | "plan" | "ask" }) => void;
   recordAgentCheckpoint: (input: AgentCheckpointRecordInput) => void;
+  addCodeContext: (fileName: string, lineStart: number, lineEnd: number, content: string) => void;
 };
 
 const DEFAULT_MODELS: ModelConfig[] = [
@@ -194,10 +195,11 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
   // Image upload state
   const [attachedImages, setAttachedImages] = useState<{ file: File; preview: string }[]>([]);
 
-  // Input segments - mixed text and file references (inline)
+  // Input segments - mixed text, file references, and code selections (inline)
   type InputSegment =
     | { type: 'text'; content: string }
-    | { type: 'file'; id: string; name: string; fileType: 'file' | 'folder' };
+    | { type: 'file'; id: string; name: string; fileType: 'file' | 'folder' }
+    | { type: 'code'; id: string; fileName: string; lineStart: number; lineEnd: number; content: string };
   const [inputSegments, setInputSegments] = useState<InputSegment[]>([]);
   const contentEditableRef = useRef<HTMLDivElement>(null);
   const isInputFromUserRef = useRef(false); // Track if change came from user input
@@ -208,13 +210,24 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
 
   // Helper: Get plain text from segments (removes zero-width spaces used for cursor positioning)
   const getTextFromSegments = (segments: InputSegment[]): string => {
-    return segments.map(s => s.type === 'text' ? s.content.replace(ZERO_WIDTH_SPACE_REGEX, "") : `@${s.name}`).join('');
+    return segments.map(s => {
+      if (s.type === 'text') return s.content.replace(ZERO_WIDTH_SPACE_REGEX, "");
+      if (s.type === 'file') return `@${s.name}`;
+      if (s.type === 'code') return `@${s.fileName}:${s.lineStart}-${s.lineEnd}`;
+      return '';
+    }).join('');
   };
 
   // Helper: Get file references from segments
   const getFilesFromSegments = (segments: InputSegment[]): { id: string; name: string; type: 'file' | 'folder' }[] => {
     return segments.filter((s): s is Extract<InputSegment, { type: 'file' }> => s.type === 'file')
       .map(s => ({ id: s.id, name: s.name, type: s.fileType }));
+  };
+
+  // Helper: Get code selections from segments
+  const getCodeSelectionsFromSegments = (segments: InputSegment[]): { fileName: string; lineStart: number; lineEnd: number; content: string }[] => {
+    return segments.filter((s): s is Extract<InputSegment, { type: 'code' }> => s.type === 'code')
+      .map(s => ({ fileName: s.fileName, lineStart: s.lineStart, lineEnd: s.lineEnd, content: s.content }));
   };
 
   // Checkpoints (Cursor-like)
@@ -632,9 +645,9 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
     const mentions: string[] = [];
     let match;
     while ((match = mentionRegex.exec(promptText)) !== null) mentions.push(match[1]);
-    
+
     if (mentions.length === 0) return "";
-    
+
     const contextParts: string[] = [];
     for (const mention of mentions) {
       const file = fileNodes.find(f => f.name === mention);
@@ -647,6 +660,21 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
     }
     return contextParts.length > 0 ? `\n\n[Referenced Files Context]\n${contextParts.join("\n\n")}\n\n` : "";
   }, [fileNodes, onGetFileContent]);
+
+  // Build context from code selections
+  const buildContextFromCodeSelections = useCallback((segments: InputSegment[]): string => {
+    const codeSelections = getCodeSelectionsFromSegments(segments);
+    if (codeSelections.length === 0) return "";
+
+    const contextParts = codeSelections.map(sel => {
+      const lineRange = sel.lineStart === sel.lineEnd
+        ? `Line ${sel.lineStart}`
+        : `Lines ${sel.lineStart}-${sel.lineEnd}`;
+      return `--- ${sel.fileName} (${lineRange}) ---\n${sel.content}\n---`;
+    });
+
+    return `\n\n[Code Selection Context]\n${contextParts.join("\n\n")}\n\n`;
+  }, []);
 
   const handleStop = () => {
     if (abortControllerRef.current) {
@@ -811,7 +839,8 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
 
       // Build context
       const fileContext = await buildContextFromMentions(promptToSend);
-      const fullPrompt = fileContext + promptToSend;
+      const codeContext = buildContextFromCodeSelections(inputSegments);
+      const fullPrompt = fileContext + codeContext + promptToSend;
       const apiKeys = JSON.parse(localStorage.getItem("cursor_api_keys") || "{}");
 
       // Initialize AbortController
@@ -1091,7 +1120,8 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
 
       // Build context
       const fileContext = await buildContextFromMentions(promptToSend);
-      const fullPrompt = fileContext + promptToSend;
+      const codeContext = buildContextFromCodeSelections(inputSegments);
+      const fullPrompt = fileContext + codeContext + promptToSend;
       const apiKeys = JSON.parse(localStorage.getItem("cursor_api_keys") || "{}");
 
       const requestStartedAt = Date.now();
@@ -1360,6 +1390,21 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
             name: element.dataset.fileName || '',
             fileType: (element.dataset.fileType as 'file' | 'folder') || 'file'
           });
+        } else if (element.dataset.codeId) {
+          // Parse code segment - find the stored content
+          const existingCode = inputSegments.find(s =>
+            s.type === 'code' && s.id === element.dataset.codeId
+          ) as Extract<InputSegment, { type: 'code' }> | undefined;
+          if (existingCode) {
+            newSegments.push({
+              type: 'code',
+              id: element.dataset.codeId,
+              fileName: element.dataset.fileName || existingCode.fileName,
+              lineStart: parseInt(element.dataset.lineStart || '0', 10) || existingCode.lineStart,
+              lineEnd: parseInt(element.dataset.lineEnd || '0', 10) || existingCode.lineEnd,
+              content: existingCode.content
+            });
+          }
         }
       }
     });
@@ -1459,41 +1504,166 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
     handleKeyDown(e);
   };
 
+  // Get SVG string for file icon based on filename/extension
+  const getFileIconSvg = (fileName: string, isFolder: boolean): string => {
+    if (isFolder) {
+      // Folder icon - matches FileIcons.Folder
+      return `<svg class="file-pill-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="5" width="13" height="8.5" rx="1.5"></rect><path d="M1.5 5V4a1.5 1.5 0 0 1 1.5-1.5h3l1.5 1.5h4"></path></svg>`;
+    }
+
+    const name = fileName.toLowerCase();
+    const dotIndex = fileName.lastIndexOf(".");
+    const hasExtension = dotIndex > 0 && dotIndex < fileName.length - 1;
+    const ext = hasExtension ? fileName.slice(dotIndex + 1).toLowerCase() : "";
+
+    // Config files
+    if (name.includes("config") || name.includes(".config.") || ext === "cfg" || ext === "ini") {
+      return `<svg class="file-pill-icon" width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 4.754a3.246 3.246 0 1 0 0 6.492 3.246 3.246 0 0 0 0-6.492zM5.754 8a2.246 2.246 0 1 1 4.492 0 2.246 2.246 0 0 1-4.492 0z" fill-opacity="0.7"></path><path d="M9.796 1.343c-.527-1.79-3.065-1.79-3.592 0l-.094.319a.873.873 0 0 1-1.255.52l-.292-.16c-1.64-.892-3.433.902-2.54 2.541l.159.292a.873.873 0 0 1-.52 1.255l-.319.094c-1.79.527-1.79 3.065 0 3.592l.319.094a.873.873 0 0 1 .52 1.255l-.16.292c-.892 1.64.901 3.434 2.541 2.54l.292-.159a.873.873 0 0 1 1.255.52l.094.319c.527 1.79 3.065 1.79 3.592 0l.094-.319a.873.873 0 0 1 1.255-.52l.292.16c1.64.893 3.434-.902 2.54-2.541l-.159-.292a.873.873 0 0 1 .52-1.255l.319-.094c1.79-.527 1.79-3.065 0-3.592l-.319-.094a.873.873 0 0 1-.52-1.255l.16-.292c.893-1.64-.902-3.433-2.541-2.54l-.292.159a.873.873 0 0 1-1.255-.52l-.094-.319z" fill-opacity="0.7"></path></svg>`;
+    }
+
+    // Environment files
+    if (name.startsWith(".env") || ext === "env") {
+      return `<svg class="file-pill-icon" width="14" height="14" viewBox="0 0 16 16"><rect x="1" y="2" width="14" height="12" rx="2" fill="#ecd53f" fill-opacity="0.9"></rect><path d="M4 5h8v1h-8v-1zm0 2.5h6v1h-6v-1zm0 2.5h5v1h-5v-1z" fill="#323232" fill-opacity="0.8"></path></svg>`;
+    }
+
+    // Git files
+    if (name === ".gitignore" || name === ".gitattributes") {
+      return `<svg class="file-pill-icon" width="14" height="14" viewBox="0 0 16 16"><path d="M15.698 7.287L8.712.302a1.03 1.03 0 0 0-1.457 0l-1.45 1.45 1.84 1.84a1.223 1.223 0 0 1 1.55 1.56l1.773 1.774a1.224 1.224 0 1 1-.733.693L8.57 5.953v4.17a1.225 1.225 0 1 1-1.008-.036V5.917a1.224 1.224 0 0 1-.665-1.608L5.09 2.5l-4.788 4.79a1.03 1.03 0 0 0 0 1.456l6.986 6.986a1.03 1.03 0 0 0 1.457 0l6.953-6.953a1.031 1.031 0 0 0 0-1.492" fill="#f05033"></path></svg>`;
+    }
+
+    switch (ext) {
+      case "md":
+      case "mdx":
+        return `<svg class="file-pill-icon text-sky-500" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: #0ea5e9;"><path d="M9.5 1.5H4.5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h7a2 2 0 0 0 2-2V6.5L9.5 1.5z"></path><path d="M9.5 1.5v5h5"></path><path d="M5 9v3l1.5-2 1.5 2V9"></path></svg>`;
+      case "ts":
+      case "tsx":
+      case "mts":
+      case "cts":
+        return `<svg class="file-pill-icon" width="14" height="14" viewBox="0 0 16 16"><rect x="1" y="1" width="14" height="14" rx="2" fill="#3178c6"></rect><path d="M4.5 7h4v1h-1.5v4h-1v-4h-1.5v-1zm4.5 0h1.75c.414 0 .75.336.75.75v.5a.75.75 0 0 1-.75.75h-1v1.25h1.75v.75h-2c-.414 0-.75-.336-.75-.75v-2.5c0-.414.336-.75.75-.75z" fill="white"></path></svg>`;
+      case "js":
+      case "jsx":
+      case "mjs":
+      case "cjs":
+        return `<svg class="file-pill-icon" width="14" height="14" viewBox="0 0 16 16"><rect x="1" y="1" width="14" height="14" rx="2" fill="#f7df1e"></rect><path d="M5.5 7v4.5c0 .5-.5 1-1 1s-1-.25-1.25-.75l-.75.5c.25.75 1 1.25 2 1.25s2-.5 2-2v-4.5h-1zm3.5 0v5.5h1v-2.5h1c1 0 1.75-.75 1.75-1.5s-.75-1.5-1.75-1.5h-2zm1 1h.75c.5 0 .75.25.75.5s-.25.5-.75.5h-.75v-1z" fill="#323232"></path></svg>`;
+      case "json":
+        return `<svg class="file-pill-icon" width="14" height="14" viewBox="0 0 16 16"><rect x="1" y="1" width="14" height="14" rx="2" fill="#cbcb41" fill-opacity="0.9"></rect><path d="M5 5c-.55 0-1 .45-1 1v1c0 .55-.45 1-1 1v1c.55 0 1 .45 1 1v1c0 .55.45 1 1 1h1v-1h-.5c-.28 0-.5-.22-.5-.5v-1.5c0-.55-.45-1-1-1 .55 0 1-.45 1-1v-1.5c0-.28.22-.5.5-.5h.5v-1h-1zm6 0h-1v1h.5c.28 0 .5.22.5.5v1.5c0 .55.45 1 1 1-.55 0-1 .45-1 1v1.5c0 .28-.22.5-.5.5h-.5v1h1c.55 0 1-.45 1-1v-1c0-.55.45-1 1-1v-1c-.55 0-1-.45-1-1v-1c0-.55-.45-1-1-1z" fill="#323232"></path></svg>`;
+      case "lua":
+      case "luau":
+        return `<svg class="file-pill-icon" width="14" height="14" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="#000080"></circle><circle cx="8" cy="8" r="4" fill="none" stroke="white" stroke-width="1.5"></circle><circle cx="11.5" cy="4.5" r="1.5" fill="white"></circle></svg>`;
+      case "css":
+      case "scss":
+      case "sass":
+      case "less":
+        return `<svg class="file-pill-icon" width="14" height="14" viewBox="0 0 16 16"><rect x="1" y="1" width="14" height="14" rx="2" fill="#264de4"></rect><path d="M3 3l.8 9.2L8 14l4.2-1.8L13 3H3zm7.5 3.5H5.7l.1 1.2h4.5l-.3 3.5-2 .7-2-.7-.1-1.7h1.2l.1.9.8.3.8-.3.1-1.3H5.5L5.2 5h5.5l-.2 1.5z" fill="white"></path></svg>`;
+      case "html":
+      case "htm":
+        return `<svg class="file-pill-icon" width="14" height="14" viewBox="0 0 16 16"><rect x="1" y="1" width="14" height="14" rx="2" fill="#e34f26"></rect><path d="M3 3l.8 9.2L8 14l4.2-1.8L13 3H3zm7.7 3.5l-.1 1h-5l.1 1h4.7l-.3 3.5-2.1.7-2.1-.7-.1-1.5h1l.1.8.9.3 1-.3.1-1.3h-4l-.3-3.5h7.2z" fill="white"></path></svg>`;
+      case "py":
+      case "pyw":
+        return `<svg class="file-pill-icon" width="14" height="14" viewBox="0 0 16 16"><defs><linearGradient id="python-grad-pill" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#387eb8"></stop><stop offset="100%" stop-color="#366994"></stop></linearGradient></defs><rect x="1" y="1" width="14" height="14" rx="2" fill="url(#python-grad-pill)"></rect><path d="M8 3c-2 0-1.9 1-1.9 1v1h2v.5h-3s-1.5-.1-1.5 2c0 2.1 1.3 2 1.3 2h.8v-1s0-1.3 1.3-1.3h2s1.2 0 1.2-1.2v-2s.2-1-2.2-1zm-.9.6c.2 0 .4.2.4.4s-.2.4-.4.4-.4-.2-.4-.4.2-.4.4-.4zM8 13c2 0 1.9-1 1.9-1v-1h-2v-.5h3s1.5.1 1.5-2c0-2.1-1.3-2-1.3-2h-.8v1s0 1.3-1.3 1.3h-2s-1.2 0-1.2 1.2v2s-.2 1 2.2 1zm.9-.6c-.2 0-.4-.2-.4-.4s.2-.4.4-.4.4.2.4.4-.2.4-.4.4z" fill="white"></path></svg>`;
+      case "sql":
+      case "sqlite":
+      case "sqlite3":
+        return `<svg class="file-pill-icon" width="14" height="14" viewBox="0 0 16 16"><rect x="1" y="1" width="14" height="14" rx="2" fill="#16a34a"></rect><path d="M4.5 5.5h7M4.5 8h7M4.5 10.5h7" stroke="white" stroke-width="1.2" stroke-linecap="round"></path></svg>`;
+      case "txt":
+        return `<svg class="file-pill-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 1.5H4.5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h7a2 2 0 0 0 2-2V6.5L9.5 1.5z"></path><path d="M9.5 1.5v5h5"></path><path d="M5 8h6"></path><path d="M5 10h6"></path><path d="M5 12h4"></path></svg>`;
+      case "png":
+      case "jpg":
+      case "jpeg":
+      case "gif":
+      case "svg":
+      case "webp":
+      case "ico":
+      case "bmp":
+        return `<svg class="file-pill-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" style="color: #10b981;"><rect x="2" y="2" width="12" height="12" rx="2"></rect><circle cx="5.5" cy="5.5" r="1.5"></circle><path d="M14 10l-3-3-5 5"></path><path d="M14 14l-8-8-4 4"></path></svg>`;
+      case "mp4":
+      case "webm":
+      case "mov":
+      case "avi":
+      case "mkv":
+      case "m4v":
+        return `<svg class="file-pill-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" style="color: #ef4444;"><rect x="2" y="3" width="12" height="10" rx="1.6"></rect><path d="M2 6h12"></path><path d="M7 7.5l3 2-3 2z" fill="currentColor" stroke="none"></path></svg>`;
+      case "mp3":
+      case "wav":
+      case "ogg":
+      case "m4a":
+      case "flac":
+      case "aac":
+        return `<svg class="file-pill-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" style="color: #ef4444;"><circle cx="5" cy="11.5" r="1.5"></circle><circle cx="10" cy="10" r="1.5"></circle><path d="M6.5 11.5V4.5"></path><path d="M11.5 10V4"></path><path d="M6.5 4.5 11.5 4"></path></svg>`;
+      default:
+        // Plain file icon
+        return `<svg class="file-pill-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 1.5H4.5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h7a2 2 0 0 0 2-2V6.5L9.5 1.5z"></path><path d="M9.5 1.5v5h5"></path></svg>`;
+    }
+  };
+
   // Render segments to contenteditable HTML
   const renderSegmentsToHTML = (segments: InputSegment[]): string => {
     return segments.map((seg, index) => {
       if (seg.type === 'text') {
         return seg.content.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      } else {
+      } else if (seg.type === 'file') {
         // File pill HTML - non-editable with blue styling, truncation, and delete button overlaying icon
         // Icon container with fixed size, × overlays the icon without changing dimensions
+        const isFolder = seg.fileType === 'folder';
+        const iconSvg = getFileIconSvg(seg.name, isFolder);
         const iconContainer = `<span class="file-pill-icon-container" style="position: relative; width: 14px; height: 14px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center;">
-          <svg class="file-pill-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
+          ${iconSvg}
           <span class="file-pill-delete" data-delete-file="${seg.id}" style="display: none; position: absolute; top: 0; left: 0; width: 14px; height: 14px; cursor: pointer; font-size: 14px; font-weight: 500; color: #64748b; line-height: 14px; text-align: center;">&times;</span>
         </span>`;
         const filePill = `<span contenteditable="false" data-file-id="${seg.id}" data-file-name="${seg.name}" data-file-type="${seg.fileType}" class="file-pill" style="display: inline-flex; align-items: center; gap: 4px; padding: 2px 10px; margin: 2px 6px 2px 0; background: #dbeafe; border: 1px solid #93c5fd; border-radius: 9999px; font-size: 12px; color: #1e40af; cursor: default; vertical-align: middle; user-select: all; max-width: 180px;">${iconContainer}<span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${seg.name}</span></span>`;
         const isFirst = index === 0;
         const isLast = index === segments.length - 1;
-        const nextIsFile = !isLast && segments[index + 1].type === "file";
+        const nextIsPill = !isLast && (segments[index + 1].type === "file" || segments[index + 1].type === "code");
         const leadingAnchor = isFirst ? ZERO_WIDTH_SPACE : "";
-        const trailingAnchor = (nextIsFile || isLast) ? ZERO_WIDTH_SPACE : "";
+        const trailingAnchor = (nextIsPill || isLast) ? ZERO_WIDTH_SPACE : "";
         return `${leadingAnchor}${filePill}${trailingAnchor}`;
+      } else if (seg.type === 'code') {
+        // Code selection pill - shows filename with line range
+        const lineRange = seg.lineStart === seg.lineEnd ? `(${seg.lineStart})` : `(${seg.lineStart}-${seg.lineEnd})`;
+        const displayName = `${seg.fileName} ${lineRange}`;
+        const codeIconSvg = getFileIconSvg(seg.fileName, false);
+        const iconContainer = `<span class="file-pill-icon-container" style="position: relative; width: 14px; height: 14px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center;">
+          ${codeIconSvg}
+          <span class="file-pill-delete" data-delete-code="${seg.id}" style="display: none; position: absolute; top: 0; left: 0; width: 14px; height: 14px; cursor: pointer; font-size: 14px; font-weight: 500; color: #64748b; line-height: 14px; text-align: center;">&times;</span>
+        </span>`;
+        const codePill = `<span contenteditable="false" data-code-id="${seg.id}" data-file-name="${seg.fileName}" data-line-start="${seg.lineStart}" data-line-end="${seg.lineEnd}" class="file-pill code-pill" style="display: inline-flex; align-items: center; gap: 4px; padding: 2px 10px; margin: 2px 6px 2px 0; background: #dbeafe; border: 1px solid #93c5fd; border-radius: 9999px; font-size: 12px; color: #1e40af; cursor: default; vertical-align: middle; user-select: all; max-width: 220px;">${iconContainer}<span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${displayName}</span></span>`;
+        const isFirst = index === 0;
+        const isLast = index === segments.length - 1;
+        const nextIsPill = !isLast && (segments[index + 1].type === "file" || segments[index + 1].type === "code");
+        const leadingAnchor = isFirst ? ZERO_WIDTH_SPACE : "";
+        const trailingAnchor = (nextIsPill || isLast) ? ZERO_WIDTH_SPACE : "";
+        return `${leadingAnchor}${codePill}${trailingAnchor}`;
       }
+      return '';
     }).join('');
   };
 
-  // Handle click on file pill delete button
+  // Handle click on file/code pill delete button
   const handleContentEditableClick = (e: React.MouseEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement;
-    // Check if clicked on delete button
+    // Check if clicked on delete button for file
     if (target.classList.contains('file-pill-delete')) {
       const fileId = target.dataset.deleteFile;
       if (fileId) {
         e.preventDefault();
         e.stopPropagation();
         removeFileSegment(fileId);
+        return;
+      }
+      // Check for code deletion
+      const codeId = target.dataset.deleteCode;
+      if (codeId) {
+        e.preventDefault();
+        e.stopPropagation();
+        removeCodeSegment(codeId);
+        return;
       }
     }
+  };
+
+  // Remove code segment by id
+  const removeCodeSegment = (codeId: string) => {
+    setInputSegments(prev => prev.filter(s => !(s.type === 'code' && s.id === codeId)));
   };
 
   // Handle mouse over/out for file pills to show/hide delete button
@@ -1632,7 +1802,26 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
     onSubmit(text, opts);
   };
 
-  useImperativeHandle(ref, () => ({ triggerAction, sendPrompt, recordAgentCheckpoint }));
+  // Add code context to input (called from MainEditor via ref)
+  const addCodeContext = (fileName: string, lineStart: number, lineEnd: number, content: string) => {
+    const id = `code-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    setInputSegments(prev => {
+      // Check if same code selection already exists
+      const exists = prev.some(s =>
+        s.type === 'code' &&
+        s.fileName === fileName &&
+        s.lineStart === lineStart &&
+        s.lineEnd === lineEnd
+      );
+      if (exists) return prev;
+
+      return [...prev, { type: 'code', id, fileName, lineStart, lineEnd, content }];
+    });
+    // Focus the contenteditable
+    setTimeout(() => contentEditableRef.current?.focus(), 0);
+  };
+
+  useImperativeHandle(ref, () => ({ triggerAction, sendPrompt, recordAgentCheckpoint, addCodeContext }));
 
   const currentModelName = availableModels.find(m => m.id === selectedModel)?.name || selectedModel;
 
@@ -1646,15 +1835,11 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
   };
   // Insert file segment at end of input (or could be enhanced for cursor position)
   const insertFileSegment = (file: { id: string; name: string; type: 'file' | 'folder' }) => {
+    // Generate unique ID for each insertion to allow duplicates
+    const uniqueId = `file-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
     setInputSegments(prev => {
-      // Check if file already exists
-      const existingIds = new Set(
-        prev.filter((s): s is Extract<InputSegment, { type: 'file' }> => s.type === 'file').map(s => s.id)
-      );
-      if (existingIds.has(file.id)) return prev;
-
-      // Add file segment at end
-      return [...prev, { type: 'file', id: file.id, name: file.name, fileType: file.type }];
+      // Add file segment at end (allow duplicates)
+      return [...prev, { type: 'file', id: uniqueId, name: file.name, fileType: file.type }];
     });
     // Focus the contenteditable
     setTimeout(() => contentEditableRef.current?.focus(), 0);

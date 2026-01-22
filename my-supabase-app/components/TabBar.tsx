@@ -105,38 +105,12 @@ export function TabBar({ tabs, activeId, onSelect, onClose, onShare, onDownload,
         {/* 共有ボタン */}
         <button
           onClick={() => {
-            setActionTooltip(null);
             onShare?.();
           }}
-          onMouseEnter={() => setActionTooltip("share")}
-          onMouseLeave={() => setActionTooltip(null)}
-          className="relative p-1.5 rounded hover:bg-zinc-200 text-zinc-500 hover:text-zinc-700 transition-colors"
+          className="flex flex-col items-center justify-center px-2 py-0.5 rounded hover:bg-zinc-200 text-zinc-500 hover:text-zinc-700 transition-colors"
           aria-label="共有"
         >
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            width="16"
-            height="16"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <circle cx="18" cy="5" r="3" />
-            <circle cx="6" cy="12" r="3" />
-            <circle cx="18" cy="19" r="3" />
-            <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
-            <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
-          </svg>
-          <span
-            className={`pointer-events-none absolute left-1/2 top-full mt-1 -translate-x-1/2 whitespace-nowrap rounded bg-zinc-800 text-white text-[10px] px-2 py-1 transition-opacity z-50 ${
-              actionTooltip === "share" ? "opacity-100" : "opacity-0"
-            }`}
-          >
-            共有
-          </span>
+          <span className="text-[14px] mt-0.5">共有</span>
         </button>
 
         {/* ダウンロードボタン */}
