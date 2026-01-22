@@ -201,6 +201,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const [isSaving, setIsSaving] = useState(false);
   const [isShareOpen, setIsShareOpen] = useState(false);
   const [isSharePublic, setIsSharePublic] = useState(false);
+  const [isHoveringLeftResize, setIsHoveringLeftResize] = useState(false);
   const [shareTargetNodeId, setShareTargetNodeId] = useState<string | null>(null);
   const [shareWorkspaceId, setShareWorkspaceId] = useState<string | null>(null);
   // Start with loading=false if we have initial data (server-side or cached)
@@ -322,6 +323,8 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const activeNodeIdRef = useRef<string | null>(null);
   const previewTabIdRef = useRef<string | null>(null);
   const openTabsRef = useRef<string[]>([]);
+  const layoutRef = useRef<HTMLDivElement>(null);
+  const leftResizeHoverRef = useRef(false);
   const supabase = createClient();
 
   useEffect(() => {
@@ -4713,6 +4716,26 @@ ${diffs}`;
     rightPanelWidthRef.current = rightPanelWidth;
   }, [rightPanelWidth]);
 
+  const updateLeftResizeHover = useCallback((next: boolean) => {
+    if (leftResizeHoverRef.current === next) return;
+    leftResizeHoverRef.current = next;
+    setIsHoveringLeftResize(next);
+  }, []);
+
+  const handleLayoutMouseMove = useCallback((event) => {
+    const container = layoutRef.current;
+    if (!container) return;
+    const rect = container.getBoundingClientRect();
+    const boundaryX = rect.left + leftPanelWidth;
+    const isNearX = Math.abs(event.clientX - boundaryX) <= 4;
+    const isWithinY = event.clientY >= rect.top && event.clientY <= rect.bottom;
+    updateLeftResizeHover(isNearX && isWithinY);
+  }, [leftPanelWidth, updateLeftResizeHover]);
+
+  const handleLayoutMouseLeave = useCallback(() => {
+    updateLeftResizeHover(false);
+  }, [updateLeftResizeHover]);
+
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
       if (isResizingLeft) {
@@ -5110,7 +5133,12 @@ ${diffs}`;
         />
       )}
 
-      <div className="flex flex-1 min-w-0">
+      <div
+        ref={layoutRef}
+        className="flex flex-1 min-w-0"
+        onMouseMove={handleLayoutMouseMove}
+        onMouseLeave={handleLayoutMouseLeave}
+      >
         <aside
           className={`bg-zinc-50 flex flex-col flex-shrink-0 transition-opacity duration-100 ${panelWidthsLoaded ? "opacity-100" : "opacity-0"}`}
           style={{ width: leftPanelWidth }}
@@ -5121,14 +5149,14 @@ ${diffs}`;
         {/* Left resize handle */}
         <div className="relative w-0 flex-shrink-0 group">
           <div
-            className="absolute inset-y-0 -left-2 -right-2 cursor-col-resize z-20"
+            className={`pointer-events-none absolute inset-y-0 left-1/2 w-1 -translate-x-1/2 bg-blue-500 transition-opacity z-30 ${
+              isResizingLeft || isHoveringLeftResize ? "opacity-100" : "opacity-0"
+            }`}
+          />
+          <div
+            className="absolute bottom-0 top-12 -left-2 -right-2 cursor-col-resize z-20"
             onMouseDown={() => setIsResizingLeft(true)}
           >
-            <div
-              className={`absolute inset-y-0 left-1/2 w-1 -translate-x-1/2 bg-blue-500 transition-opacity ${
-                isResizingLeft ? "opacity-100" : "opacity-0 group-hover:opacity-100"
-              }`}
-            />
           </div>
         </div>
 
