@@ -48,6 +48,7 @@ export function WorkspaceSwitcher({
     const handleClickOutside = (e: MouseEvent) => {
       if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
         setIsOpen(false);
+        setContextMenu(null);
       }
     };
     document.addEventListener("mousedown", handleClickOutside);

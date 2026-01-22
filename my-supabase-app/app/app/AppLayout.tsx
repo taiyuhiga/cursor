@@ -19,6 +19,7 @@ import { SettingsView } from "@/components/SettingsView";
 import { ReviewPanel } from "@/components/ReviewPanel";
 import { SourceControlPanel, type SourceControlChange } from "@/components/SourceControlPanel";
 import { MediaPreview, isMediaFile, prefetchMediaUrl } from "@/components/MediaPreview";
+import { DocumentPreview, isDocumentFile } from "@/components/DocumentPreview";
 import { ReplaceConfirmDialog } from "@/components/ReplaceConfirmDialog";
 import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
 import { UndoConfirmDialog } from "@/components/UndoConfirmDialog";
@@ -4722,13 +4723,13 @@ ${diffs}`;
     setIsHoveringLeftResize(next);
   }, []);
 
-  const handleLayoutMouseMove = useCallback((event) => {
+  const handleLayoutMouseMove = useCallback((event: React.MouseEvent) => {
     const container = layoutRef.current;
     if (!container) return;
     const rect = container.getBoundingClientRect();
     const boundaryX = rect.left + leftPanelWidth;
     const isNearX = Math.abs(event.clientX - boundaryX) <= 4;
-    const isWithinY = event.clientY >= rect.top && event.clientY <= rect.bottom;
+    const isWithinY = event.clientY >= rect.top + 48 && event.clientY <= rect.bottom;
     updateLeftResizeHover(isNearX && isWithinY);
   }, [leftPanelWidth, updateLeftResizeHover]);
 
@@ -5390,6 +5391,11 @@ ${diffs}`;
                       <span>Creating...</span>
                     </div>
                   </div>
+                ) : isDocumentFile(activeNode.name) ? (
+                  <DocumentPreview
+                    fileName={activeNode.name}
+                    nodeId={activeNode.id}
+                  />
                 ) : isMediaFile(activeNode.name) ? (
                   <MediaPreview
                     fileName={activeNode.name}
