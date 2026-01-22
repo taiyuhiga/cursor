@@ -546,6 +546,7 @@ export function FileTree({
         return;
       }
       setIsWorkspacePopoverOpen(false);
+      setWsContextMenu(null);
     };
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
@@ -1394,6 +1395,9 @@ export function FileTree({
               onClick={(e) => {
                 e.stopPropagation();
                 setIsWorkspacePopoverOpen(!isWorkspacePopoverOpen);
+                if (isWorkspacePopoverOpen) {
+                  setWsContextMenu(null);
+                }
               }}
             >
               <span className="text-sm font-bold text-blue-600">
@@ -1417,6 +1421,9 @@ export function FileTree({
                 onClick={(e) => {
                   e.stopPropagation();
                   setIsWorkspacePopoverOpen(!isWorkspacePopoverOpen);
+                  if (isWorkspacePopoverOpen) {
+                    setWsContextMenu(null);
+                  }
                 }}
                 onDoubleClick={(e) => {
                   e.stopPropagation();
@@ -1502,6 +1509,7 @@ export function FileTree({
                             onClick={() => {
                               onSelectWorkspace?.(ws.id);
                               setIsWorkspacePopoverOpen(false);
+                              setWsContextMenu(null);
                             }}
                             onContextMenu={(e) => {
                               e.preventDefault();
@@ -1561,6 +1569,7 @@ export function FileTree({
                   onClick={() => {
                     onCreateWorkspace?.();
                     setIsWorkspacePopoverOpen(false);
+                    setWsContextMenu(null);
                   }}
                 >
                   <span className="w-6 h-6 flex items-center justify-center text-lg">+</span>
