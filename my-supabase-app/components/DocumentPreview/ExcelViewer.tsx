@@ -24,7 +24,19 @@ export function ExcelViewer({ data, fileName }: ExcelViewerProps) {
       setIsLoading(true);
       setError(null);
 
+      // Validate data before parsing
+      if (!data || data.byteLength === 0) {
+        setError("Empty file data");
+        return;
+      }
+
       const workbook = XLSX.read(data, { type: "array" });
+
+      if (!workbook || !workbook.SheetNames || workbook.SheetNames.length === 0) {
+        setError("No sheets found in workbook");
+        return;
+      }
+
       const parsedSheets: SheetData[] = workbook.SheetNames.map((name) => {
         const sheet = workbook.Sheets[name];
         const jsonData = XLSX.utils.sheet_to_json<(string | number | boolean | null)[]>(
@@ -38,7 +50,8 @@ export function ExcelViewer({ data, fileName }: ExcelViewerProps) {
       setActiveSheet(0);
     } catch (err) {
       console.error("Excel parse error:", err);
-      setError("Failed to parse Excel file");
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setError(`Failed to parse Excel file: ${message}`);
     } finally {
       setIsLoading(false);
     }

@@ -20,6 +20,13 @@ type TabBarProps = {
 export function TabBar({ tabs, activeId, onSelect, onClose, onShare, onDownload, dirtyIds }: TabBarProps) {
   const [actionTooltip, setActionTooltip] = useState<"share" | "download" | null>(null);
   const tabsContainerRef = useRef<HTMLDivElement>(null);
+  const handleTabDragStart = (e: React.DragEvent<HTMLDivElement>, tab: Tab) => {
+    const dragData = [{ id: tab.id, name: tab.title, type: "file" as const }];
+    e.dataTransfer.setData("application/cursor-node-data", JSON.stringify(dragData));
+    e.dataTransfer.setData("application/cursor-node", tab.title);
+    e.dataTransfer.setData("text/plain", `@${tab.title}`);
+    e.dataTransfer.effectAllowed = "copy";
+  };
 
   useEffect(() => {
     if (!activeId) return;
@@ -41,6 +48,8 @@ export function TabBar({ tabs, activeId, onSelect, onClose, onShare, onDownload,
             <div
               key={tab.id}
               data-tab-id={tab.id}
+              draggable
+              onDragStart={(e) => handleTabDragStart(e, tab)}
               className={`
                 group flex flex-none items-center gap-2 px-3 border-r border-zinc-200 min-w-[120px] cursor-pointer select-none relative
                 ${

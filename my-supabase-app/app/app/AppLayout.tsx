@@ -2297,14 +2297,15 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     folderInputRef.current?.click();
   }, []);
 
-  // Check if file is binary (image, video, audio, etc.)
+  // Check if file is binary (image, video, audio, documents, etc.)
   const isBinaryFile = (fileName: string): boolean => {
     const binaryExtensions = [
       "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg",
       "mp4", "webm", "mov", "avi", "mkv", "m4v",
       "mp3", "wav", "ogg", "m4a", "flac", "aac",
       "pdf", "zip", "rar", "7z", "tar", "gz",
-      "ttf", "otf", "woff", "woff2", "eot"
+      "ttf", "otf", "woff", "woff2", "eot",
+      "xlsx", "xls", "docx", "doc", "pptx", "ppt"
     ];
     const ext = fileName.split(".").pop()?.toLowerCase() || "";
     return binaryExtensions.includes(ext);
@@ -4723,7 +4724,10 @@ ${diffs}`;
     setIsHoveringLeftResize(next);
   }, []);
 
+  const isLayoutInteractionBlocked = showCreateWorkspace;
+
   const handleLayoutMouseMove = useCallback((event: React.MouseEvent) => {
+    if (isLayoutInteractionBlocked) return;
     const container = layoutRef.current;
     if (!container) return;
     const rect = container.getBoundingClientRect();
@@ -4731,11 +4735,18 @@ ${diffs}`;
     const isNearX = Math.abs(event.clientX - boundaryX) <= 4;
     const isWithinY = event.clientY >= rect.top + 48 && event.clientY <= rect.bottom;
     updateLeftResizeHover(isNearX && isWithinY);
-  }, [leftPanelWidth, updateLeftResizeHover]);
+  }, [isLayoutInteractionBlocked, leftPanelWidth, updateLeftResizeHover]);
 
   const handleLayoutMouseLeave = useCallback(() => {
+    if (isLayoutInteractionBlocked) return;
     updateLeftResizeHover(false);
-  }, [updateLeftResizeHover]);
+  }, [isLayoutInteractionBlocked, updateLeftResizeHover]);
+
+  useEffect(() => {
+    if (isLayoutInteractionBlocked) {
+      updateLeftResizeHover(false);
+    }
+  }, [isLayoutInteractionBlocked, updateLeftResizeHover]);
 
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {

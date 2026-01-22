@@ -1440,11 +1440,23 @@ export function FileTree({
 
           {/* Workspace Switcher Popover */}
           {isWorkspacePopoverOpen && (
-            <div
-              ref={workspacePopoverRef}
-              className="absolute top-full left-2 mt-1 w-72 bg-white rounded-lg shadow-lg border border-zinc-200 z-50 py-2"
-              onClick={(e) => e.stopPropagation()}
-            >
+            <>
+              {/* Backdrop to block interactions with resize handles */}
+              <div
+                className="fixed inset-0"
+                style={{ zIndex: 9998 }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setIsWorkspacePopoverOpen(false);
+                  setWsContextMenu(null);
+                }}
+              />
+              <div
+                ref={workspacePopoverRef}
+                className="absolute top-full left-2 mt-1 w-72 bg-white rounded-lg shadow-lg border border-zinc-200 py-2"
+                style={{ zIndex: 9999 }}
+                onClick={(e) => e.stopPropagation()}
+              >
               {/* Current workspace header */}
               <div className="px-3 py-2 border-b border-zinc-100">
                 <div className="flex items-center gap-2">
@@ -1577,6 +1589,7 @@ export function FileTree({
                 </button>
               </div>
             </div>
+            </>
           )}
           <div className="flex items-center flex-shrink-0 ml-auto -mr-0.5">
             <button

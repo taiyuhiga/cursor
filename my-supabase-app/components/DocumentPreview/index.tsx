@@ -307,30 +307,61 @@ export function DocumentPreview({
 
   // Error state
   if (error) {
+    const isStorageError = error.includes("storage") || error.includes("resolve");
+
     return (
-      <div className="h-full flex items-center justify-center text-red-500">
-        <div className="text-center">
-          <p className="mb-2">Failed to load document</p>
-          <p className="text-sm opacity-70">{error}</p>
-          <button
-            onClick={() => {
-              setError(null);
-              setIsLoading(true);
-              DOCUMENT_DATA_CACHE.delete(nodeId);
-              fetchDocumentData(nodeId)
-                .then(setData)
-                .catch((err) => {
-                  const errorMsg =
-                    err instanceof Error ? err.message : "Failed to load document";
-                  setError(errorMsg);
-                  onError?.(errorMsg);
-                })
-                .finally(() => setIsLoading(false));
-            }}
-            className="mt-4 px-4 py-2 bg-zinc-100 text-zinc-700 rounded hover:bg-zinc-200"
-          >
-            Retry
-          </button>
+      <div className="h-full flex items-center justify-center">
+        <div className="text-center max-w-md px-4">
+          <div className="w-16 h-16 mx-auto mb-4 bg-red-50 rounded-full flex items-center justify-center">
+            <svg
+              className="w-8 h-8 text-red-400"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={1.5}
+                d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
+              />
+            </svg>
+          </div>
+          <p className="text-zinc-700 font-medium mb-2">
+            {isStorageError ? "ファイルを読み込めませんでした" : "ドキュメントの読み込みに失敗しました"}
+          </p>
+          <p className="text-sm text-zinc-500 mb-4">
+            {isStorageError
+              ? "ファイルが正しくアップロードされていない可能性があります。再度アップロードしてください。"
+              : error}
+          </p>
+          <div className="flex gap-2 justify-center">
+            <button
+              onClick={() => {
+                setError(null);
+                setIsLoading(true);
+                DOCUMENT_DATA_CACHE.delete(nodeId);
+                fetchDocumentData(nodeId)
+                  .then(setData)
+                  .catch((err) => {
+                    const errorMsg =
+                      err instanceof Error ? err.message : "Failed to load document";
+                    setError(errorMsg);
+                    onError?.(errorMsg);
+                  })
+                  .finally(() => setIsLoading(false));
+              }}
+              className="px-4 py-2 bg-zinc-100 text-zinc-700 rounded hover:bg-zinc-200"
+            >
+              再試行
+            </button>
+            <button
+              onClick={handleDownload}
+              className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
+            >
+              ダウンロード
+            </button>
+          </div>
         </div>
       </div>
     );
