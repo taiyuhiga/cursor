@@ -5295,7 +5295,7 @@ ${diffs}`;
             />
           ) : null}
           {/* パンくずリスト */}
-          {activeNodeId && !activeVirtual && (() => {
+          {activeNodeId && activeNode && !activeVirtual && (() => {
             const path = pathByNodeId.get(activeNodeId) || tempIdPathMapRef.current.get(activeNodeId);
             if (!path) return null;
             const segments = path.split("/");

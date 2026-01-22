@@ -217,6 +217,46 @@ export const FileIcons = {
     </svg>
   ),
 
+  // PDF file
+  Pdf: ({ className }: IconProps) => (
+    <svg viewBox="0 0 16 16" className={className}>
+      <rect x="1" y="1" width="14" height="14" rx="2" fill="#e53935" />
+      <text x="8" y="10.5" textAnchor="middle" fill="white" fontSize="5" fontWeight="bold" fontFamily="system-ui">PDF</text>
+    </svg>
+  ),
+
+  // Excel file
+  Excel: ({ className }: IconProps) => (
+    <svg viewBox="0 0 16 16" className={className}>
+      <rect x="1" y="1" width="14" height="14" rx="2" fill="#217346" />
+      <path d="M4 5l3 3-3 3M12 5l-3 3 3 3" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+    </svg>
+  ),
+
+  // Word file
+  Word: ({ className }: IconProps) => (
+    <svg viewBox="0 0 16 16" className={className}>
+      <rect x="1" y="1" width="14" height="14" rx="2" fill="#2b579a" />
+      <text x="8" y="10.5" textAnchor="middle" fill="white" fontSize="7" fontWeight="bold" fontFamily="system-ui">W</text>
+    </svg>
+  ),
+
+  // PowerPoint file
+  PowerPoint: ({ className }: IconProps) => (
+    <svg viewBox="0 0 16 16" className={className}>
+      <rect x="1" y="1" width="14" height="14" rx="2" fill="#d24726" />
+      <text x="8" y="10.5" textAnchor="middle" fill="white" fontSize="7" fontWeight="bold" fontFamily="system-ui">P</text>
+    </svg>
+  ),
+
+  // CSV file
+  Csv: ({ className }: IconProps) => (
+    <svg viewBox="0 0 16 16" className={className}>
+      <rect x="1" y="1" width="14" height="14" rx="2" fill="#217346" />
+      <path d="M4 5h8M4 8h8M4 11h8" stroke="white" strokeWidth="1" strokeLinecap="round" />
+      <path d="M6 5v6M10 5v6" stroke="white" strokeWidth="1" strokeLinecap="round" />
+    </svg>
+  ),
 };
 
 // Chevron icon for folders
@@ -545,6 +585,19 @@ export const getFileIcon = (fileName: string): IconComponent => {
     case "flac":
     case "aac":
       return FileIcons.Audio;
+    case "pdf":
+      return FileIcons.Pdf;
+    case "xlsx":
+    case "xls":
+      return FileIcons.Excel;
+    case "csv":
+      return FileIcons.Csv;
+    case "docx":
+    case "doc":
+      return FileIcons.Word;
+    case "pptx":
+    case "ppt":
+      return FileIcons.PowerPoint;
     default:
       return FileIcons.Plain;
   }
