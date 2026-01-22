@@ -1806,15 +1806,7 @@ export const AiPanel = forwardRef<AiPanelHandle, Props>(({
   const addCodeContext = (fileName: string, lineStart: number, lineEnd: number, content: string) => {
     const id = `code-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
     setInputSegments(prev => {
-      // Check if same code selection already exists
-      const exists = prev.some(s =>
-        s.type === 'code' &&
-        s.fileName === fileName &&
-        s.lineStart === lineStart &&
-        s.lineEnd === lineEnd
-      );
-      if (exists) return prev;
-
+      // Allow duplicates - each selection gets a unique ID
       return [...prev, { type: 'code', id, fileName, lineStart, lineEnd, content }];
     });
     // Focus the contenteditable
