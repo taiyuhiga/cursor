@@ -17,6 +17,14 @@ type Workspace = {
   name: string;
 };
 
+export type SharedNode = {
+  id: string;
+  parent_id: string | null;
+  type: "file" | "folder";
+  name: string;
+  sharedBy?: string; // 共有元のユーザー名
+};
+
 type FileTreeProps = {
   nodes: Node[];
   selectedNodeIds: Set<string>;
@@ -58,6 +66,9 @@ type FileTreeProps = {
   onRenameWorkspaceById?: (workspaceId: string, newName: string) => void;
   onDeleteWorkspaceById?: (workspaceId: string, workspaceName: string) => void;
   onShareWorkspace?: (workspaceId: string) => void;
+  // 共有セクション関連
+  sharedNodes?: SharedNode[];
+  onSelectSharedNode?: (nodeId: string, options?: { preview?: boolean }) => void;
 };
 
 type EditingState = {
@@ -159,8 +170,12 @@ export function FileTree({
   onRenameWorkspaceById,
   onDeleteWorkspaceById,
   onShareWorkspace,
+  sharedNodes,
+  onSelectSharedNode,
 }: FileTreeProps) {
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
+  const [isShareSectionExpanded, setIsShareSectionExpanded] = useState(true);
+  const [expandedSharedFolders, setExpandedSharedFolders] = useState<Set<string>>(new Set());
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
@@ -1827,6 +1842,106 @@ export function FileTree({
           )
         )}
       </div>
+
+      {/* シェアセクション */}
+      {sharedNodes && sharedNodes.length > 0 && (
+        <div className="border-t border-zinc-200">
+          {/* シェアセクションヘッダー */}
+          <div
+            className="flex items-center px-3 py-2 cursor-pointer hover:bg-zinc-100 transition-colors"
+            onClick={() => setIsShareSectionExpanded(!isShareSectionExpanded)}
+          >
+            <ChevronIcon isOpen={isShareSectionExpanded} className="w-4 h-4 text-zinc-400 flex-shrink-0 mr-1" />
+            <span className="text-xs font-medium text-zinc-500 uppercase tracking-wide">シェア</span>
+          </div>
+
+          {/* シェアされたファイル/フォルダ一覧 */}
+          {isShareSectionExpanded && (
+            <div className="pb-2">
+              {sharedNodes
+                .filter(node => node.parent_id === null)
+                .map(node => {
+                  const isExpanded = expandedSharedFolders.has(node.id);
+                  const FileIcon = getFileIcon(node.name);
+                  const children = sharedNodes.filter(n => n.parent_id === node.id);
+
+                  return (
+                    <div key={node.id}>
+                      <div
+                        className="group/item flex items-center gap-1 px-2 py-1 text-[14px] leading-5 cursor-pointer select-none hover:bg-zinc-100 text-zinc-700"
+                        style={{ paddingLeft: node.type === "folder" ? "8px" : "26px" }}
+                        onClick={() => {
+                          if (node.type === "folder") {
+                            setExpandedSharedFolders(prev => {
+                              const next = new Set(prev);
+                              if (next.has(node.id)) next.delete(node.id);
+                              else next.add(node.id);
+                              return next;
+                            });
+                          } else {
+                            onSelectSharedNode?.(node.id, { preview: true });
+                          }
+                        }}
+                        onDoubleClick={() => {
+                          if (node.type === "file") {
+                            onSelectSharedNode?.(node.id, { preview: false });
+                          }
+                        }}
+                      >
+                        {node.type === "folder" ? (
+                          <>
+                            <ChevronIcon isOpen={isExpanded} className="w-4 h-4 text-zinc-400 flex-shrink-0" />
+                            {isExpanded ? (
+                              <FileIcons.FolderOpen className={`w-4 h-4 flex-shrink-0 ${getFolderColor(node.name)}`} />
+                            ) : (
+                              <FileIcons.Folder className={`w-4 h-4 flex-shrink-0 ${getFolderColor(node.name)}`} />
+                            )}
+                          </>
+                        ) : (
+                          <FileIcon className="w-4 h-4 flex-shrink-0" />
+                        )}
+                        <span className="truncate flex-1">{node.name}</span>
+                      </div>
+
+                      {/* 子要素（フォルダが展開されている場合） */}
+                      {node.type === "folder" && isExpanded && children.length > 0 && (
+                        <div>
+                          {children.map(child => {
+                            const ChildIcon = getFileIcon(child.name);
+                            return (
+                              <div
+                                key={child.id}
+                                className="group/item flex items-center gap-1 px-2 py-1 text-[14px] leading-5 cursor-pointer select-none hover:bg-zinc-100 text-zinc-700"
+                                style={{ paddingLeft: child.type === "folder" ? "24px" : "42px" }}
+                                onClick={() => {
+                                  if (child.type === "file") {
+                                    onSelectSharedNode?.(child.id, { preview: true });
+                                  }
+                                }}
+                                onDoubleClick={() => {
+                                  if (child.type === "file") {
+                                    onSelectSharedNode?.(child.id, { preview: false });
+                                  }
+                                }}
+                              >
+                                {child.type === "folder" ? (
+                                  <FileIcons.Folder className={`w-4 h-4 flex-shrink-0 ${getFolderColor(child.name)}`} />
+                                ) : (
+                                  <ChildIcon className="w-4 h-4 flex-shrink-0" />
+                                )}
+                                <span className="truncate flex-1">{child.name}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+            </div>
+          )}
+        </div>
+      )}
 
       <div
         className="border-t border-zinc-200 px-2 py-2 bg-zinc-50"

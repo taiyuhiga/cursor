@@ -22,6 +22,7 @@ import { MediaPreview, isMediaFile, prefetchMediaUrl } from "@/components/MediaP
 import { ReplaceConfirmDialog } from "@/components/ReplaceConfirmDialog";
 import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
 import { UndoConfirmDialog } from "@/components/UndoConfirmDialog";
+import { SharePopover } from "@/components/SharePopover";
 import type { PendingChange, ReviewIssue } from "@/lib/review/types";
 import type { AgentCheckpointChange, AgentCheckpointRecordInput } from "@/lib/checkpoints/types";
 
@@ -198,6 +199,8 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const [draftContents, setDraftContents] = useState<Record<string, string>>({});
   const [contentCache, setContentCache] = useState<Record<string, string>>({});
   const [isSaving, setIsSaving] = useState(false);
+  const [isShareOpen, setIsShareOpen] = useState(false);
+  const [isSharePublic, setIsSharePublic] = useState(false);
   // Start with loading=false if we have initial data (server-side or cached)
   const [isLoading, setIsLoading] = useState(() => {
     if (initialNodes.length > 0) return false;
@@ -336,6 +339,11 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   }, [activeNodeId]);
 
   useEffect(() => {
+    setIsShareOpen(false);
+    setIsSharePublic(false);
+  }, [activeNodeId]);
+
+  useEffect(() => {
     previewTabIdRef.current = previewTabId;
   }, [previewTabId]);
 
@@ -451,6 +459,19 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   }, []);
 
   const nodeById = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
+
+  useEffect(() => {
+    if (!isShareOpen) return;
+    if (!activeNodeId || activeNodeId.startsWith("virtual-plan:")) return;
+    const node = nodeById.get(activeNodeId);
+    if (!node || node.id.startsWith("temp-")) return;
+    fetch(`/api/share?nodeId=${node.id}`)
+      .then((res) => res.json())
+      .then((data) => {
+        setIsSharePublic(data.isPublic);
+      })
+      .catch(console.error);
+  }, [isShareOpen, activeNodeId, nodeById]);
 
   const pathByNodeId = useMemo(() => {
     const cache = new Map<string, string>();
@@ -4743,6 +4764,7 @@ ${diffs}`;
   const activeNode = activeNodeId && !activeNodeId.startsWith("virtual-plan:")
     ? (nodes.find((n) => n.id === activeNodeId) ?? null)
     : null;
+  const shareTarget = activeNode && !activeNode.id.startsWith("temp-") ? activeNode : null;
   const activeTempMappedId = activeNodeId && activeNodeId.startsWith("temp-")
     ? tempIdRealIdMapRef.current.get(activeNodeId) ?? null
     : null;
@@ -4767,6 +4789,18 @@ ${diffs}`;
     const fileName = activeNode?.name || activeVirtual?.fileName || "untitled";
     aiPanelRef.current?.addCodeContext(fileName, lineStart, lineEnd, selectedText);
   }, [activeNode?.name, activeVirtual?.fileName]);
+
+  const handleToggleSharePublic = useCallback(async (newIsPublic: boolean) => {
+    setIsSharePublic(newIsPublic);
+    if (!activeNodeId || activeNodeId.startsWith("virtual-plan:")) return;
+    const node = nodeById.get(activeNodeId);
+    if (!node || node.id.startsWith("temp-")) return;
+    await fetch("/api/share", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "toggle_public", nodeId: node.id, isPublic: newIsPublic }),
+    });
+  }, [activeNodeId, nodeById]);
 
   // ワークスペース切り替え
   const handleSwitchWorkspace = async (workspaceId: string) => {
@@ -5150,6 +5184,10 @@ ${diffs}`;
             }}
             onClose={handleCloseTab}
             dirtyIds={dirtyTabIds}
+            onShare={() => {
+              if (!shareTarget) return;
+              setIsShareOpen(true);
+            }}
             onDownload={() => {
               if (!activeNodeId) return;
 
@@ -5169,6 +5207,17 @@ ${diffs}`;
               void handleDownload([activeNodeId]);
             }}
           />
+          {shareTarget ? (
+            <SharePopover
+              isOpen={isShareOpen}
+              onClose={() => setIsShareOpen(false)}
+              nodeName={shareTarget.name}
+              nodeId={shareTarget.id}
+              isPublic={isSharePublic}
+              onTogglePublic={handleToggleSharePublic}
+              ownerEmail={userEmail}
+            />
+          ) : null}
           {/* パンくずリスト */}
           {activeNodeId && !activeVirtual && (() => {
             const path = pathByNodeId.get(activeNodeId) || tempIdPathMapRef.current.get(activeNodeId);

@@ -18,7 +18,6 @@ type Props = {
 export function PageHeader({ node, isSaving = false }: Props) {
   const [isShareOpen, setIsShareOpen] = useState(false);
   const [isPublic, setIsPublic] = useState(false);
-  const [sharedUsers, setSharedUsers] = useState<any[]>([]);
 
   // 初期設定のロード
   useEffect(() => {
@@ -27,7 +26,6 @@ export function PageHeader({ node, isSaving = false }: Props) {
         .then(res => res.json())
         .then(data => {
           setIsPublic(data.isPublic);
-          setSharedUsers(data.sharedUsers || []);
         })
         .catch(console.error);
     }
@@ -43,25 +41,6 @@ export function PageHeader({ node, isSaving = false }: Props) {
         body: JSON.stringify({ action: "toggle_public", nodeId: node.id, isPublic: newIsPublic }),
       });
     }
-  };
-
-  const handleInvite = async (email: string, role: string) => {
-    // API呼び出し（モック）
-    setSharedUsers([...sharedUsers, { email, role }]);
-  };
-
-  const handleUpdatePermission = async (email: string, newRole: string) => {
-    // UI更新
-    setSharedUsers(sharedUsers.map(u => 
-      u.email === email ? { ...u, role: newRole } : u
-    ));
-    // TODO: API呼び出し
-  };
-
-  const handleRemoveUser = async (email: string) => {
-    // UI更新
-    setSharedUsers(sharedUsers.filter(u => u.email !== email));
-    // TODO: API呼び出し
   };
 
   if (!node) {
@@ -107,10 +86,6 @@ export function PageHeader({ node, isSaving = false }: Props) {
             nodeId={node.id}
             isPublic={isPublic}
             onTogglePublic={handleTogglePublic}
-            onInvite={handleInvite}
-            onUpdatePermission={handleUpdatePermission}
-            onRemoveUser={handleRemoveUser}
-            sharedUsers={sharedUsers}
           />
         </div>
       </div>

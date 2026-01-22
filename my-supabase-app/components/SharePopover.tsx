@@ -1,14 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
-
-type Permission = "full" | "edit" | "comment" | "view";
-
-type SharedUser = {
-  email: string;
-  avatarUrl?: string;
-  role: Permission;
-};
+import { useEffect, useRef, useState } from "react";
 
 type Props = {
   isOpen: boolean;
@@ -17,11 +9,10 @@ type Props = {
   nodeId: string;
   isPublic: boolean;
   onTogglePublic: (isPublic: boolean) => Promise<void>;
-  onInvite: (email: string, role: Permission) => Promise<void>;
-  onUpdatePermission: (email: string, role: Permission) => Promise<void>;
-  onRemoveUser: (email: string) => Promise<void>;
-  sharedUsers: SharedUser[];
+  ownerEmail?: string;
 };
+
+type AccessRole = "viewer" | "editor";
 
 export function SharePopover({
   isOpen,
@@ -30,324 +21,265 @@ export function SharePopover({
   nodeId,
   isPublic,
   onTogglePublic,
-  onInvite,
-  onUpdatePermission,
-  onRemoveUser,
-  sharedUsers,
+  ownerEmail,
 }: Props) {
-  const [activeTab, setActiveTab] = useState<"share" | "publish">("share");
-  const [inviteEmail, setInviteEmail] = useState("");
-  const [inviteRole, setInviteRole] = useState<Permission>("full");
   const [isCopied, setIsCopied] = useState(false);
-  const [openDropdown, setOpenDropdown] = useState<string | null>(null);
-  const popoverRef = useRef<HTMLDivElement>(null);
+  const [accessRole, setAccessRole] = useState<AccessRole>("editor");
+  const [isRoleMenuOpen, setIsRoleMenuOpen] = useState(false);
+  const copyTimeoutRef = useRef<number | null>(null);
+  const roleButtonRef = useRef<HTMLButtonElement | null>(null);
+  const roleMenuRef = useRef<HTMLDivElement | null>(null);
 
-  const publicUrl = typeof window !== "undefined" 
-    ? `${window.location.origin}/share/${nodeId}` 
+  const publicUrl = typeof window !== "undefined"
+    ? `${window.location.origin}/share/${nodeId}`
     : `https://cursor-clone.com/share/${nodeId}`;
+  const safeNodeName = nodeName?.trim() || "ファイルやフォルダー名";
+  const trimmedOwnerEmail = ownerEmail?.trim() || "";
+  const ownerName = trimmedOwnerEmail ? trimmedOwnerEmail.split("@")[0] : "自分";
+  const ownerDisplayName = `${ownerName} (you)`;
+  const ownerInitial = ownerName[0]?.toUpperCase() || "U";
 
   useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
+    if (!isOpen) {
+      setIsCopied(false);
+      setIsRoleMenuOpen(false);
+    }
+  }, [isOpen]);
+
+  useEffect(() => {
+    return () => {
+      if (copyTimeoutRef.current) {
+        window.clearTimeout(copyTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
         onClose();
       }
     };
-    if (isOpen) {
-      document.addEventListener("mousedown", handleClickOutside);
-    }
-    return () => document.removeEventListener("mousedown", handleClickOutside);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
   }, [isOpen, onClose]);
 
-  const handleCopyUrl = () => {
-    navigator.clipboard.writeText(publicUrl);
-    setIsCopied(true);
-    setTimeout(() => setIsCopied(false), 2000);
-  };
+  const handleCopyUrl = async () => {
+    try {
+      await navigator.clipboard.writeText(publicUrl);
+    } catch {
+      const textarea = document.createElement("textarea");
+      textarea.value = publicUrl;
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      try {
+        document.execCommand("copy");
+      } catch {
+        // Ignore clipboard fallback errors
+      }
+      document.body.removeChild(textarea);
+    }
 
-  const handleInvite = async () => {
-    if (!inviteEmail.trim()) return;
-    await onInvite(inviteEmail, inviteRole);
-    setInviteEmail("");
+    if (!isPublic) {
+      void onTogglePublic(true);
+    }
+
+    setIsCopied(true);
+    if (copyTimeoutRef.current) {
+      window.clearTimeout(copyTimeoutRef.current);
+    }
+    copyTimeoutRef.current = window.setTimeout(() => setIsCopied(false), 2000);
   };
 
   if (!isOpen) return null;
 
+  const roleLabel = accessRole === "editor" ? "編集者" : "閲覧者";
+  const roleDescription = accessRole === "editor"
+    ? "リンクを知っているインターネット上の誰もが編集できます"
+    : "リンクを知っているインターネット上の誰もが閲覧できます";
+
   return (
     <div
-      ref={popoverRef}
-      className="absolute top-10 right-4 z-[60] w-[420px] bg-white border border-zinc-200 rounded-xl shadow-xl animate-in fade-in zoom-in-95 duration-100 origin-top-right"
+      className="fixed inset-0 z-[70] flex items-center justify-center bg-black/20 px-4 py-6"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) {
+          onClose();
+        }
+      }}
     >
-      {/* タブ切り替え */}
-      <div className="flex border-b border-zinc-100">
-        <button
-          onClick={() => setActiveTab("share")}
-          className={`flex-1 px-4 py-2 text-sm font-medium transition-colors ${
-            activeTab === "share"
-              ? "text-zinc-900 border-b-2 border-zinc-900"
-              : "text-zinc-500 hover:text-zinc-700"
-          }`}
-        >
-          共有
-        </button>
-        <button
-          onClick={() => setActiveTab("publish")}
-          className={`flex-1 px-4 py-2 text-sm font-medium transition-colors ${
-            activeTab === "publish"
-              ? "text-blue-600 border-b-2 border-blue-600"
-              : "text-zinc-500 hover:text-zinc-700"
-          }`}
-        >
-          Web公開 {isPublic && <span className="ml-1 w-2 h-2 inline-block rounded-full bg-blue-500" />}
-        </button>
-      </div>
-
-      {activeTab === "share" ? (
-        <div className="p-4 space-y-4">
-          {/* 招待フォーム */}
-          <div className="flex gap-2">
-            <input
-              type="email"
-              value={inviteEmail}
-              onChange={(e) => setInviteEmail(e.target.value)}
-              placeholder="メールアドレスを入力"
-              className="flex-1 px-3 py-1.5 text-sm border border-zinc-200 rounded-md focus:outline-none focus:border-blue-500 bg-zinc-50 focus:bg-white transition-colors"
-            />
-            <select
-              value={inviteRole}
-              onChange={(e) => setInviteRole(e.target.value as Permission)}
-              className="text-xs border border-zinc-200 rounded-md px-2 bg-white text-zinc-600 focus:outline-none"
-            >
-              <option value="full">フルアクセス</option>
-              <option value="edit">編集</option>
-              <option value="comment">コメント</option>
-              <option value="view">読み取り</option>
-            </select>
-            <button
-              onClick={handleInvite}
-              disabled={!inviteEmail.trim()}
-              className="px-3 py-1.5 text-sm font-medium text-white bg-blue-500 hover:bg-blue-600 rounded-md disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              招待
-            </button>
+      <div
+        className="relative w-[560px] max-w-[92vw] rounded-2xl border border-zinc-200 bg-white shadow-2xl"
+        onMouseDown={(event) => {
+          const target = event.target as Node;
+          if (roleButtonRef.current?.contains(target) || roleMenuRef.current?.contains(target)) {
+            return;
+          }
+          setIsRoleMenuOpen(false);
+        }}
+      >
+        <div className="px-6 pt-5">
+          <div className="text-lg font-semibold text-zinc-900">
+            「{safeNodeName}」を共有
           </div>
+        </div>
 
-          <div className="border-t border-zinc-100 my-2" />
-
-          {/* ユーザーリスト */}
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <div className="w-8 h-8 rounded-full bg-zinc-200 flex items-center justify-center text-zinc-500 text-xs">
-                  Me
+        <div className="px-6 pb-6 pt-4 space-y-6">
+          <div>
+            <div className="text-sm font-semibold text-zinc-700 mb-3">
+              アクセスできるユーザー
+            </div>
+            <div className="flex items-center justify-between px-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-full bg-zinc-200 flex items-center justify-center text-sm font-medium text-zinc-600">
+                  {ownerInitial}
                 </div>
                 <div>
-                  <div className="text-sm font-medium text-zinc-900">自分（オーナー）</div>
-                  <div className="text-xs text-zinc-500">{nodeName}</div>
-                </div>
-              </div>
-              <div className="text-xs text-zinc-400">フルアクセス権限</div>
-            </div>
-
-            {sharedUsers.map((user, i) => (
-              <div key={i} className="flex items-center justify-between group">
-                <div className="flex items-center gap-2">
-                  {user.avatarUrl ? (
-                    <img src={user.avatarUrl} alt="" className="w-8 h-8 rounded-full" />
-                  ) : (
-                    <div className="w-8 h-8 rounded-full bg-orange-100 flex items-center justify-center text-orange-600 text-xs font-bold">
-                      {user.email[0].toUpperCase()}
-                    </div>
-                  )}
-                  <div>
-                    <div className="text-sm font-medium text-zinc-900">{user.email}</div>
-                    <div className="text-xs text-zinc-500">招待済み</div>
+                  <div className="text-sm font-medium text-zinc-900">
+                    {ownerDisplayName}
                   </div>
-                </div>
-                
-                {/* 権限変更ドロップダウン */}
-                <div className="relative">
-                  <button
-                    onClick={() => setOpenDropdown(openDropdown === user.email ? null : user.email)}
-                    className="flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-700 hover:bg-zinc-100 px-2 py-1 rounded transition-colors"
-                  >
-                    {user.role === "full" && "フルアクセス権限"}
-                    {user.role === "edit" && "編集権限"}
-                    {user.role === "comment" && "コメント権限"}
-                    {user.role === "view" && "読み取り権限"}
-                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                    </svg>
-                  </button>
-                  
-                  {openDropdown === user.email && (
-                    <div className="absolute right-0 top-full mt-1 w-56 bg-white border border-zinc-200 rounded-lg shadow-xl z-[70] py-1 max-h-[300px] overflow-y-auto">
-                      <div className="px-3 py-1 text-[10px] text-zinc-400 uppercase tracking-wider">権限を変更</div>
-                      
-                      <button
-                        onClick={() => {
-                          onUpdatePermission(user.email, "full");
-                          setOpenDropdown(null);
-                        }}
-                        className={`w-full text-left px-3 py-2 hover:bg-zinc-50 flex items-center justify-between ${user.role === "full" ? "bg-blue-50" : ""}`}
-                      >
-                        <div>
-                          <div className="text-sm font-medium text-zinc-800">フルアクセス権限</div>
-                          <div className="text-xs text-zinc-500">編集、サジェスト、コメント、ほかのユーザーへの共有</div>
-                        </div>
-                        {user.role === "full" && <svg className="w-4 h-4 text-blue-500" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" /></svg>}
-                      </button>
-                      
-                      <button
-                        onClick={() => {
-                          onUpdatePermission(user.email, "edit");
-                          setOpenDropdown(null);
-                        }}
-                        className={`w-full text-left px-3 py-2 hover:bg-zinc-50 flex items-center justify-between ${user.role === "edit" ? "bg-blue-50" : ""}`}
-                      >
-                        <div>
-                          <div className="text-sm font-medium text-zinc-800">編集権限</div>
-                          <div className="text-xs text-zinc-500">編集、サジェスト、コメント</div>
-                        </div>
-                        {user.role === "edit" && <svg className="w-4 h-4 text-blue-500" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" /></svg>}
-                      </button>
-                      
-                      <button
-                        onClick={() => {
-                          onUpdatePermission(user.email, "comment");
-                          setOpenDropdown(null);
-                        }}
-                        className={`w-full text-left px-3 py-2 hover:bg-zinc-50 flex items-center justify-between ${user.role === "comment" ? "bg-blue-50" : ""}`}
-                      >
-                        <div>
-                          <div className="text-sm font-medium text-zinc-800">コメント権限</div>
-                          <div className="text-xs text-zinc-500">サジェストとコメント</div>
-                        </div>
-                        {user.role === "comment" && <svg className="w-4 h-4 text-blue-500" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" /></svg>}
-                      </button>
-                      
-                      <button
-                        onClick={() => {
-                          onUpdatePermission(user.email, "view");
-                          setOpenDropdown(null);
-                        }}
-                        className={`w-full text-left px-3 py-2 hover:bg-zinc-50 flex items-center justify-between ${user.role === "view" ? "bg-blue-50" : ""}`}
-                      >
-                        <div>
-                          <div className="text-sm font-medium text-zinc-800">読み取り権限</div>
-                          <div className="text-xs text-zinc-500">閲覧のみ</div>
-                        </div>
-                        {user.role === "view" && <svg className="w-4 h-4 text-blue-500" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" /></svg>}
-                      </button>
-                      
-                      <div className="border-t border-zinc-100 my-1" />
-                      
-                      <button
-                        onClick={() => {
-                          onRemoveUser(user.email);
-                          setOpenDropdown(null);
-                        }}
-                        className="w-full text-left px-3 py-2 hover:bg-red-50 text-red-500 text-sm"
-                      >
-                        削除
-                      </button>
-                    </div>
-                  )}
+                  {trimmedOwnerEmail ? (
+                    <div className="text-xs text-zinc-500">{trimmedOwnerEmail}</div>
+                  ) : null}
                 </div>
               </div>
-            ))}
+              <div className="text-xs text-zinc-400">オーナー</div>
+            </div>
           </div>
 
-          <div className="border-t border-zinc-100 my-2" />
-          
-          <div className="flex items-center justify-between text-zinc-500 text-xs">
-            <div className="flex items-center gap-2">
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
-              <span>Web上でリンクを知る全ユーザー</span>
+          <div className="border-t border-zinc-100" />
+
+          <div>
+            <div className="text-sm font-semibold text-zinc-700 mb-3">
+              一般的なアクセス
             </div>
-            <button 
-              onClick={() => handleCopyUrl()}
-              className="text-zinc-400 hover:text-zinc-600"
+            <div className="relative flex items-center justify-between gap-4 rounded-lg bg-zinc-50 px-4 py-3">
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-emerald-100 text-emerald-700">
+                  <svg
+                    className="w-5 h-5"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <circle cx="12" cy="12" r="9" />
+                    <path d="M3 12h18" />
+                    <path d="M12 3c2.5 2.8 4 6 4 9s-1.5 6.2-4 9" />
+                    <path d="M12 3c-2.5 2.8-4 6-4 9s1.5 6.2 4 9" />
+                  </svg>
+                </div>
+                <div>
+                  <div className="text-sm font-medium text-zinc-900">
+                    リンクを知っている全員
+                  </div>
+                  <div className="text-xs text-zinc-500">{roleDescription}</div>
+                </div>
+              </div>
+              <div className="relative">
+                <button
+                  ref={roleButtonRef}
+                  type="button"
+                  onClick={() => setIsRoleMenuOpen((prev) => !prev)}
+                  className="inline-flex items-center gap-1 text-sm font-medium text-zinc-700 hover:text-zinc-900"
+                  aria-haspopup="listbox"
+                  aria-expanded={isRoleMenuOpen}
+                >
+                  {roleLabel}
+                  <svg className="w-4 h-4" viewBox="0 0 20 20" fill="currentColor">
+                    <path d="M5.5 7.5l4.5 4.5 4.5-4.5" />
+                  </svg>
+                </button>
+                {isRoleMenuOpen ? (
+                  <div
+                    ref={roleMenuRef}
+                    className="absolute right-0 top-full mt-2 w-44 rounded-lg border border-zinc-200 bg-white shadow-xl py-1 z-10"
+                    role="listbox"
+                  >
+                    <div className="px-3 py-2 text-[11px] text-zinc-400">役割</div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAccessRole("viewer");
+                        setIsRoleMenuOpen(false);
+                      }}
+                      className="w-full px-3 py-2 text-left text-sm text-zinc-700 hover:bg-zinc-50 flex items-center justify-between"
+                    >
+                      閲覧者
+                      {accessRole === "viewer" ? (
+                        <svg className="w-4 h-4 text-blue-600" viewBox="0 0 20 20" fill="currentColor">
+                          <path
+                            fillRule="evenodd"
+                            d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+                            clipRule="evenodd"
+                          />
+                        </svg>
+                      ) : null}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAccessRole("editor");
+                        setIsRoleMenuOpen(false);
+                      }}
+                      className="w-full px-3 py-2 text-left text-sm text-zinc-700 hover:bg-zinc-50 flex items-center justify-between"
+                    >
+                      編集者
+                      {accessRole === "editor" ? (
+                        <svg className="w-4 h-4 text-blue-600" viewBox="0 0 20 20" fill="currentColor">
+                          <path
+                            fillRule="evenodd"
+                            d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+                            clipRule="evenodd"
+                          />
+                        </svg>
+                      ) : null}
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between pt-2">
+            <button
+              onClick={handleCopyUrl}
+              className="inline-flex items-center gap-2 rounded-full border border-zinc-300 px-4 py-2 text-sm font-medium text-blue-600 hover:bg-blue-50 transition-colors"
             >
-              {isCopied ? "コピーしました" : "リンクをコピー"}
+              <svg
+                className="w-4 h-4"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M10 13a5 5 0 0 1 0-7l1.5-1.5a5 5 0 0 1 7 7L17 12" />
+                <path d="M14 11a5 5 0 0 1 0 7L12.5 20.5a5 5 0 1 1-7-7L7 12" />
+              </svg>
+              リンクをコピー
+            </button>
+            <button
+              onClick={onClose}
+              className="rounded-full bg-blue-600 px-5 py-2 text-sm font-medium text-white hover:bg-blue-700 transition-colors"
+            >
+              完了
             </button>
           </div>
         </div>
-      ) : (
-        /* Web公開タブ */
-        <div className="p-4">
-          <div className="flex items-center justify-center py-6">
-            <div className="text-center space-y-4">
-              <div className="w-16 h-16 bg-blue-50 rounded-full flex items-center justify-center mx-auto text-4xl">
-                🌍
-              </div>
-              <div>
-                <h3 className="text-lg font-semibold text-zinc-900">Publish to the web</h3>
-                <p className="text-sm text-zinc-500 mt-1 max-w-[280px] mx-auto">
-                  Web公開すると、URLを知っている人は誰でもこのページを閲覧できるようになります。
-                </p>
-              </div>
-              
-              {!isPublic ? (
-                <button
-                  onClick={() => onTogglePublic(true)}
-                  className="w-full bg-blue-500 hover:bg-blue-600 text-white font-medium py-2 rounded-lg transition-colors"
-                >
-                  公開する
-                </button>
-              ) : (
-                <div className="space-y-4">
-                  <div className="flex items-center gap-2 p-2 bg-zinc-50 border border-zinc-200 rounded-lg">
-                    <input 
-                      readOnly 
-                      value={publicUrl}
-                      className="flex-1 bg-transparent text-sm text-zinc-600 outline-none"
-                    />
-                    <button
-                      onClick={handleCopyUrl}
-                      className="text-xs font-medium text-blue-600 hover:text-blue-700 px-2"
-                    >
-                      {isCopied ? "Copied!" : "Copy"}
-                    </button>
-                  </div>
-                  
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between text-sm py-1">
-                      <span className="text-zinc-600">検索エンジンへのインデックスを許可</span>
-                      <div className="w-8 h-5 bg-zinc-200 rounded-full relative cursor-pointer">
-                        <div className="w-3 h-3 bg-white rounded-full absolute top-1 left-1" />
-                      </div>
-                    </div>
-                    <div className="flex items-center justify-between text-sm py-1">
-                      <span className="text-zinc-600">テンプレートとして複製を許可</span>
-                      <div className="w-8 h-5 bg-blue-500 rounded-full relative cursor-pointer">
-                        <div className="w-3 h-3 bg-white rounded-full absolute top-1 right-1" />
-                      </div>
-                    </div>
-                  </div>
 
-                  <div className="pt-2">
-                    <button
-                      onClick={() => onTogglePublic(false)}
-                      className="text-sm text-red-500 hover:text-red-600 font-medium"
-                    >
-                      公開停止
-                    </button>
-                    <a
-                      href={publicUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="ml-4 text-sm text-blue-500 hover:text-blue-600 font-medium"
-                    >
-                      サイトを表示
-                    </a>
-                  </div>
-                </div>
-              )}
-            </div>
+        {isCopied ? (
+          <div className="absolute bottom-4 left-1/2 -translate-x-1/2 rounded-md bg-zinc-800 px-4 py-2 text-xs text-white shadow-lg">
+            リンクをコピーしました
           </div>
-        </div>
-      )}
+        ) : null}
+      </div>
     </div>
   );
 }
-
