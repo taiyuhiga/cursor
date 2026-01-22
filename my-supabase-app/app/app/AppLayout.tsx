@@ -19,7 +19,6 @@ import { SettingsView } from "@/components/SettingsView";
 import { ReviewPanel } from "@/components/ReviewPanel";
 import { SourceControlPanel, type SourceControlChange } from "@/components/SourceControlPanel";
 import { MediaPreview, isMediaFile, prefetchMediaUrl } from "@/components/MediaPreview";
-import { DocumentPreview, isDocumentFile } from "@/components/DocumentPreview";
 import { ReplaceConfirmDialog } from "@/components/ReplaceConfirmDialog";
 import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
 import { UndoConfirmDialog } from "@/components/UndoConfirmDialog";
@@ -5414,11 +5413,6 @@ ${diffs}`;
                       <span>Creating...</span>
                     </div>
                   </div>
-                ) : isDocumentFile(activeNode.name) ? (
-                  <DocumentPreview
-                    fileName={activeNode.name}
-                    nodeId={activeNode.id}
-                  />
                 ) : isMediaFile(activeNode.name) ? (
                   <MediaPreview
                     fileName={activeNode.name}

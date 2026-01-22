@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { unstable_noStore as noStore } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { buildLegacyStoragePath, buildStoragePath } from "@/lib/storage/path";
 
 type NodeInfo = {
@@ -20,8 +21,9 @@ type StorageEntry = {
 function extractStoragePath(text: string) {
   const trimmed = text.trim();
   if (!trimmed) return null;
-  const match = trimmed.match(/^storage:(\S+)/);
-  return match ? match[1] : null;
+  const match = trimmed.match(/storage:\s*([^\s]+)/);
+  if (!match) return null;
+  return match[1].replace(/^["']|["']$/g, "");
 }
 
 function getCandidatePaths(node: NodeInfo, text: string) {
@@ -50,8 +52,8 @@ function getEntryTimestamp(entry: StorageEntry) {
   return Number.isNaN(time) ? null : time;
 }
 
-async function resolveFromUploads(supabase: any, uploadsPrefix: string) {
-  const { data: listData, error: listError } = await supabase.storage
+async function resolveFromUploads(storageClient: any, uploadsPrefix: string) {
+  const { data: listData, error: listError } = await storageClient.storage
     .from("files")
     .list(uploadsPrefix);
 
@@ -79,12 +81,9 @@ async function resolveFromUploads(supabase: any, uploadsPrefix: string) {
   return `${uploadsPrefix}/${withTimestamps[0].entry.name}`;
 }
 
-async function resolveFromList(
-  supabase: any,
-  node: NodeInfo
-) {
+async function resolveFromList(storageClient: any, node: NodeInfo) {
   const prefix = `${node.project_id}/${node.id}`;
-  const { data: listData, error: listError } = await supabase.storage
+  const { data: listData, error: listError } = await storageClient.storage
     .from("files")
     .list(prefix);
 
@@ -113,7 +112,7 @@ async function resolveFromList(
     .filter(Boolean) as Array<{ entry: StorageEntry; time: number }>;
 
   if (withTimestamps.length === 0) {
-    const uploadPath = await resolveFromUploads(supabase, `${prefix}/uploads`);
+    const uploadPath = await resolveFromUploads(storageClient, `${prefix}/uploads`);
     if (uploadPath) {
       return uploadPath;
     }
@@ -128,11 +127,8 @@ async function resolveFromList(
   return `${prefix}/${withTimestamps[0].entry.name}`;
 }
 
-async function fetchStorageObject(
-  supabase: any,
-  storagePath: string
-) {
-  const { data, error } = await supabase.storage
+async function fetchStorageObject(storageClient: any, storagePath: string) {
+  const { data, error } = await storageClient.storage
     .from("files")
     .createSignedUrl(storagePath, 60);
 
@@ -157,6 +153,8 @@ export async function GET(req: NextRequest) {
   try {
     noStore();
     const supabase = await createClient();
+    const canUseAdmin = Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY);
+    const storageClient = canUseAdmin ? createAdminClient() : supabase;
     const { searchParams } = new URL(req.url);
     const nodeId = searchParams.get("nodeId");
 
@@ -189,7 +187,7 @@ export async function GET(req: NextRequest) {
     let fileData: { arrayBuffer: ArrayBuffer; contentType: string } | null = null;
 
     for (const candidate of candidates) {
-      const data = await fetchStorageObject(supabase, candidate);
+      const data = await fetchStorageObject(storageClient, candidate);
       if (data) {
         storagePath = candidate;
         fileData = data;
@@ -198,9 +196,9 @@ export async function GET(req: NextRequest) {
     }
 
     if (!fileData) {
-      const fallbackPath = await resolveFromList(supabase, node);
+      const fallbackPath = await resolveFromList(storageClient, node);
       if (fallbackPath) {
-        const data = await fetchStorageObject(supabase, fallbackPath);
+        const data = await fetchStorageObject(storageClient, fallbackPath);
         if (data) {
           storagePath = fallbackPath;
           fileData = data;
@@ -231,6 +229,8 @@ export async function POST(req: NextRequest) {
   try {
     noStore();
     const supabase = await createClient();
+    const canUseAdmin = Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY);
+    const storageClient = canUseAdmin ? createAdminClient() : supabase;
     const { nodeId } = await req.json();
 
     if (!nodeId) {
@@ -261,7 +261,7 @@ export async function POST(req: NextRequest) {
     let signedUrl: { signedUrl: string } | null = null;
 
     for (const candidate of candidates) {
-      const { data, error } = await supabase.storage
+      const { data, error } = await storageClient.storage
         .from("files")
         .createSignedUrl(candidate, 86400);
       if (!error && data) {
@@ -271,9 +271,9 @@ export async function POST(req: NextRequest) {
     }
 
     if (!signedUrl) {
-      const fallbackPath = await resolveFromList(supabase, node);
+      const fallbackPath = await resolveFromList(storageClient, node);
       if (fallbackPath) {
-        const { data, error } = await supabase.storage
+        const { data, error } = await storageClient.storage
           .from("files")
           .createSignedUrl(fallbackPath, 86400);
         if (!error && data) {

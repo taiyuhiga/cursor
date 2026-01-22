@@ -483,26 +483,6 @@ export async function POST(req: NextRequest) {
         break;
       }
 
-      case "read_file_content": {
-        const { nodeId } = body;
-        if (!nodeId) {
-          return NextResponse.json({ error: "nodeId is required" }, { status: 400 });
-        }
-
-        const { data: content, error: contentError } = await supabase
-          .from("file_contents")
-          .select("text")
-          .eq("node_id", nodeId)
-          .maybeSingle();
-
-        if (contentError) {
-          throw new Error(`Failed to read file content: ${contentError.message}`);
-        }
-
-        result = { success: true, content: content?.text || "" };
-        break;
-      }
-
       default:
         return NextResponse.json({ error: "Invalid action" }, { status: 400 });
     }
