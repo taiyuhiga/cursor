@@ -227,11 +227,8 @@ export function SharedFileViewer({ nodeId }: Props) {
   const pathSegments = path.split("/");
   const mediaType = getMediaType(node.name);
 
-  // Calculate header height based on authentication status
-  const headerHeight = isAuthenticated ? 70 : 115; // Tab bar + breadcrumb (+ banner if not authenticated)
-
   return (
-    <div className="h-screen flex flex-col bg-white overflow-hidden">
+    <div className="h-screen flex flex-col bg-zinc-100 overflow-hidden">
       {/* Sign up banner - only show for non-authenticated users */}
       {!isAuthenticated && (
         <div className="flex-shrink-0 bg-zinc-100 border-b border-zinc-200 px-4 py-2.5 flex items-center justify-center gap-4">
@@ -247,57 +244,62 @@ export function SharedFileViewer({ nodeId }: Props) {
         </div>
       )}
 
-      {/* Main content area - full width like the app */}
-      <div className="flex-1 flex flex-col min-h-0">
-        {/* Tab bar */}
-        <div className="flex-shrink-0 flex items-center justify-between border-b border-zinc-200 bg-zinc-50 pr-2">
-          <div className="flex items-center">
-            <div className="flex items-center gap-2 px-3 py-2 bg-white border-t-2 border-blue-500">
-              <Icon className="w-4 h-4 flex-shrink-0" />
-              <span className="text-sm text-zinc-900 truncate max-w-[200px]">{node.name}</span>
+      {/* Main layout with sidebars */}
+      <div className="flex-1 flex min-h-0">
+        {/* Left sidebar placeholder (file tree area) */}
+        <div className="w-64 flex-shrink-0 bg-zinc-100 border-r border-zinc-200" />
+
+        {/* Center content area */}
+        <div className="flex-1 flex flex-col min-h-0 min-w-0 bg-white">
+          {/* Tab bar */}
+          <div className="flex-shrink-0 flex items-center justify-between border-b border-zinc-200 bg-zinc-50 pr-2">
+            <div className="flex items-center">
+              <div className="flex items-center gap-2 px-3 py-2 bg-white border-t-2 border-blue-500">
+                <Icon className="w-4 h-4 flex-shrink-0" />
+                <span className="text-sm text-zinc-900 truncate max-w-[200px]">{node.name}</span>
+              </div>
+            </div>
+            <div className="flex items-center gap-1 pr-2">
+              {/* Download button */}
+              <button
+                onClick={handleDownload}
+                className="p-1.5 rounded hover:bg-zinc-200 transition-colors"
+                title="ダウンロード"
+              >
+                <svg
+                  className="w-4 h-4 text-zinc-600"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="7 10 12 15 17 10" />
+                  <line x1="12" y1="15" x2="12" y2="3" />
+                </svg>
+              </button>
             </div>
           </div>
-          <div className="flex items-center gap-1 pr-2">
-            {/* Download button */}
-            <button
-              onClick={handleDownload}
-              className="p-1.5 rounded hover:bg-zinc-200 transition-colors"
-              title="ダウンロード"
-            >
-              <svg
-                className="w-4 h-4 text-zinc-600"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                <polyline points="7 10 12 15 17 10" />
-                <line x1="12" y1="15" x2="12" y2="3" />
-              </svg>
-            </button>
+
+          {/* Breadcrumb */}
+          <div className="flex-shrink-0 flex items-center gap-1 px-3 py-1.5 bg-white text-xs text-zinc-600 border-b border-zinc-100 overflow-x-auto">
+            {pathSegments.map((segment, index) => {
+              const isLast = index === pathSegments.length - 1;
+              const SegmentIcon = isLast ? Icon : getFileIcon("folder");
+              return (
+                <span key={index} className="flex items-center gap-1 whitespace-nowrap">
+                  {index > 0 && <span className="text-zinc-400 mx-0.5">{">"}</span>}
+                  <SegmentIcon className="w-4 h-4 flex-shrink-0" />
+                  <span className={isLast ? "text-zinc-900" : ""}>{segment}</span>
+                </span>
+              );
+            })}
           </div>
-        </div>
 
-        {/* Breadcrumb */}
-        <div className="flex-shrink-0 flex items-center gap-1 px-3 py-1.5 bg-white text-xs text-zinc-600 border-b border-zinc-100 overflow-x-auto">
-          {pathSegments.map((segment, index) => {
-            const isLast = index === pathSegments.length - 1;
-            const SegmentIcon = isLast ? Icon : getFileIcon("folder");
-            return (
-              <span key={index} className="flex items-center gap-1 whitespace-nowrap">
-                {index > 0 && <span className="text-zinc-400 mx-0.5">{">"}</span>}
-                <SegmentIcon className="w-4 h-4 flex-shrink-0" />
-                <span className={isLast ? "text-zinc-900" : ""}>{segment}</span>
-              </span>
-            );
-          })}
-        </div>
-
-        {/* Content area */}
-        <div className="flex-1 min-h-0 overflow-hidden">
+          {/* Content area */}
+          <div className="flex-1 min-h-0 overflow-hidden">
           {node.type === "folder" ? (
             <div className="h-full flex items-center justify-center text-zinc-500">
               <div className="text-center">
@@ -389,7 +391,11 @@ export function SharedFileViewer({ nodeId }: Props) {
               </div>
             </div>
           )}
+          </div>
         </div>
+
+        {/* Right sidebar placeholder (chat area) */}
+        <div className="w-80 flex-shrink-0 bg-zinc-100 border-l border-zinc-200" />
       </div>
     </div>
   );

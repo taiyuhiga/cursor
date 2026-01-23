@@ -290,7 +290,7 @@ export function SharePopover({
                 disabled={!emailInput.trim() || isLoading}
                 className="rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
-                {isLoading ? "..." : "追加"}
+                {isLoading ? "..." : "招待"}
               </button>
             </div>
             {error && (
