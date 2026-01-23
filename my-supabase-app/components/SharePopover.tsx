@@ -85,6 +85,9 @@ export function SharePopover({
         setSharedUsers(data.sharedUsers);
       }
       setAccessType(data.isPublic ? "public" : "restricted");
+      if (data.publicAccessRole) {
+        setPublicRole(data.publicAccessRole);
+      }
     } catch {
       // Ignore fetch errors
     }
@@ -279,6 +282,26 @@ export function SharePopover({
     const newIsPublic = newType === "public";
     if (newIsPublic !== isPublic) {
       await onTogglePublic(newIsPublic);
+    }
+  };
+
+  const handlePublicRoleChange = async (newRole: AccessRole) => {
+    setPublicRole(newRole);
+    setIsPublicRoleMenuOpen(false);
+
+    // Save the public role to the database
+    try {
+      await fetch("/api/share", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "update_public_role",
+          nodeId,
+          publicAccessRole: newRole,
+        }),
+      });
+    } catch {
+      // Ignore errors for now
     }
   };
 
@@ -561,10 +584,7 @@ export function SharePopover({
                         >
                           <button
                             type="button"
-                            onClick={() => {
-                              setPublicRole("viewer");
-                              setIsPublicRoleMenuOpen(false);
-                            }}
+                            onClick={() => handlePublicRoleChange("viewer")}
                             className="w-full px-3 py-2 text-left text-sm text-zinc-700 hover:bg-zinc-50 flex items-center justify-between"
                           >
                             閲覧者
@@ -576,10 +596,7 @@ export function SharePopover({
                           </button>
                           <button
                             type="button"
-                            onClick={() => {
-                              setPublicRole("editor");
-                              setIsPublicRoleMenuOpen(false);
-                            }}
+                            onClick={() => handlePublicRoleChange("editor")}
                             className="w-full px-3 py-2 text-left text-sm text-zinc-700 hover:bg-zinc-50 flex items-center justify-between"
                           >
                             編集者

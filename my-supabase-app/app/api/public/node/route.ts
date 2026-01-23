@@ -10,6 +10,7 @@ type NodeInfo = {
   project_id: string;
   parent_id: string | null;
   is_public: boolean;
+  public_access_role: "viewer" | "editor" | null;
   created_at: string;
 };
 
@@ -45,12 +46,33 @@ export async function GET(req: NextRequest) {
   const canUseAdmin = Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY);
   const storageClient = canUseAdmin ? createAdminClient() : supabase;
 
-  // Get node info
-  const { data: node, error: nodeError } = await supabase
+  // Get node info - try with public_access_role first, fallback without it
+  let node: NodeInfo | null = null;
+  let nodeError: Error | null = null;
+
+  // First try with public_access_role column
+  const { data: nodeWithRole, error: errorWithRole } = await supabase
     .from("nodes")
-    .select("id, name, type, project_id, parent_id, is_public, created_at")
+    .select("id, name, type, project_id, parent_id, is_public, public_access_role, created_at")
     .eq("id", nodeId)
     .maybeSingle();
+
+  if (!errorWithRole && nodeWithRole) {
+    node = nodeWithRole as NodeInfo;
+  } else {
+    // Fallback: query without public_access_role (column may not exist)
+    const { data: nodeWithoutRole, error: errorWithoutRole } = await supabase
+      .from("nodes")
+      .select("id, name, type, project_id, parent_id, is_public, created_at")
+      .eq("id", nodeId)
+      .maybeSingle();
+
+    if (errorWithoutRole || !nodeWithoutRole) {
+      nodeError = errorWithoutRole;
+    } else {
+      node = { ...nodeWithoutRole, public_access_role: "editor" } as NodeInfo;
+    }
+  }
 
   if (nodeError || !node) {
     return NextResponse.json({ error: "Node not found" }, { status: 404 });
@@ -161,6 +183,7 @@ export async function GET(req: NextRequest) {
       name: node.name,
       type: node.type,
       isPublic: node.is_public,
+      publicAccessRole: node.public_access_role || "editor",
       createdAt: node.created_at,
     },
     path: pathSegments.join("/"),

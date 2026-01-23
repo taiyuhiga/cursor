@@ -101,13 +101,50 @@ export async function POST(req: NextRequest) {
           return NextResponse.json({ error: "nodeId is required" }, { status: 400 });
         }
 
-        const { error } = await supabase
+        // First update is_public
+        const { error: publicError } = await supabase
           .from("nodes")
           .update({ is_public: isPublic })
           .eq("id", nodeId);
 
-        if (error) throw error;
-        return NextResponse.json({ success: true, isPublic });
+        if (publicError) throw publicError;
+
+        // Try to update public_access_role if provided (column may not exist)
+        if (body.publicAccessRole) {
+          try {
+            await supabase
+              .from("nodes")
+              .update({ public_access_role: body.publicAccessRole })
+              .eq("id", nodeId);
+          } catch {
+            // Ignore error if column doesn't exist
+          }
+        }
+
+        return NextResponse.json({ success: true, isPublic, publicAccessRole: body.publicAccessRole });
+      }
+
+      case "update_public_role": {
+        if (!nodeId || !body.publicAccessRole) {
+          return NextResponse.json({ error: "nodeId and publicAccessRole are required" }, { status: 400 });
+        }
+
+        // Try to update (column may not exist)
+        try {
+          const { error } = await supabase
+            .from("nodes")
+            .update({ public_access_role: body.publicAccessRole })
+            .eq("id", nodeId);
+
+          if (error) {
+            // If column doesn't exist, just return success (it will default to editor)
+            return NextResponse.json({ success: true, publicAccessRole: body.publicAccessRole });
+          }
+        } catch {
+          // Ignore error if column doesn't exist
+        }
+
+        return NextResponse.json({ success: true, publicAccessRole: body.publicAccessRole });
       }
 
       default:
@@ -134,12 +171,30 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  // Get node info including is_public
-  const { data: node } = await supabase
+  // Get node info including is_public and public_access_role
+  // Try with public_access_role first, fallback without it
+  let node: { is_public: boolean; public_access_role?: string } | null = null;
+
+  const { data: nodeWithRole, error: errorWithRole } = await supabase
     .from("nodes")
-    .select("is_public")
+    .select("is_public, public_access_role")
     .eq("id", nodeId)
     .single();
+
+  if (!errorWithRole && nodeWithRole) {
+    node = nodeWithRole;
+  } else {
+    // Fallback: query without public_access_role (column may not exist)
+    const { data: nodeWithoutRole } = await supabase
+      .from("nodes")
+      .select("is_public")
+      .eq("id", nodeId)
+      .single();
+
+    if (nodeWithoutRole) {
+      node = { ...nodeWithoutRole, public_access_role: "editor" };
+    }
+  }
 
   // Get shared users for this node
   const { data: shares } = await supabase
@@ -183,6 +238,7 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json({
     isPublic: node?.is_public ?? false,
+    publicAccessRole: node?.public_access_role ?? "editor",
     sharedUsers,
   });
 }

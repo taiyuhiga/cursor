@@ -32,9 +32,13 @@ create table if not exists public.nodes (
   type text not null check (type in ('file', 'folder')),
   name text not null,
   is_public boolean default false,
+  public_access_role text check (public_access_role in ('viewer', 'editor')) default 'editor',
   created_at timestamp with time zone default timezone('utc'::text, now()) not null,
   unique(project_id, parent_id, name)
 );
+
+-- Add column if table already exists
+alter table public.nodes add column if not exists public_access_role text check (public_access_role in ('viewer', 'editor')) default 'editor';
 
 create table if not exists public.file_contents (
   id uuid default uuid_generate_v4() primary key,

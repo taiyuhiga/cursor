@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { getFileIcon } from "./fileIcons";
+import { createClient } from "@/lib/supabase/client";
 import dynamic from "next/dynamic";
 
 // Dynamically import Monaco Editor to avoid SSR issues
@@ -21,6 +22,7 @@ type NodeData = {
     name: string;
     type: "file" | "folder";
     isPublic: boolean;
+    publicAccessRole: "viewer" | "editor";
     createdAt: string;
   };
   path: string;
@@ -277,17 +279,17 @@ export function SharedFileViewer({ nodeId }: Props) {
 
   return (
     <div className="h-screen flex flex-col bg-zinc-100 overflow-hidden">
-      {/* Sign up banner - only show for non-authenticated users */}
-      {!isAuthenticated && (
+      {/* Sign up banner - only show for non-authenticated users with edit access */}
+      {!isAuthenticated && nodeData.node.publicAccessRole === "editor" && (
         <div className="flex-shrink-0 bg-zinc-100 border-b border-zinc-200 px-4 py-2.5 flex items-center justify-center gap-4">
           <p className="text-sm text-zinc-600">
-            あと少しです。今すぐサインアップして、Lovecatで作成を開始しましょう。
+            Lovecatアカウントを持っている人なら誰でもこのページを編集できます。
           </p>
           <a
             href="/auth/login"
             className="inline-flex items-center px-4 py-1.5 text-sm font-medium border border-zinc-300 rounded-md bg-white hover:bg-zinc-50 transition-colors whitespace-nowrap"
           >
-            サインアップまたはログイン
+            編集するにはサインアップまたはログインしてください
           </a>
         </div>
       )}
@@ -397,8 +399,19 @@ export function SharedFileViewer({ nodeId }: Props) {
               language={getLanguageFromFileName(node.name)}
               value={content}
               theme="vs"
+              onMount={(editor) => {
+                // Disable drag and drop completely
+                editor.getDomNode()?.addEventListener("dragover", (e) => e.preventDefault(), true);
+                editor.getDomNode()?.addEventListener("drop", (e) => e.preventDefault(), true);
+              }}
               options={{
                 readOnly: true,
+                readOnlyMessage: { value: "" },
+                domReadOnly: true,
+                cursorWidth: 0,
+                hideCursorInOverviewRuler: true,
+                dropIntoEditor: { enabled: false },
+                dragAndDrop: false,
                 minimap: { enabled: false },
                 scrollBeyondLastLine: false,
                 fontSize: 13,

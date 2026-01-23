@@ -99,3 +99,11 @@
   border: none !important;
 }
 
+/* Hide Monaco drop indicator for read-only editors */
+.monaco-editor .dnd-target,
+.monaco-editor .drop-target-style,
+.monaco-editor .monaco-editor-overlaymessage,
+.monaco-editor .dropIntoEditorWidget {
+  display: none !important;
+}
+
