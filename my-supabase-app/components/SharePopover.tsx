@@ -393,7 +393,7 @@ export function SharePopover({
                 <button
                   type="button"
                   onClick={() => setShowInvitePanel(true)}
-                  className="px-4 py-2.5 text-sm font-medium text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                  className="px-5 py-2.5 text-sm font-medium text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-full transition-colors"
                 >
                   招待
                 </button>
