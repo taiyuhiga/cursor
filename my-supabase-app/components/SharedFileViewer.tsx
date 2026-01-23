@@ -363,35 +363,39 @@ export function SharedFileViewer({ nodeId }: Props) {
       {/* Login popup modal */}
       {showLoginPopup && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/20"
           onClick={closeLoginPopup}
         >
           <div
-            className="relative bg-white rounded-xl shadow-2xl w-full max-w-md mx-4 overflow-hidden"
+            className="relative bg-white rounded-2xl shadow-2xl w-full max-w-[480px] mx-4"
             onClick={(e) => e.stopPropagation()}
           >
             {/* Cancel button */}
             <button
               onClick={closeLoginPopup}
-              className="absolute top-4 right-4 text-sm text-zinc-500 hover:text-zinc-700 transition-colors"
+              className="absolute top-5 right-6 text-sm text-zinc-400 hover:text-zinc-600 transition-colors"
             >
               キャンセル
             </button>
 
-            <div className="px-8 pt-12 pb-8">
+            <div className="px-10 pt-16 pb-10">
               {/* Title */}
-              <h2 className="text-2xl font-bold text-zinc-900 text-center mb-2">
-                サインアップするか、ログインしてください
+              <h2 className="text-[28px] font-bold text-zinc-900 text-center leading-tight mb-3">
+                サインアップするか
+                <br />
+                ログインしてください
               </h2>
-              <p className="text-sm text-zinc-500 text-center mb-8">
-                他の機能を利用するには、アカウントを作成するか、ログインしてください。
+              <p className="text-[15px] text-zinc-500 text-center mb-10 leading-relaxed">
+                他の機能を利用するには、
+                <br />
+                アカウントを作成するか、ログインしてください。
               </p>
 
               {/* Google login button */}
               <button
                 onClick={handleGoogleLogin}
                 disabled={isGoogleLoading}
-                className="w-full flex items-center justify-center gap-3 px-4 py-3 border border-zinc-300 rounded-lg hover:bg-zinc-50 transition-colors mb-6 disabled:opacity-50"
+                className="w-full flex items-center justify-center gap-3 px-4 py-3.5 border border-zinc-200 rounded-lg hover:bg-zinc-50 transition-colors disabled:opacity-50"
               >
                 <svg className="w-5 h-5" viewBox="0 0 24 24">
                   <path
@@ -411,22 +415,18 @@ export function SharedFileViewer({ nodeId }: Props) {
                     fill="#EA4335"
                   />
                 </svg>
-                <span className="text-sm font-medium text-zinc-700">
+                <span className="text-[15px] font-medium text-zinc-700">
                   {isGoogleLoading ? "ログイン中..." : "Googleアカウントでログインする"}
                 </span>
               </button>
 
               {/* Divider */}
-              <div className="relative mb-6">
-                <div className="absolute inset-0 flex items-center">
-                  <div className="w-full border-t border-zinc-200" />
-                </div>
-              </div>
+              <div className="my-8 border-t border-zinc-100" />
 
               {/* Email input section */}
-              <div className="space-y-4">
+              <div className="space-y-5">
                 <div>
-                  <label className="block text-sm font-medium text-zinc-700 mb-1.5">
+                  <label className="block text-[13px] font-medium text-zinc-600 mb-2">
                     メールアドレス
                   </label>
                   <input
@@ -434,7 +434,7 @@ export function SharedFileViewer({ nodeId }: Props) {
                     value={loginEmail}
                     onChange={(e) => setLoginEmail(e.target.value)}
                     placeholder="メールアドレスを入力"
-                    className="w-full px-4 py-3 border border-zinc-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm"
+                    className="w-full px-4 py-3.5 border border-zinc-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-[15px] placeholder:text-zinc-400"
                     onKeyDown={(e) => {
                       if (e.key === "Enter") {
                         if (showPasswordInput) {
@@ -445,7 +445,7 @@ export function SharedFileViewer({ nodeId }: Props) {
                       }
                     }}
                   />
-                  <p className="mt-2 text-xs text-zinc-500">
+                  <p className="mt-2.5 text-[13px] text-zinc-400 leading-relaxed">
                     勤務先のメールアドレスを使用してチームメートと簡単に共同作業できます
                   </p>
                 </div>
@@ -453,7 +453,7 @@ export function SharedFileViewer({ nodeId }: Props) {
                 {/* Password input (shown after email continue) */}
                 {showPasswordInput && (
                   <div>
-                    <label className="block text-sm font-medium text-zinc-700 mb-1.5">
+                    <label className="block text-[13px] font-medium text-zinc-600 mb-2">
                       パスワード
                     </label>
                     <input
@@ -461,7 +461,7 @@ export function SharedFileViewer({ nodeId }: Props) {
                       value={loginPassword}
                       onChange={(e) => setLoginPassword(e.target.value)}
                       placeholder="パスワードを入力"
-                      className="w-full px-4 py-3 border border-zinc-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm"
+                      className="w-full px-4 py-3.5 border border-zinc-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-[15px] placeholder:text-zinc-400"
                       onKeyDown={(e) => {
                         if (e.key === "Enter") {
                           handleEmailLogin();
@@ -473,14 +473,14 @@ export function SharedFileViewer({ nodeId }: Props) {
 
                 {/* Error message */}
                 {loginError && (
-                  <p className="text-sm text-red-500">{loginError}</p>
+                  <p className="text-[13px] text-red-500">{loginError}</p>
                 )}
 
                 {/* Continue/Login button */}
                 <button
                   onClick={showPasswordInput ? handleEmailLogin : handleEmailContinue}
                   disabled={isLoginLoading}
-                  className="w-full py-3 bg-blue-500 text-white font-medium rounded-lg hover:bg-blue-600 transition-colors disabled:opacity-50 text-sm"
+                  className="w-full py-3.5 bg-blue-500 text-white font-medium rounded-lg hover:bg-blue-600 transition-colors disabled:opacity-50 text-[15px]"
                 >
                   {isLoginLoading ? "ログイン中..." : showPasswordInput ? "ログイン" : "続行"}
                 </button>
