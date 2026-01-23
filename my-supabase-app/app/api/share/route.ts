@@ -137,7 +137,7 @@ export async function POST(req: NextRequest) {
             .eq("id", nodeId);
 
           if (error) {
-            // If column doesn't exist, just return success (it will default to editor)
+            // If column doesn't exist, just return success (it will default to viewer)
             return NextResponse.json({ success: true, publicAccessRole: body.publicAccessRole });
           }
         } catch {
@@ -192,7 +192,7 @@ export async function GET(req: NextRequest) {
       .single();
 
     if (nodeWithoutRole) {
-      node = { ...nodeWithoutRole, public_access_role: "editor" };
+      node = { ...nodeWithoutRole, public_access_role: "viewer" };
     }
   }
 
@@ -238,7 +238,7 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json({
     isPublic: node?.is_public ?? false,
-    publicAccessRole: node?.public_access_role ?? "editor",
+    publicAccessRole: node?.public_access_role ?? "viewer",
     sharedUsers,
   });
 }

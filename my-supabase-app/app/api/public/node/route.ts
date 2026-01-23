@@ -70,7 +70,7 @@ export async function GET(req: NextRequest) {
     if (errorWithoutRole || !nodeWithoutRole) {
       nodeError = errorWithoutRole;
     } else {
-      node = { ...nodeWithoutRole, public_access_role: "editor" } as NodeInfo;
+      node = { ...nodeWithoutRole, public_access_role: "viewer" } as NodeInfo;
     }
   }
 
@@ -183,7 +183,7 @@ export async function GET(req: NextRequest) {
       name: node.name,
       type: node.type,
       isPublic: node.is_public,
-      publicAccessRole: node.public_access_role || "editor",
+      publicAccessRole: node.public_access_role || "viewer",
       createdAt: node.created_at,
     },
     path: pathSegments.join("/"),

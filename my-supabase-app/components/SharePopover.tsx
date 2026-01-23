@@ -41,8 +41,8 @@ export function SharePopover({
 }: Props) {
   const [isCopied, setIsCopied] = useState(false);
   const [sharedUsers, setSharedUsers] = useState<SharedUser[]>([]);
-  const [accessType, setAccessType] = useState<AccessType>(isPublic ? "public" : "restricted");
-  const [publicRole, setPublicRole] = useState<AccessRole>("editor");
+  const [accessType, setAccessType] = useState<AccessType>("public");
+  const [publicRole, setPublicRole] = useState<AccessRole>("viewer");
   const [isAccessMenuOpen, setIsAccessMenuOpen] = useState(false);
   const [isPublicRoleMenuOpen, setIsPublicRoleMenuOpen] = useState(false);
   const [openUserRoleMenuId, setOpenUserRoleMenuId] = useState<string | null>(null);
