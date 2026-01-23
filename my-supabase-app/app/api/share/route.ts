@@ -4,41 +4,103 @@ import { createClient } from "@/lib/supabase/server";
 export async function POST(req: NextRequest) {
   const supabase = await createClient();
   const body = await req.json();
-  const { action, nodeId, email, role, isPublic } = body;
+  const { action, nodeId, email, role, isPublic, shareId } = body;
 
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  // ノードの所有権チェック（簡易的にプロジェクトメンバーなら操作可能とする）
-  // 本来は「フルアクセス権限」を持つかどうかのチェックが必要
-  
   try {
     switch (action) {
       case "invite": {
-        // メールアドレスからユーザーIDを取得（Supabase Adminが必要だが、ここでは簡易的にモックか、auth.usersを引く）
-        // セキュリティ上、通常のクライアントからは他人のメアド->ID変換はできない。
-        // ここでは「招待機能」として、本来は招待メールを送るフローだが、
-        // 簡易実装として「メールアドレスが一致するユーザーがいれば権限付与」とする。
-        // ※ 本番ではSupabaseの招待機能を使うべき
-        
-        // 注意: auth.users は直接クエリできない場合が多い。
-        // ワークスペースメンバーならIDがわかるが、外部ユーザーの場合は難しい。
-        // ここでは「ワークスペースメンバー」から探すか、
-        // あるいは `node_permissions` に `email` カラムを追加して「保留中の招待」とするのが一般的。
-        // 今回は「招待されたユーザーのみ」のUIを作るため、
-        // 簡易的に「自分自身」を追加してテストできるようにするか、
-        // 存在するユーザーIDを指定する形にする必要がある。
-        
-        // とりあえずモック実装：emailをそのまま返す（実際にはDBには入らないがUI上は追加されたように見せる）
-        // もし本気でやるなら、profilesテーブルを作ってemailとuser_idを紐付ける必要がある。
-        
-        // 今回は「機能の見た目」重視で、DB更新はスキップ（またはダミーデータ）
-        return NextResponse.json({ success: true, user: { email, role } });
+        if (!nodeId || !email) {
+          return NextResponse.json({ error: "nodeId and email are required" }, { status: 400 });
+        }
+
+        // Check if user already has access
+        const { data: existingShare } = await supabase
+          .from("node_shares")
+          .select("id")
+          .eq("node_id", nodeId)
+          .eq("shared_with_email", email.toLowerCase())
+          .single();
+
+        if (existingShare) {
+          return NextResponse.json({ error: "User already has access" }, { status: 400 });
+        }
+
+        // Look up user by email in profiles
+        const { data: profile } = await supabase
+          .from("profiles")
+          .select("id, email, display_name")
+          .eq("email", email.toLowerCase())
+          .single();
+
+        // Create share record
+        const { data: share, error } = await supabase
+          .from("node_shares")
+          .insert({
+            node_id: nodeId,
+            shared_with_email: email.toLowerCase(),
+            shared_with_user_id: profile?.id || null,
+            role: role || "viewer",
+            created_by: user.id,
+          })
+          .select()
+          .single();
+
+        if (error) throw error;
+
+        return NextResponse.json({
+          success: true,
+          share: {
+            id: share.id,
+            email: share.shared_with_email,
+            role: share.role,
+            displayName: profile?.display_name || share.shared_with_email.split("@")[0],
+            userId: share.shared_with_user_id,
+          },
+        });
+      }
+
+      case "remove": {
+        if (!shareId) {
+          return NextResponse.json({ error: "shareId is required" }, { status: 400 });
+        }
+
+        const { error } = await supabase
+          .from("node_shares")
+          .delete()
+          .eq("id", shareId)
+          .eq("created_by", user.id);
+
+        if (error) throw error;
+
+        return NextResponse.json({ success: true });
+      }
+
+      case "update_role": {
+        if (!shareId || !role) {
+          return NextResponse.json({ error: "shareId and role are required" }, { status: 400 });
+        }
+
+        const { error } = await supabase
+          .from("node_shares")
+          .update({ role })
+          .eq("id", shareId)
+          .eq("created_by", user.id);
+
+        if (error) throw error;
+
+        return NextResponse.json({ success: true, role });
       }
 
       case "toggle_public": {
+        if (!nodeId) {
+          return NextResponse.json({ error: "nodeId is required" }, { status: 400 });
+        }
+
         const { error } = await supabase
           .from("nodes")
           .update({ is_public: isPublic })
@@ -51,8 +113,9 @@ export async function POST(req: NextRequest) {
       default:
         return NextResponse.json({ error: "Invalid action" }, { status: 400 });
     }
-  } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
 
@@ -65,23 +128,61 @@ export async function GET(req: NextRequest) {
   }
 
   const supabase = await createClient();
-  
-  // Web公開設定を取得
+
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  // Get node info including is_public
   const { data: node } = await supabase
     .from("nodes")
     .select("is_public")
     .eq("id", nodeId)
     .single();
 
-  // 権限リストを取得（今回はモック）
-  // 実際には node_permissions と users を join する
-  
+  // Get shared users for this node
+  const { data: shares } = await supabase
+    .from("node_shares")
+    .select(`
+      id,
+      shared_with_email,
+      shared_with_user_id,
+      role,
+      created_at
+    `)
+    .eq("node_id", nodeId)
+    .order("created_at", { ascending: true });
+
+  // Get profile info for shared users
+  const sharedUsers = await Promise.all(
+    (shares || []).map(async (share) => {
+      let displayName = share.shared_with_email.split("@")[0];
+
+      if (share.shared_with_user_id) {
+        const { data: profile } = await supabase
+          .from("profiles")
+          .select("display_name")
+          .eq("id", share.shared_with_user_id)
+          .single();
+
+        if (profile?.display_name) {
+          displayName = profile.display_name;
+        }
+      }
+
+      return {
+        id: share.id,
+        email: share.shared_with_email,
+        displayName,
+        role: share.role,
+        userId: share.shared_with_user_id,
+      };
+    })
+  );
+
   return NextResponse.json({
     isPublic: node?.is_public ?? false,
-    sharedUsers: [] // TODO: 実実装
+    sharedUsers,
   });
 }
-
-
-
-
