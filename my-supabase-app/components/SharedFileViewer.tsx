@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { getFileIcon } from "./fileIcons";
 import dynamic from "next/dynamic";
@@ -95,6 +95,54 @@ export function SharedFileViewer({ nodeId }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [errorType, setErrorType] = useState<"not_found" | "access_denied" | "error">("error");
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+
+  // Resizable sidebar state
+  const [leftWidth, setLeftWidth] = useState(280);
+  const [rightWidth, setRightWidth] = useState(280);
+  const [isResizing, setIsResizing] = useState<"left" | "right" | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // Handle resize
+  const MIN_SIDEBAR_WIDTH = 0;
+  const MIN_EDITOR_WIDTH = 200;
+
+  const handleMouseMove = useCallback((e: MouseEvent) => {
+    if (!isResizing || !containerRef.current) return;
+
+    const containerRect = containerRef.current.getBoundingClientRect();
+    const containerWidth = containerRect.width;
+
+    if (isResizing === "left") {
+      const newWidth = e.clientX - containerRect.left;
+      // Max width = container width - right sidebar - min editor width - resize handles (2px)
+      const maxLeftWidth = containerWidth - rightWidth - MIN_EDITOR_WIDTH - 2;
+      setLeftWidth(Math.max(MIN_SIDEBAR_WIDTH, Math.min(maxLeftWidth, newWidth)));
+    } else if (isResizing === "right") {
+      const newWidth = containerRect.right - e.clientX;
+      // Max width = container width - left sidebar - min editor width - resize handles (2px)
+      const maxRightWidth = containerWidth - leftWidth - MIN_EDITOR_WIDTH - 2;
+      setRightWidth(Math.max(MIN_SIDEBAR_WIDTH, Math.min(maxRightWidth, newWidth)));
+    }
+  }, [isResizing, leftWidth, rightWidth]);
+
+  const handleMouseUp = useCallback(() => {
+    setIsResizing(null);
+  }, []);
+
+  useEffect(() => {
+    if (isResizing) {
+      document.addEventListener("mousemove", handleMouseMove);
+      document.addEventListener("mouseup", handleMouseUp);
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+    }
+    return () => {
+      document.removeEventListener("mousemove", handleMouseMove);
+      document.removeEventListener("mouseup", handleMouseUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+  }, [isResizing, handleMouseMove, handleMouseUp]);
 
   useEffect(() => {
     async function fetchNodeData() {
@@ -245,9 +293,18 @@ export function SharedFileViewer({ nodeId }: Props) {
       )}
 
       {/* Main layout with sidebars */}
-      <div className="flex-1 flex min-h-0">
+      <div ref={containerRef} className="flex-1 flex min-h-0">
         {/* Left sidebar placeholder (file tree area) */}
-        <div className="w-64 flex-shrink-0 bg-zinc-100 border-r border-zinc-200" />
+        <div
+          className="flex-shrink-0 bg-zinc-100"
+          style={{ width: leftWidth }}
+        />
+
+        {/* Left resize handle */}
+        <div
+          className="w-1 flex-shrink-0 bg-transparent hover:bg-blue-400 cursor-col-resize transition-colors"
+          onMouseDown={() => setIsResizing("left")}
+        />
 
         {/* Center content area */}
         <div className="flex-1 flex flex-col min-h-0 min-w-0 bg-white">
@@ -394,8 +451,17 @@ export function SharedFileViewer({ nodeId }: Props) {
           </div>
         </div>
 
+        {/* Right resize handle */}
+        <div
+          className="w-1 flex-shrink-0 bg-transparent hover:bg-blue-400 cursor-col-resize transition-colors"
+          onMouseDown={() => setIsResizing("right")}
+        />
+
         {/* Right sidebar placeholder (chat area) */}
-        <div className="w-80 flex-shrink-0 bg-zinc-100 border-l border-zinc-200" />
+        <div
+          className="flex-shrink-0 bg-zinc-100"
+          style={{ width: rightWidth }}
+        />
       </div>
     </div>
   );
