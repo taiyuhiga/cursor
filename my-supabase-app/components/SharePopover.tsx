@@ -84,10 +84,6 @@ export function SharePopover({
       if (data.sharedUsers) {
         setSharedUsers(data.sharedUsers);
       }
-      setAccessType(data.isPublic ? "public" : "restricted");
-      if (data.publicAccessRole) {
-        setPublicRole(data.publicAccessRole);
-      }
     } catch {
       // Ignore fetch errors
     }
@@ -386,13 +382,20 @@ export function SharePopover({
 
             <div className="px-6 pb-6 pt-4 space-y-5">
               {/* Email Input - Click to open invite panel */}
-              <div>
+              <div className="flex gap-3">
                 <button
                   type="button"
                   onClick={() => setShowInvitePanel(true)}
-                  className="w-full rounded-lg border border-zinc-300 px-4 py-2.5 text-sm text-left text-zinc-400 hover:border-zinc-400 transition-colors"
+                  className="flex-1 rounded-lg border border-zinc-300 px-4 py-2.5 text-sm text-left text-zinc-400 hover:border-zinc-400 transition-colors"
                 >
                   メールアドレスを追加
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowInvitePanel(true)}
+                  className="px-4 py-2.5 text-sm font-medium text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                >
+                  招待
                 </button>
               </div>
 
