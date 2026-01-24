@@ -214,3 +214,98 @@ export async function GET(req: NextRequest) {
     isAuthenticated,
   });
 }
+
+// POST: Save content for public node (requires authentication and editor access)
+export async function POST(req: NextRequest) {
+  const body = await req.json();
+  const { nodeId, content } = body;
+
+  if (!nodeId) {
+    return NextResponse.json({ error: "nodeId is required" }, { status: 400 });
+  }
+
+  if (content === undefined) {
+    return NextResponse.json({ error: "content is required" }, { status: 400 });
+  }
+
+  const supabase = await createClient();
+  const canUseAdmin = Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY);
+  const adminClient = canUseAdmin ? createAdminClient() : null;
+  const queryClient = adminClient || supabase;
+
+  // Check user authentication
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) {
+    return NextResponse.json({ error: "認証が必要です" }, { status: 401 });
+  }
+
+  // Get node info
+  const { data: node, error: nodeError } = await queryClient
+    .from("nodes")
+    .select("id, name, type, project_id, is_public, public_access_role")
+    .eq("id", nodeId)
+    .maybeSingle();
+
+  if (nodeError || !node) {
+    return NextResponse.json({ error: "Node not found" }, { status: 404 });
+  }
+
+  // Check if user has edit access
+  let canEdit = false;
+
+  // Check if public with editor role
+  if (node.is_public && node.public_access_role === "editor") {
+    canEdit = true;
+  }
+
+  // Check workspace membership
+  if (!canEdit) {
+    const { data: membership } = await supabase
+      .from("workspace_members")
+      .select("id, role")
+      .eq("workspace_id", node.project_id)
+      .eq("user_id", user.id)
+      .maybeSingle();
+
+    if (membership) {
+      canEdit = true;
+    }
+  }
+
+  // Check node_shares
+  if (!canEdit) {
+    const userEmail = user.email?.toLowerCase() || "";
+    const { data: share } = await queryClient
+      .from("node_shares")
+      .select("id, role")
+      .eq("node_id", nodeId)
+      .eq("shared_with_email", userEmail)
+      .maybeSingle();
+
+    if (share && share.role === "editor") {
+      canEdit = true;
+    }
+  }
+
+  if (!canEdit) {
+    return NextResponse.json({ error: "編集権限がありません" }, { status: 403 });
+  }
+
+  // Save content
+  const dbClient = adminClient || supabase;
+  const { error: updateError } = await dbClient
+    .from("file_contents")
+    .upsert({
+      node_id: nodeId,
+      text: content,
+    }, {
+      onConflict: "node_id",
+    });
+
+  if (updateError) {
+    console.error("Failed to save content:", updateError);
+    return NextResponse.json({ error: "保存に失敗しました" }, { status: 500 });
+  }
+
+  return NextResponse.json({ success: true });
+}

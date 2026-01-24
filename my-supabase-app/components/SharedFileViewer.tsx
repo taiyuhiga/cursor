@@ -99,6 +99,11 @@ export function SharedFileViewer({ nodeId }: Props) {
   const [errorType, setErrorType] = useState<"not_found" | "access_denied" | "error">("error");
   const [isAuthenticated, setIsAuthenticated] = useState(false);
 
+  // Editor state
+  const [editedContent, setEditedContent] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+
   // Login popup state
   const [showLoginPopup, setShowLoginPopup] = useState(false);
   const [loginEmail, setLoginEmail] = useState("");
@@ -224,6 +229,39 @@ export function SharedFileViewer({ nodeId }: Props) {
       URL.revokeObjectURL(url);
     }
   }, [nodeData]);
+
+  // Save content handler
+  const handleSaveContent = useCallback(async () => {
+    if (!nodeData || editedContent === null || isSaving) return;
+
+    setIsSaving(true);
+    try {
+      const res = await fetch("/api/public/node", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          nodeId,
+          content: editedContent,
+        }),
+      });
+
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || "保存に失敗しました");
+      }
+
+      setHasUnsavedChanges(false);
+      // Update the nodeData with new content
+      setNodeData(prev => prev ? { ...prev, content: editedContent } : prev);
+    } catch (err: any) {
+      alert(err.message || "保存に失敗しました");
+    } finally {
+      setIsSaving(false);
+    }
+  }, [nodeData, editedContent, nodeId, isSaving]);
+
+  // Check if user can edit
+  const canEdit = isAuthenticated && nodeData?.node.publicAccessRole === "editor";
 
   // Login handlers
   const handleGoogleLogin = async () => {
@@ -369,17 +407,21 @@ export function SharedFileViewer({ nodeId }: Props) {
 
   return (
     <div className="h-screen flex flex-col bg-zinc-100 overflow-hidden">
-      {/* Sign up banner - only show for non-authenticated users with edit access */}
-      {!isAuthenticated && nodeData.node.publicAccessRole === "editor" && (
+      {/* Sign up banner - show for non-authenticated users */}
+      {!isAuthenticated && (
         <div className="flex-shrink-0 bg-zinc-100 border-b border-zinc-200 px-4 py-2.5 flex items-center justify-center gap-4">
           <p className="text-sm text-zinc-600">
-            Lovecatアカウントを持っている人なら誰でもこのページを編集できます。
+            {nodeData.node.publicAccessRole === "editor"
+              ? "Lovecatアカウントを持っている人なら誰でもこのページを編集できます。"
+              : "あと少しです。今すぐサインアップして、Lovecatで作成を開始しましょう。"}
           </p>
           <button
             onClick={() => setShowLoginPopup(true)}
             className="inline-flex items-center px-4 py-1.5 text-sm font-medium border border-zinc-300 rounded-md bg-white hover:bg-zinc-50 transition-colors whitespace-nowrap"
           >
-            編集するにはサインアップまたはログインしてください
+            {nodeData.node.publicAccessRole === "editor"
+              ? "編集するにはサインアップまたはログインしてください"
+              : "サインアップまたはログイン"}
           </button>
         </div>
       )}
@@ -539,6 +581,16 @@ export function SharedFileViewer({ nodeId }: Props) {
               </div>
             </div>
             <div className="flex items-center gap-1 pr-2">
+              {/* Save button - only show when can edit and has changes */}
+              {canEdit && hasUnsavedChanges && (
+                <button
+                  onClick={handleSaveContent}
+                  disabled={isSaving}
+                  className="px-3 py-1 rounded bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                >
+                  {isSaving ? "保存中..." : "保存"}
+                </button>
+              )}
               {/* Download button */}
               <button
                 onClick={handleDownload}
@@ -617,19 +669,25 @@ export function SharedFileViewer({ nodeId }: Props) {
             <MonacoEditor
               height="100%"
               language={getLanguageFromFileName(node.name)}
-              value={content}
+              value={editedContent !== null ? editedContent : content}
               theme="vs"
+              onChange={(value) => {
+                if (canEdit && value !== undefined) {
+                  setEditedContent(value);
+                  setHasUnsavedChanges(value !== content);
+                }
+              }}
               onMount={(editor) => {
                 // Disable drag and drop completely
                 editor.getDomNode()?.addEventListener("dragover", (e) => e.preventDefault(), true);
                 editor.getDomNode()?.addEventListener("drop", (e) => e.preventDefault(), true);
               }}
               options={{
-                readOnly: true,
+                readOnly: !canEdit,
                 readOnlyMessage: { value: "" },
-                domReadOnly: true,
-                cursorWidth: 0,
-                hideCursorInOverviewRuler: true,
+                domReadOnly: !canEdit,
+                cursorWidth: canEdit ? 2 : 0,
+                hideCursorInOverviewRuler: !canEdit,
                 dropIntoEditor: { enabled: false },
                 dragAndDrop: false,
                 minimap: { enabled: false },
@@ -642,22 +700,22 @@ export function SharedFileViewer({ nodeId }: Props) {
                 fontLigatures: false,
                 fontWeight: "normal",
                 lineNumbers: "on",
-                renderLineHighlight: "none",
+                renderLineHighlight: canEdit ? "line" : "none",
                 folding: true,
                 wordWrap: "on",
-                selectionHighlight: false,
-                occurrencesHighlight: "off",
+                selectionHighlight: canEdit,
+                occurrencesHighlight: canEdit ? "singleFile" : "off",
                 unicodeHighlight: {
                   ambiguousCharacters: false,
                   invisibleCharacters: false,
                 },
-                quickSuggestions: false,
-                suggestOnTriggerCharacters: false,
-                parameterHints: { enabled: false },
-                hover: { enabled: false },
+                quickSuggestions: canEdit,
+                suggestOnTriggerCharacters: canEdit,
+                parameterHints: { enabled: canEdit },
+                hover: { enabled: canEdit },
                 codeLens: false,
-                lightbulb: { enabled: "off" },
-                contextmenu: false,
+                lightbulb: { enabled: canEdit ? "on" : "off" },
+                contextmenu: canEdit,
               }}
             />
           ) : signedUrl ? (
