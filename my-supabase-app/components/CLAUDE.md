@@ -17,9 +17,6 @@
 | #494 | 5:11 PM | 🔵 | Code Selection Context Building Already Implemented | ~356 |
 | #493 | " | 🟣 | Code Selection Context Builder for AI Chat | ~377 |
 | #492 | 5:10 PM | 🟣 | Exposed addCodeContext Method Through AiPanel Ref | ~388 |
-| #491 | " | 🟣 | Code Selection Deletion Support in AiPanel | ~364 |
-| #490 | 5:09 PM | 🟣 | Added Code Selection Pills to Chat Input | ~433 |
-| #489 | " | 🟣 | Added Code Selection Support to Input Segments | ~388 |
 
 ### Jan 23, 2026
 
@@ -32,6 +29,9 @@
 
 | ID | Time | T | Title | Read |
 |----|------|---|-------|------|
+| #874 | 8:14 PM | 🟣 | Email Suggestion Enhancement with Current Input Validation | ~421 |
+| #871 | 8:05 PM | ✅ | Enhanced Email Validation Regex | ~263 |
+| #870 | 8:03 PM | 🟣 | Current Input as Email Suggestion | ~343 |
 | #869 | 8:01 PM | 🟣 | Optimistic UI Updates for Role Changes | ~322 |
 | #868 | " | 🟣 | Optimistic UI Updates for User Removal | ~317 |
 | #866 | 7:59 PM | 🟣 | Optimistic UI Updates for Email Invitations | ~434 |

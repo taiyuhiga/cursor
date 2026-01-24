@@ -173,11 +173,57 @@ export function SharePopover({
     });
   }, []);
 
-  // Get filtered suggestions based on input
-  const currentInputEmail = inviteEmailInput.trim().toLowerCase();
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  const isCurrentInputValidEmail = emailRegex.test(currentInputEmail);
+  // Common email domains whitelist
+  const commonDomains = [
+    "gmail.com",
+    "yahoo.com",
+    "yahoo.co.jp",
+    "outlook.com",
+    "hotmail.com",
+    "live.com",
+    "icloud.com",
+    "protonmail.com",
+    "mail.com",
+    "aol.com",
+    "zoho.com",
+    "yandex.com",
+    "gmx.com",
+    "tutanota.com",
+  ];
 
+  // Check if current input is a valid email with known domain
+  const currentInputEmail = inviteEmailInput.trim().toLowerCase();
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+  const isValidFormat = emailRegex.test(currentInputEmail);
+  const domain = currentInputEmail.split("@")[1] || "";
+  const isKnownDomain = commonDomains.includes(domain) ||
+    // Education domains worldwide
+    domain.endsWith(".edu") ||
+    domain.endsWith(".ac.jp") || domain.endsWith(".ed.jp") ||
+    domain.endsWith(".ac.uk") || domain.endsWith(".edu.au") ||
+    domain.endsWith(".edu.cn") || domain.endsWith(".edu.tw") ||
+    domain.endsWith(".ac.kr") || domain.endsWith(".edu.sg") ||
+    domain.endsWith(".edu.hk") || domain.endsWith(".ac.in") ||
+    domain.endsWith(".edu.br") || domain.endsWith(".edu.mx") ||
+    domain.endsWith(".edu.fr") || domain.endsWith(".edu.de") ||
+    // Japan domains
+    domain.endsWith(".go.jp") || domain.endsWith(".co.jp") ||
+    domain.endsWith(".ne.jp") || domain.endsWith(".or.jp") ||
+    // International company/org domains
+    domain.endsWith(".co.uk") || domain.endsWith(".com.au") ||
+    domain.endsWith(".co.kr") || domain.endsWith(".com.cn") ||
+    domain.endsWith(".com.tw") || domain.endsWith(".com.sg") ||
+    domain.endsWith(".com.hk") || domain.endsWith(".co.in") ||
+    domain.endsWith(".com.br") || domain.endsWith(".com.mx") ||
+    // Government domains
+    domain.endsWith(".gov") || domain.endsWith(".gov.uk") ||
+    domain.endsWith(".gov.au") || domain.endsWith(".go.kr");
+
+  const isCurrentInputValid = isValidFormat && isKnownDomain &&
+    !pendingInvites.some(p => p.email === currentInputEmail) &&
+    !sharedUsers.some(u => u.email === currentInputEmail);
+
+  // Get filtered suggestions based on input (from localStorage history)
   const historySuggestions = emailHistory
     .filter(email =>
       (inviteEmailInput.trim() === "" || email.includes(inviteEmailInput.toLowerCase())) &&
@@ -187,12 +233,10 @@ export function SharePopover({
     )
     .slice(0, 5);
 
-  // Include current input as suggestion if it's a valid email
-  const filteredSuggestions = isCurrentInputValidEmail &&
-    !pendingInvites.some(p => p.email === currentInputEmail) &&
-    !sharedUsers.some(u => u.email === currentInputEmail)
-      ? [currentInputEmail, ...historySuggestions].slice(0, 5)
-      : historySuggestions;
+  // Combine: current valid input + history suggestions
+  const filteredSuggestions = isCurrentInputValid
+    ? [currentInputEmail, ...historySuggestions].slice(0, 5)
+    : historySuggestions;
 
   // Select a suggestion
   const selectSuggestion = (email: string) => {
