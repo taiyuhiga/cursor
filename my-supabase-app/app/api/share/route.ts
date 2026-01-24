@@ -19,15 +19,25 @@ export async function POST(req: NextRequest) {
         }
 
         // Check if user already has access
-        const { data: existingShare } = await supabase
+        const { data: existingShare, error: checkError } = await supabase
           .from("node_shares")
           .select("id")
           .eq("node_id", nodeId)
           .eq("shared_with_email", email.toLowerCase())
           .single();
 
+        // If error is not "no rows", it's a real error (like table doesn't exist)
+        if (checkError && checkError.code !== "PGRST116") {
+          console.error("Check existing share error:", checkError);
+          return NextResponse.json({
+            error: checkError.message || "Database error",
+            code: checkError.code,
+            hint: checkError.hint,
+          }, { status: 500 });
+        }
+
         if (existingShare) {
-          return NextResponse.json({ error: "User already has access" }, { status: 400 });
+          return NextResponse.json({ error: "このユーザーは既にアクセス権を持っています" }, { status: 400 });
         }
 
         // Look up user by email in profiles
@@ -38,7 +48,7 @@ export async function POST(req: NextRequest) {
           .single();
 
         // Create share record
-        const { data: share, error } = await supabase
+        const { data: share, error: insertError } = await supabase
           .from("node_shares")
           .insert({
             node_id: nodeId,
@@ -50,7 +60,15 @@ export async function POST(req: NextRequest) {
           .select()
           .single();
 
-        if (error) throw error;
+        if (insertError) {
+          console.error("Insert error:", insertError);
+          return NextResponse.json({
+            error: insertError.message || "Failed to create share",
+            code: insertError.code,
+            details: insertError.details,
+            hint: insertError.hint,
+          }, { status: 500 });
+        }
 
         return NextResponse.json({
           success: true,
@@ -151,8 +169,12 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: "Invalid action" }, { status: 400 });
     }
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : "Unknown error";
-    return NextResponse.json({ error: message }, { status: 500 });
+    // Handle Supabase error objects which have a different structure
+    const supabaseError = error as { message?: string; code?: string; details?: string };
+    const message = supabaseError?.message || (error instanceof Error ? error.message : "Unknown error");
+    const details = supabaseError?.details || supabaseError?.code || "";
+    console.error("Share API error:", { message, details, error });
+    return NextResponse.json({ error: message, details }, { status: 500 });
   }
 }
 

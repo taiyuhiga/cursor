@@ -56,6 +56,10 @@ export function SharePopover({
   const [isInviting, setIsInviting] = useState(false);
   const [inviteError, setInviteError] = useState<string | null>(null);
 
+  // Email history for suggestions
+  const [emailHistory, setEmailHistory] = useState<string[]>([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+
   const copyTimeoutRef = useRef<number | null>(null);
   const accessButtonRef = useRef<HTMLButtonElement | null>(null);
   const accessMenuRef = useRef<HTMLDivElement | null>(null);
@@ -141,6 +145,53 @@ export function SharePopover({
       inviteInputRef.current.focus();
     }
   }, [showInvitePanel]);
+
+  // Load email history from localStorage
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("share_email_history");
+      if (saved) {
+        setEmailHistory(JSON.parse(saved));
+      }
+    } catch {
+      // Ignore parse errors
+    }
+  }, []);
+
+  // Save email to history
+  const saveEmailToHistory = useCallback((email: string) => {
+    setEmailHistory(prev => {
+      const normalized = email.toLowerCase();
+      // Remove if already exists, then add to front
+      const filtered = prev.filter(e => e !== normalized);
+      const updated = [normalized, ...filtered].slice(0, 50); // Keep max 50
+      try {
+        localStorage.setItem("share_email_history", JSON.stringify(updated));
+      } catch {
+        // Ignore storage errors
+      }
+      return updated;
+    });
+  }, []);
+
+  // Get filtered suggestions based on input
+  const filteredSuggestions = emailHistory
+    .filter(email =>
+      (inviteEmailInput.trim() === "" || email.includes(inviteEmailInput.toLowerCase())) &&
+      !pendingInvites.some(p => p.email === email) &&
+      !sharedUsers.some(u => u.email === email)
+    )
+    .slice(0, 5);
+
+  // Select a suggestion
+  const selectSuggestion = (email: string) => {
+    if (!pendingInvites.some(p => p.email === email) && !sharedUsers.some(u => u.email === email)) {
+      setPendingInvites(prev => [...prev, { email, id: crypto.randomUUID() }]);
+    }
+    setInviteEmailInput("");
+    setShowSuggestions(false);
+    inviteInputRef.current?.focus();
+  };
 
   const addPendingInvite = () => {
     const email = inviteEmailInput.trim().toLowerCase();
@@ -228,15 +279,22 @@ export function SharePopover({
       const successful = results.filter(r => r.success);
       const failed = results.filter(r => !r.success);
 
-      // Add successful invites to shared users
+      // Add successful invites to shared users and save to history
       successful.forEach(r => {
         if (r.data.share) {
           setSharedUsers(prev => [...prev, r.data.share]);
+          saveEmailToHistory(r.email);
         }
       });
 
       if (failed.length > 0) {
-        setInviteError(`${failed.length}件の招待に失敗しました: ${failed.map(f => f.email).join(", ")}`);
+        const errorDetails = failed.map(f => {
+          const err = f.data?.error || "不明なエラー";
+          const code = f.data?.code ? ` [${f.data.code}]` : "";
+          const hint = f.data?.hint ? ` - ${f.data.hint}` : "";
+          return err + code + hint;
+        }).join("; ");
+        setInviteError(`招待に失敗: ${errorDetails}`);
         // Keep only failed emails as pending invites
         setPendingInvites(failed.map(f => ({ email: f.email, id: crypto.randomUUID() })));
         setInviteEmailInput("");
@@ -415,7 +473,7 @@ export function SharePopover({
                 <button
                   type="button"
                   onClick={() => setShowInvitePanel(true)}
-                  className="px-5 py-2.5 text-sm font-medium text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-full transition-colors"
+                  className="rounded-full bg-blue-600/50 px-5 py-2 text-sm font-medium text-white hover:bg-blue-600/60 transition-colors"
                 >
                   招待
                 </button>
@@ -426,7 +484,7 @@ export function SharePopover({
                 <div className="text-sm font-semibold text-zinc-700 mb-3">
                   アクセスできるユーザー
                 </div>
-                <div className="space-y-1 max-h-48 overflow-y-auto">
+                <div className="space-y-1 max-h-48 overflow-visible">
                   {/* Owner */}
                   <div className="flex items-center justify-between px-2 py-2 rounded-lg hover:bg-zinc-50">
                     <div className="flex items-center gap-3">
@@ -462,7 +520,7 @@ export function SharePopover({
                           <div className="text-xs text-zinc-500">{user.email}</div>
                         </div>
                       </div>
-                      <div className="relative">
+                      <div className="relative" onMouseDown={(e) => e.stopPropagation()}>
                         <button
                           type="button"
                           onClick={() => setOpenUserRoleMenuId(openUserRoleMenuId === user.id ? null : user.id)}
@@ -474,7 +532,7 @@ export function SharePopover({
                           </svg>
                         </button>
                         {openUserRoleMenuId === user.id && (
-                          <div className="absolute right-0 top-full mt-1 w-36 rounded-lg border border-zinc-200 bg-white shadow-xl py-1 z-20">
+                          <div className="absolute right-0 top-full mt-1 w-36 rounded-lg border border-zinc-200 bg-white shadow-xl py-1 z-50">
                             <button
                               type="button"
                               onClick={() => handleUpdateUserRole(user.id, "viewer")}
@@ -689,101 +747,166 @@ export function SharePopover({
               </div>
             </div>
 
-            <div className="px-6 pb-6 pt-4 space-y-5">
-              {/* Email chips input */}
-              <div>
-                <div
-                  className="w-full rounded-lg border border-zinc-300 focus-within:border-blue-500 focus-within:ring-1 focus-within:ring-blue-500 px-3 py-2 min-h-[100px] max-h-[200px] overflow-y-auto cursor-text"
-                  onClick={() => inviteInputRef.current?.focus()}
-                >
-                  <div className="flex flex-wrap gap-2">
-                    {/* Email chips */}
-                    {pendingInvites.map((invite) => {
-                      const initial = invite.email[0]?.toUpperCase() || "?";
-                      // Generate a consistent color based on email
-                      const colors = [
-                        { bg: "bg-teal-600", text: "text-white" },
-                        { bg: "bg-blue-600", text: "text-white" },
-                        { bg: "bg-purple-600", text: "text-white" },
-                        { bg: "bg-pink-600", text: "text-white" },
-                        { bg: "bg-orange-600", text: "text-white" },
-                        { bg: "bg-green-600", text: "text-white" },
-                      ];
-                      const colorIndex = invite.email.charCodeAt(0) % colors.length;
-                      const color = colors[colorIndex];
+            <div className="px-6 pb-6 pt-4 space-y-4">
+              {/* Email input row with role selector */}
+              <div className="flex gap-3 items-start">
+                {/* Email chips input */}
+                <div className="relative flex-1">
+                  <div
+                    className="w-full rounded-lg border border-zinc-300 focus-within:border-blue-500 focus-within:ring-1 focus-within:ring-blue-500 px-2 py-2 cursor-text max-h-[160px] overflow-y-auto"
+                    onClick={() => inviteInputRef.current?.focus()}
+                  >
+                    <div className="flex flex-col gap-1.5">
+                      {/* Email chips - one per line */}
+                      {pendingInvites.map((invite) => {
+                        const initial = invite.email[0]?.toUpperCase() || "?";
+                        const colors = [
+                          { bg: "bg-teal-600", text: "text-white" },
+                          { bg: "bg-blue-600", text: "text-white" },
+                          { bg: "bg-purple-600", text: "text-white" },
+                          { bg: "bg-pink-600", text: "text-white" },
+                          { bg: "bg-orange-600", text: "text-white" },
+                          { bg: "bg-green-600", text: "text-white" },
+                        ];
+                        const colorIndex = invite.email.charCodeAt(0) % colors.length;
+                        const color = colors[colorIndex];
 
-                      return (
-                        <div
-                          key={invite.id}
-                          className="inline-flex items-center gap-2 rounded-full border border-zinc-300 bg-white pl-1 pr-2 py-1 text-sm"
-                        >
-                          <div className={`w-6 h-6 rounded-full ${color.bg} flex items-center justify-center text-xs font-medium ${color.text}`}>
-                            {initial}
-                          </div>
-                          <span className="text-zinc-700 max-w-[200px] truncate">{invite.email}</span>
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              removePendingInvite(invite.id);
-                            }}
-                            className="text-zinc-400 hover:text-zinc-600 transition-colors"
+                        return (
+                          <div
+                            key={invite.id}
+                            className="inline-flex items-center gap-2 rounded-full border border-zinc-300 bg-white pl-1.5 pr-2 py-1 text-sm self-start max-w-full"
                           >
-                            <svg className="w-4 h-4" viewBox="0 0 20 20" fill="currentColor">
-                              <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
-                            </svg>
-                          </button>
-                        </div>
-                      );
-                    })}
-                    {/* Input field */}
-                    <input
-                      ref={inviteInputRef}
-                      type="text"
-                      value={inviteEmailInput}
-                      onChange={(e) => {
-                        setInviteEmailInput(e.target.value);
-                        setInviteError(null);
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" || e.key === ",") {
-                          e.preventDefault();
-                          addPendingInvite();
-                        } else if (e.key === "Backspace" && inviteEmailInput === "" && pendingInvites.length > 0) {
-                          // Remove last chip on backspace when input is empty
-                          removePendingInvite(pendingInvites[pendingInvites.length - 1].id);
-                        }
-                      }}
-                      onPaste={(e) => {
-                        const pastedText = e.clipboardData.getData("text");
-                        if (pastedText.includes(",") || pastedText.includes(" ") || pastedText.includes("\n")) {
-                          e.preventDefault();
-                          const emails = pastedText
-                            .split(/[,\s\n]+/)
-                            .map(email => email.trim().toLowerCase())
-                            .filter(email => email.length > 0 && email.includes("@"));
+                            <div className={`w-6 h-6 rounded-full ${color.bg} flex items-center justify-center text-xs font-medium ${color.text} flex-shrink-0`}>
+                              {initial}
+                            </div>
+                            <span className="text-zinc-700 truncate">{invite.email}</span>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                removePendingInvite(invite.id);
+                              }}
+                              className="text-zinc-400 hover:text-zinc-600 transition-colors flex-shrink-0"
+                            >
+                              <svg className="w-4 h-4" viewBox="0 0 20 20" fill="currentColor">
+                                <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                              </svg>
+                            </button>
+                          </div>
+                        );
+                      })}
+                      {/* Input field */}
+                      <input
+                        ref={inviteInputRef}
+                        type="text"
+                        value={inviteEmailInput}
+                        onChange={(e) => {
+                          const value = e.target.value;
+                          setInviteError(null);
+                          setShowSuggestions(true);
 
-                          emails.forEach(email => {
-                            if (!pendingInvites.some(p => p.email === email) && !sharedUsers.some(u => u.email === email)) {
-                              setPendingInvites(prev => [...prev, { email, id: crypto.randomUUID() }]);
+                          if (value.endsWith(" ") || value.endsWith(",")) {
+                            const emailPart = value.slice(0, -1).trim().toLowerCase();
+                            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+                            if (emailRegex.test(emailPart)) {
+                              if (!pendingInvites.some(p => p.email === emailPart) && !sharedUsers.some(u => u.email === emailPart)) {
+                                setPendingInvites(prev => [...prev, { email: emailPart, id: crypto.randomUUID() }]);
+                                setInviteEmailInput("");
+                                return;
+                              }
                             }
-                          });
-                        }
-                      }}
-                      placeholder={pendingInvites.length === 0 ? "メールアドレスを入力" : ""}
-                      className="flex-1 min-w-[150px] text-sm outline-none bg-transparent py-1 placeholder:text-zinc-400"
-                    />
-                  </div>
-                </div>
-                {inviteError && (
-                  <div className="mt-2 text-xs text-red-500">{inviteError}</div>
-                )}
-              </div>
+                          }
+                          setInviteEmailInput(value);
+                        }}
+                        onFocus={() => setShowSuggestions(true)}
+                        onBlur={() => {
+                          setTimeout(() => {
+                            setShowSuggestions(false);
+                            const email = inviteEmailInput.trim().toLowerCase();
+                            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+                            if (emailRegex.test(email)) {
+                              if (!pendingInvites.some(p => p.email === email) && !sharedUsers.some(u => u.email === email)) {
+                                setPendingInvites(prev => [...prev, { email, id: crypto.randomUUID() }]);
+                                setInviteEmailInput("");
+                              }
+                            }
+                          }, 150);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === ",") {
+                            e.preventDefault();
+                            addPendingInvite();
+                          } else if (e.key === "Backspace" && inviteEmailInput === "" && pendingInvites.length > 0) {
+                            removePendingInvite(pendingInvites[pendingInvites.length - 1].id);
+                          } else if (e.key === "Escape") {
+                            setShowSuggestions(false);
+                          }
+                        }}
+                        onPaste={(e) => {
+                          const pastedText = e.clipboardData.getData("text");
+                          if (pastedText.includes(",") || pastedText.includes(" ") || pastedText.includes("\n")) {
+                            e.preventDefault();
+                            const emails = pastedText
+                              .split(/[,\s\n]+/)
+                              .map(email => email.trim().toLowerCase())
+                              .filter(email => email.length > 0 && email.includes("@"));
 
-              {/* Role selector */}
-              <div className="flex items-center justify-between">
-                <span className="text-sm text-zinc-600">招待するユーザーの権限</span>
-                <div className="relative">
+                            emails.forEach(email => {
+                              if (!pendingInvites.some(p => p.email === email) && !sharedUsers.some(u => u.email === email)) {
+                                setPendingInvites(prev => [...prev, { email, id: crypto.randomUUID() }]);
+                              }
+                            });
+                          }
+                        }}
+                        placeholder={pendingInvites.length === 0 ? "メールアドレスを入力" : ""}
+                        className="w-full text-sm outline-none bg-transparent py-1 px-1 placeholder:text-zinc-400"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Email suggestions dropdown */}
+                  {showSuggestions && filteredSuggestions.length > 0 && (
+                    <div className="absolute left-0 right-0 top-full mt-1 rounded-lg border border-zinc-200 bg-white shadow-xl py-1 z-50 max-h-64 overflow-y-auto">
+                      {filteredSuggestions.map((email) => {
+                        const initial = email[0]?.toUpperCase() || "?";
+                        const colors = [
+                          { bg: "bg-teal-600", text: "text-white" },
+                          { bg: "bg-blue-600", text: "text-white" },
+                          { bg: "bg-purple-600", text: "text-white" },
+                          { bg: "bg-pink-600", text: "text-white" },
+                          { bg: "bg-orange-600", text: "text-white" },
+                          { bg: "bg-green-600", text: "text-white" },
+                        ];
+                        const colorIndex = email.charCodeAt(0) % colors.length;
+                        const color = colors[colorIndex];
+                        const displayName = email.split("@")[0];
+
+                        return (
+                          <button
+                            key={email}
+                            type="button"
+                            onMouseDown={(e) => {
+                              e.preventDefault();
+                              selectSuggestion(email);
+                            }}
+                            className="w-full px-3 py-2 text-left hover:bg-zinc-50 flex items-center gap-3"
+                          >
+                            <div className={`w-9 h-9 rounded-full ${color.bg} flex items-center justify-center text-sm font-medium ${color.text}`}>
+                              {initial}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <div className="text-sm font-medium text-zinc-900 truncate">{displayName}</div>
+                              <div className="text-xs text-zinc-500 truncate">{email}</div>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                {/* Role selector */}
+                <div className="relative flex-shrink-0" onMouseDown={(e) => e.stopPropagation()}>
                   <button
                     ref={inviteRoleButtonRef}
                     type="button"
@@ -798,7 +921,7 @@ export function SharePopover({
                   {isInviteRoleMenuOpen && (
                     <div
                       ref={inviteRoleMenuRef}
-                      className="absolute right-0 top-full mt-1 w-36 rounded-lg border border-zinc-200 bg-white shadow-xl py-1 z-20"
+                      className="absolute right-0 top-full mt-1 w-36 rounded-lg border border-zinc-200 bg-white shadow-xl py-1 z-50"
                     >
                       <button
                         type="button"
@@ -835,27 +958,46 @@ export function SharePopover({
                 </div>
               </div>
 
+              {inviteError && (
+                <div className="text-xs text-red-500">{inviteError}</div>
+              )}
+
               {/* Actions */}
-              <div className="flex items-center justify-end gap-3 pt-4">
+              <div className="flex items-center justify-between pt-4">
+                {/* Link copy button */}
                 <button
                   type="button"
-                  onClick={() => {
-                    setShowInvitePanel(false);
-                    setPendingInvites([]);
-                    setInviteEmailInput("");
-                    setInviteError(null);
-                  }}
-                  className="px-4 py-2 text-sm font-medium text-blue-600 hover:bg-blue-50 rounded-full transition-colors"
+                  onClick={handleCopyUrl}
+                  className="inline-flex items-center gap-2 rounded-full border border-zinc-300 px-4 py-2 text-sm font-medium text-blue-600 hover:bg-blue-50 transition-colors"
                 >
-                  キャンセル
+                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M10 13a5 5 0 0 1 0-7l1.5-1.5a5 5 0 0 1 7 7L17 12" />
+                    <path d="M14 11a5 5 0 0 1 0 7L12.5 20.5a5 5 0 1 1-7-7L7 12" />
+                  </svg>
+                  リンクをコピー
                 </button>
-                <button
-                  onClick={handleSendInvites}
-                  disabled={(pendingInvites.length === 0 && !inviteEmailInput.trim()) || isInviting}
-                  className="rounded-full bg-blue-600 px-5 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                >
-                  {isInviting ? "招待中..." : "招待"}
-                </button>
+
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowInvitePanel(false);
+                      setPendingInvites([]);
+                      setInviteEmailInput("");
+                      setInviteError(null);
+                    }}
+                    className="px-4 py-2 text-sm font-medium text-blue-600 hover:bg-blue-50 rounded-full transition-colors"
+                  >
+                    キャンセル
+                  </button>
+                  <button
+                    onClick={handleSendInvites}
+                    disabled={(pendingInvites.length === 0 && !inviteEmailInput.trim()) || isInviting}
+                    className="rounded-full bg-blue-600 px-5 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    {isInviting ? "招待中..." : "招待"}
+                  </button>
+                </div>
               </div>
             </div>
           </div>
