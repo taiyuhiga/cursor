@@ -20,12 +20,6 @@
 | #491 | " | 🟣 | Code Selection Deletion Support in AiPanel | ~364 |
 | #490 | 5:09 PM | 🟣 | Added Code Selection Pills to Chat Input | ~433 |
 | #489 | " | 🟣 | Added Code Selection Support to Input Segments | ~388 |
-| #488 | 5:08 PM | 🔵 | AiPanel File Pill Rendering and Segment Management | ~406 |
-| #487 | 5:07 PM | 🔵 | AiPanel Component Structure and Types | ~445 |
-| #486 | " | 🔵 | AiPanel Context and File Reference Functionality | ~357 |
-| #483 | 2:25 PM | 🟣 | Enhanced Text Selection Logic to Support Single Full-Line Selection | ~336 |
-| #482 | 2:24 PM | ✅ | Restricted Chat Popup to Multi-line Selections Only | ~300 |
-| #481 | 2:22 PM | ✅ | Localized Add to Chat Button to Japanese | ~207 |
 
 ### Jan 23, 2026
 
@@ -38,6 +32,12 @@
 
 | ID | Time | T | Title | Read |
 |----|------|---|-------|------|
+| #869 | 8:01 PM | 🟣 | Optimistic UI Updates for Role Changes | ~322 |
+| #868 | " | 🟣 | Optimistic UI Updates for User Removal | ~317 |
+| #866 | 7:59 PM | 🟣 | Optimistic UI Updates for Email Invitations | ~434 |
+| #865 | " | 🟣 | Optimistic UI Update for Instant Invitation Feedback | ~465 |
+| #864 | 7:58 PM | 🔵 | Reviewed invite sending logic in SharePopover component | ~382 |
+| #859 | 7:49 PM | ✅ | Removed Link Copy Button from Invite Panel | ~263 |
 | #858 | 7:46 PM | ✅ | Invite Button Vertical Padding Adjustment | ~209 |
 | #856 | 7:45 PM | ✅ | Invite Button Opacity Styling Adjustment | ~260 |
 | #855 | 7:44 PM | ✅ | Invite Button Color Enhancement | ~214 |

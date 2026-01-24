@@ -53,7 +53,6 @@ export function SharePopover({
   const [inviteEmailInput, setInviteEmailInput] = useState("");
   const [inviteRole, setInviteRole] = useState<AccessRole>("editor");
   const [isInviteRoleMenuOpen, setIsInviteRoleMenuOpen] = useState(false);
-  const [isInviting, setIsInviting] = useState(false);
   const [inviteError, setInviteError] = useState<string | null>(null);
 
   // Email history for suggestions
@@ -175,13 +174,25 @@ export function SharePopover({
   }, []);
 
   // Get filtered suggestions based on input
-  const filteredSuggestions = emailHistory
+  const currentInputEmail = inviteEmailInput.trim().toLowerCase();
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const isCurrentInputValidEmail = emailRegex.test(currentInputEmail);
+
+  const historySuggestions = emailHistory
     .filter(email =>
       (inviteEmailInput.trim() === "" || email.includes(inviteEmailInput.toLowerCase())) &&
       !pendingInvites.some(p => p.email === email) &&
-      !sharedUsers.some(u => u.email === email)
+      !sharedUsers.some(u => u.email === email) &&
+      email !== currentInputEmail
     )
     .slice(0, 5);
+
+  // Include current input as suggestion if it's a valid email
+  const filteredSuggestions = isCurrentInputValidEmail &&
+    !pendingInvites.some(p => p.email === currentInputEmail) &&
+    !sharedUsers.some(u => u.email === currentInputEmail)
+      ? [currentInputEmail, ...historySuggestions].slice(0, 5)
+      : historySuggestions;
 
   // Select a suggestion
   const selectSuggestion = (email: string) => {
@@ -226,16 +237,16 @@ export function SharePopover({
 
   const handleSendInvites = async () => {
     // First add any remaining input as a pending invite
+    let currentPendingInvites = [...pendingInvites];
     if (inviteEmailInput.trim()) {
       const email = inviteEmailInput.trim().toLowerCase();
-      if (email.includes("@") && !pendingInvites.some(p => p.email === email) && !sharedUsers.some(u => u.email === email)) {
-        setPendingInvites(prev => [...prev, { email, id: crypto.randomUUID() }]);
-        setInviteEmailInput("");
+      if (email.includes("@") && !currentPendingInvites.some(p => p.email === email) && !sharedUsers.some(u => u.email === email)) {
+        currentPendingInvites.push({ email, id: crypto.randomUUID() });
       }
     }
 
     // Use pendingInvites for emails
-    const emails = pendingInvites.map(p => p.email);
+    const emails = currentPendingInvites.map(p => p.email);
 
     if (emails.length === 0) {
       // If no pending invites, try to parse the current input
@@ -255,9 +266,25 @@ export function SharePopover({
       return;
     }
 
-    setIsInviting(true);
+    // Optimistic update: immediately add users and go back to main panel
+    const optimisticUsers: SharedUser[] = emails.map(email => ({
+      id: `temp-${crypto.randomUUID()}`,
+      email,
+      displayName: email.split("@")[0],
+      role: inviteRole,
+      userId: null,
+    }));
+
+    setSharedUsers(prev => [...prev, ...optimisticUsers]);
+    setInviteEmailInput("");
+    setPendingInvites([]);
+    setShowInvitePanel(false);
     setInviteError(null);
 
+    // Save emails to history
+    emails.forEach(email => saveEmailToHistory(email));
+
+    // Make API calls in background
     try {
       const results = await Promise.all(
         emails.map(async (email) => {
@@ -279,39 +306,43 @@ export function SharePopover({
       const successful = results.filter(r => r.success);
       const failed = results.filter(r => !r.success);
 
-      // Add successful invites to shared users and save to history
-      successful.forEach(r => {
-        if (r.data.share) {
-          setSharedUsers(prev => [...prev, r.data.share]);
-          saveEmailToHistory(r.email);
-        }
-      });
+      // Update with real IDs from successful invites
+      if (successful.length > 0) {
+        setSharedUsers(prev => {
+          const updated = [...prev];
+          successful.forEach(r => {
+            if (r.data.share) {
+              const tempIndex = updated.findIndex(u => u.id.startsWith("temp-") && u.email === r.email);
+              if (tempIndex !== -1) {
+                updated[tempIndex] = r.data.share;
+              }
+            }
+          });
+          return updated;
+        });
+      }
 
+      // Remove failed invites from shared users
       if (failed.length > 0) {
-        const errorDetails = failed.map(f => {
-          const err = f.data?.error || "不明なエラー";
-          const code = f.data?.code ? ` [${f.data.code}]` : "";
-          const hint = f.data?.hint ? ` - ${f.data.hint}` : "";
-          return err + code + hint;
-        }).join("; ");
-        setInviteError(`招待に失敗: ${errorDetails}`);
-        // Keep only failed emails as pending invites
-        setPendingInvites(failed.map(f => ({ email: f.email, id: crypto.randomUUID() })));
-        setInviteEmailInput("");
-      } else {
-        // Clear and go back if all succeeded
-        setInviteEmailInput("");
-        setPendingInvites([]);
-        setShowInvitePanel(false);
+        const failedEmails = failed.map(f => f.email);
+        setSharedUsers(prev => prev.filter(u => !u.id.startsWith("temp-") || !failedEmails.includes(u.email)));
+        // Could show a toast/notification here for failed invites
+        console.error("Failed invites:", failed.map(f => f.data?.error));
       }
     } catch {
-      setInviteError("招待の送信に失敗しました");
-    } finally {
-      setIsInviting(false);
+      // Remove all optimistic users on error
+      setSharedUsers(prev => prev.filter(u => !u.id.startsWith("temp-")));
+      console.error("招待の送信に失敗しました");
     }
   };
 
   const handleRemoveUser = async (shareId: string) => {
+    // Optimistic update: immediately remove user
+    const removedUser = sharedUsers.find(u => u.id === shareId);
+    setSharedUsers(prev => prev.filter(u => u.id !== shareId));
+    setOpenUserRoleMenuId(null);
+
+    // Make API call in background
     try {
       const res = await fetch("/api/share", {
         method: "POST",
@@ -322,16 +353,27 @@ export function SharePopover({
         }),
       });
 
-      if (res.ok) {
-        setSharedUsers(prev => prev.filter(u => u.id !== shareId));
+      if (!res.ok && removedUser) {
+        // Restore user if API failed
+        setSharedUsers(prev => [...prev, removedUser]);
       }
     } catch {
-      // Ignore errors
+      // Restore user if API failed
+      if (removedUser) {
+        setSharedUsers(prev => [...prev, removedUser]);
+      }
     }
-    setOpenUserRoleMenuId(null);
   };
 
   const handleUpdateUserRole = async (shareId: string, newRole: AccessRole) => {
+    // Optimistic update: immediately update role
+    const previousRole = sharedUsers.find(u => u.id === shareId)?.role;
+    setSharedUsers(prev => prev.map(u =>
+      u.id === shareId ? { ...u, role: newRole } : u
+    ));
+    setOpenUserRoleMenuId(null);
+
+    // Make API call in background
     try {
       const res = await fetch("/api/share", {
         method: "POST",
@@ -343,15 +385,20 @@ export function SharePopover({
         }),
       });
 
-      if (res.ok) {
+      if (!res.ok && previousRole) {
+        // Restore previous role if API failed
         setSharedUsers(prev => prev.map(u =>
-          u.id === shareId ? { ...u, role: newRole } : u
+          u.id === shareId ? { ...u, role: previousRole } : u
         ));
       }
     } catch {
-      // Ignore errors
+      // Restore previous role if API failed
+      if (previousRole) {
+        setSharedUsers(prev => prev.map(u =>
+          u.id === shareId ? { ...u, role: previousRole } : u
+        ));
+      }
     }
-    setOpenUserRoleMenuId(null);
   };
 
   const handleAccessTypeChange = async (newType: AccessType) => {
@@ -963,20 +1010,7 @@ export function SharePopover({
               )}
 
               {/* Actions */}
-              <div className="flex items-center justify-between pt-4">
-                {/* Link copy button */}
-                <button
-                  type="button"
-                  onClick={handleCopyUrl}
-                  className="inline-flex items-center gap-2 rounded-full border border-zinc-300 px-4 py-2 text-sm font-medium text-blue-600 hover:bg-blue-50 transition-colors"
-                >
-                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M10 13a5 5 0 0 1 0-7l1.5-1.5a5 5 0 0 1 7 7L17 12" />
-                    <path d="M14 11a5 5 0 0 1 0 7L12.5 20.5a5 5 0 1 1-7-7L7 12" />
-                  </svg>
-                  リンクをコピー
-                </button>
-
+              <div className="flex items-center justify-end pt-4">
                 <div className="flex items-center gap-3">
                   <button
                     type="button"
@@ -992,10 +1026,10 @@ export function SharePopover({
                   </button>
                   <button
                     onClick={handleSendInvites}
-                    disabled={(pendingInvites.length === 0 && !inviteEmailInput.trim()) || isInviting}
+                    disabled={pendingInvites.length === 0 && !inviteEmailInput.trim()}
                     className="rounded-full bg-blue-600 px-5 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                   >
-                    {isInviting ? "招待中..." : "招待"}
+                    招待
                   </button>
                 </div>
               </div>
