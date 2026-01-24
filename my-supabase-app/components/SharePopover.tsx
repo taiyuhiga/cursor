@@ -174,19 +174,27 @@ export function SharePopover({
   };
 
   const handleSendInvites = async () => {
-    // Parse comma-separated emails
-    const emails = inviteEmailInput
-      .split(",")
-      .map(e => e.trim().toLowerCase())
-      .filter(e => e.length > 0);
+    // First add any remaining input as a pending invite
+    if (inviteEmailInput.trim()) {
+      const email = inviteEmailInput.trim().toLowerCase();
+      if (email.includes("@") && !pendingInvites.some(p => p.email === email) && !sharedUsers.some(u => u.email === email)) {
+        setPendingInvites(prev => [...prev, { email, id: crypto.randomUUID() }]);
+        setInviteEmailInput("");
+      }
+    }
 
-    if (emails.length === 0) return;
+    // Use pendingInvites for emails
+    const emails = pendingInvites.map(p => p.email);
 
-    // Validate emails
-    const invalidEmails = emails.filter(e => !e.includes("@"));
-    if (invalidEmails.length > 0) {
-      setInviteError(`無効なメールアドレス: ${invalidEmails.join(", ")}`);
-      return;
+    if (emails.length === 0) {
+      // If no pending invites, try to parse the current input
+      const inputEmail = inviteEmailInput.trim().toLowerCase();
+      if (!inputEmail) return;
+      if (!inputEmail.includes("@")) {
+        setInviteError("有効なメールアドレスを入力してください");
+        return;
+      }
+      emails.push(inputEmail);
     }
 
     // Check for duplicates with existing shared users
@@ -229,11 +237,13 @@ export function SharePopover({
 
       if (failed.length > 0) {
         setInviteError(`${failed.length}件の招待に失敗しました: ${failed.map(f => f.email).join(", ")}`);
-        // Keep only failed emails in input
-        setInviteEmailInput(failed.map(f => f.email).join(", "));
+        // Keep only failed emails as pending invites
+        setPendingInvites(failed.map(f => ({ email: f.email, id: crypto.randomUUID() })));
+        setInviteEmailInput("");
       } else {
         // Clear and go back if all succeeded
         setInviteEmailInput("");
+        setPendingInvites([]);
         setShowInvitePanel(false);
       }
     } catch {
@@ -680,19 +690,91 @@ export function SharePopover({
             </div>
 
             <div className="px-6 pb-6 pt-4 space-y-5">
-              {/* Email textarea */}
+              {/* Email chips input */}
               <div>
-                <textarea
-                  ref={inviteInputRef as React.RefObject<HTMLTextAreaElement>}
-                  value={inviteEmailInput}
-                  onChange={(e) => {
-                    setInviteEmailInput(e.target.value);
-                    setInviteError(null);
-                  }}
-                  placeholder="メールアドレスをカンマで区切って入力（例: user1@example.com, user2@example.com）"
-                  className="w-full rounded-lg border border-zinc-300 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 px-3 py-2.5 text-sm placeholder:text-zinc-400 resize-none outline-none"
-                  rows={3}
-                />
+                <div
+                  className="w-full rounded-lg border border-zinc-300 focus-within:border-blue-500 focus-within:ring-1 focus-within:ring-blue-500 px-3 py-2 min-h-[100px] max-h-[200px] overflow-y-auto cursor-text"
+                  onClick={() => inviteInputRef.current?.focus()}
+                >
+                  <div className="flex flex-wrap gap-2">
+                    {/* Email chips */}
+                    {pendingInvites.map((invite) => {
+                      const initial = invite.email[0]?.toUpperCase() || "?";
+                      // Generate a consistent color based on email
+                      const colors = [
+                        { bg: "bg-teal-600", text: "text-white" },
+                        { bg: "bg-blue-600", text: "text-white" },
+                        { bg: "bg-purple-600", text: "text-white" },
+                        { bg: "bg-pink-600", text: "text-white" },
+                        { bg: "bg-orange-600", text: "text-white" },
+                        { bg: "bg-green-600", text: "text-white" },
+                      ];
+                      const colorIndex = invite.email.charCodeAt(0) % colors.length;
+                      const color = colors[colorIndex];
+
+                      return (
+                        <div
+                          key={invite.id}
+                          className="inline-flex items-center gap-2 rounded-full border border-zinc-300 bg-white pl-1 pr-2 py-1 text-sm"
+                        >
+                          <div className={`w-6 h-6 rounded-full ${color.bg} flex items-center justify-center text-xs font-medium ${color.text}`}>
+                            {initial}
+                          </div>
+                          <span className="text-zinc-700 max-w-[200px] truncate">{invite.email}</span>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              removePendingInvite(invite.id);
+                            }}
+                            className="text-zinc-400 hover:text-zinc-600 transition-colors"
+                          >
+                            <svg className="w-4 h-4" viewBox="0 0 20 20" fill="currentColor">
+                              <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                            </svg>
+                          </button>
+                        </div>
+                      );
+                    })}
+                    {/* Input field */}
+                    <input
+                      ref={inviteInputRef}
+                      type="text"
+                      value={inviteEmailInput}
+                      onChange={(e) => {
+                        setInviteEmailInput(e.target.value);
+                        setInviteError(null);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === ",") {
+                          e.preventDefault();
+                          addPendingInvite();
+                        } else if (e.key === "Backspace" && inviteEmailInput === "" && pendingInvites.length > 0) {
+                          // Remove last chip on backspace when input is empty
+                          removePendingInvite(pendingInvites[pendingInvites.length - 1].id);
+                        }
+                      }}
+                      onPaste={(e) => {
+                        const pastedText = e.clipboardData.getData("text");
+                        if (pastedText.includes(",") || pastedText.includes(" ") || pastedText.includes("\n")) {
+                          e.preventDefault();
+                          const emails = pastedText
+                            .split(/[,\s\n]+/)
+                            .map(email => email.trim().toLowerCase())
+                            .filter(email => email.length > 0 && email.includes("@"));
+
+                          emails.forEach(email => {
+                            if (!pendingInvites.some(p => p.email === email) && !sharedUsers.some(u => u.email === email)) {
+                              setPendingInvites(prev => [...prev, { email, id: crypto.randomUUID() }]);
+                            }
+                          });
+                        }
+                      }}
+                      placeholder={pendingInvites.length === 0 ? "メールアドレスを入力" : ""}
+                      className="flex-1 min-w-[150px] text-sm outline-none bg-transparent py-1 placeholder:text-zinc-400"
+                    />
+                  </div>
+                </div>
                 {inviteError && (
                   <div className="mt-2 text-xs text-red-500">{inviteError}</div>
                 )}
@@ -769,7 +851,7 @@ export function SharePopover({
                 </button>
                 <button
                   onClick={handleSendInvites}
-                  disabled={!inviteEmailInput.trim() || isInviting}
+                  disabled={(pendingInvites.length === 0 && !inviteEmailInput.trim()) || isInviting}
                   className="rounded-full bg-blue-600 px-5 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
                   {isInviting ? "招待中..." : "招待"}
