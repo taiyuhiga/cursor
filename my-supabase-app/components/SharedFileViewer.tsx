@@ -94,6 +94,7 @@ export function SharedFileViewer({ nodeId }: Props) {
   const router = useRouter();
   const [nodeData, setNodeData] = useState<NodeData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [isRedirecting, setIsRedirecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [errorType, setErrorType] = useState<"not_found" | "access_denied" | "error">("error");
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -166,8 +167,16 @@ export function SharedFileViewer({ nodeId }: Props) {
             setErrorType("not_found");
             setError(data.error || "コンテンツが見つかりません");
           } else if (res.status === 403) {
+            // If requires auth, redirect to login page with return URL
+            if (data.requiresAuth) {
+              setIsRedirecting(true);
+              const returnUrl = encodeURIComponent(window.location.pathname);
+              router.push(`/auth/login?next=${returnUrl}`);
+              return;
+            }
             setErrorType("access_denied");
             setError(data.error || "アクセスが制限されています");
+            setIsAuthenticated(data.isAuthenticated || false);
           } else {
             setErrorType("error");
             setError(data.error || "エラーが発生しました");
@@ -273,6 +282,11 @@ export function SharedFileViewer({ nodeId }: Props) {
     setShowPasswordInput(false);
   };
 
+  // Show nothing while redirecting to login
+  if (isRedirecting) {
+    return null;
+  }
+
   if (isLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-zinc-50">
@@ -314,14 +328,24 @@ export function SharedFileViewer({ nodeId }: Props) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-zinc-50">
         <div className="text-center">
-          <h1 className="text-2xl font-semibold text-zinc-900 mb-2">アクセスが制限されています</h1>
-          <p className="text-zinc-500 mb-4">このコンテンツを表示するにはログインが必要です。</p>
-          <a
-            href="/auth/login"
-            className="inline-flex items-center px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors"
-          >
-            ログイン
-          </a>
+          <h1 className="text-2xl font-semibold text-zinc-900 mb-2">アクセス権がありません</h1>
+          {isAuthenticated ? (
+            <p className="text-zinc-500">
+              このコンテンツにアクセスする権限がありません。
+              <br />
+              オーナーにアクセス権をリクエストしてください。
+            </p>
+          ) : (
+            <>
+              <p className="text-zinc-500 mb-4">このコンテンツを表示するにはログインが必要です。</p>
+              <a
+                href={`/auth/login?next=${encodeURIComponent(typeof window !== 'undefined' ? window.location.pathname : '')}`}
+                className="inline-flex items-center px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors"
+              >
+                ログイン
+              </a>
+            </>
+          )}
         </div>
       </div>
     );

@@ -46,6 +46,7 @@ export function SharePopover({
   const [isAccessMenuOpen, setIsAccessMenuOpen] = useState(false);
   const [isPublicRoleMenuOpen, setIsPublicRoleMenuOpen] = useState(false);
   const [openUserRoleMenuId, setOpenUserRoleMenuId] = useState<string | null>(null);
+  const [userRoleMenuPosition, setUserRoleMenuPosition] = useState<{ top: number; right: number } | null>(null);
 
   // Invite panel state
   const [showInvitePanel, setShowInvitePanel] = useState(false);
@@ -104,6 +105,7 @@ export function SharePopover({
       setIsAccessMenuOpen(false);
       setIsPublicRoleMenuOpen(false);
       setOpenUserRoleMenuId(null);
+      setUserRoleMenuPosition(null);
       setShowInvitePanel(false);
       setPendingInvites([]);
       setInviteEmailInput("");
@@ -244,7 +246,8 @@ export function SharePopover({
       setPendingInvites(prev => [...prev, { email, id: crypto.randomUUID() }]);
     }
     setInviteEmailInput("");
-    setShowSuggestions(false);
+    // Keep suggestions visible for remaining suggestions
+    setShowSuggestions(true);
     inviteInputRef.current?.focus();
   };
 
@@ -523,7 +526,7 @@ export function SharePopover({
       }}
     >
       <div
-        className="relative w-[560px] max-w-[92vw] rounded-2xl border border-zinc-200 bg-white shadow-2xl overflow-hidden"
+        className="relative w-[560px] max-w-[92vw] rounded-2xl border border-zinc-200 bg-white shadow-2xl"
         onMouseDown={(event) => {
           const target = event.target as Node;
           if (
@@ -552,7 +555,7 @@ export function SharePopover({
               </div>
             </div>
 
-            <div className="px-6 pb-6 pt-4 space-y-5">
+            <div className="px-6 pb-6 pt-4 space-y-5 max-h-[70vh] overflow-y-auto">
               {/* Email Input - Click to open invite panel */}
               <div className="flex gap-3">
                 <button
@@ -576,7 +579,7 @@ export function SharePopover({
                 <div className="text-sm font-semibold text-zinc-700 mb-3">
                   アクセスできるユーザー
                 </div>
-                <div className="space-y-1 max-h-48 overflow-visible">
+                <div className="space-y-1 max-h-48 overflow-y-auto">
                   {/* Owner */}
                   <div className="flex items-center justify-between px-2 py-2 rounded-lg hover:bg-zinc-50">
                     <div className="flex items-center gap-3">
@@ -602,8 +605,10 @@ export function SharePopover({
                       className="flex items-center justify-between px-2 py-2 rounded-lg hover:bg-zinc-50"
                     >
                       <div className="flex items-center gap-3">
-                        <div className="w-9 h-9 rounded-full bg-blue-100 flex items-center justify-center text-sm font-medium text-blue-600">
-                          {user.displayName[0]?.toUpperCase() || "U"}
+                        <div className="w-9 h-9 rounded-full bg-blue-100 flex items-center justify-center">
+                          <svg className="w-5 h-5 text-blue-400" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/>
+                          </svg>
                         </div>
                         <div>
                           <div className="text-sm font-medium text-zinc-900">
@@ -615,7 +620,19 @@ export function SharePopover({
                       <div className="relative" onMouseDown={(e) => e.stopPropagation()}>
                         <button
                           type="button"
-                          onClick={() => setOpenUserRoleMenuId(openUserRoleMenuId === user.id ? null : user.id)}
+                          onClick={(e) => {
+                            if (openUserRoleMenuId === user.id) {
+                              setOpenUserRoleMenuId(null);
+                              setUserRoleMenuPosition(null);
+                            } else {
+                              const rect = e.currentTarget.getBoundingClientRect();
+                              setUserRoleMenuPosition({
+                                top: rect.bottom + 4,
+                                right: window.innerWidth - rect.right,
+                              });
+                              setOpenUserRoleMenuId(user.id);
+                            }
+                          }}
                           className="inline-flex items-center gap-1 text-sm text-zinc-600 hover:bg-zinc-200 rounded px-2 py-1 transition-colors"
                         >
                           {user.role === "editor" ? "編集者" : "閲覧者"}
@@ -623,8 +640,14 @@ export function SharePopover({
                             <path d="M5.5 7.5l4.5 4.5 4.5-4.5" />
                           </svg>
                         </button>
-                        {openUserRoleMenuId === user.id && (
-                          <div className="absolute right-0 top-full mt-1 w-36 rounded-lg border border-zinc-200 bg-white shadow-xl py-1 z-50">
+                        {openUserRoleMenuId === user.id && userRoleMenuPosition && (
+                          <div
+                            className="fixed w-36 rounded-lg border border-zinc-200 bg-white shadow-xl py-1 z-[100]"
+                            style={{
+                              top: userRoleMenuPosition.top,
+                              right: userRoleMenuPosition.right,
+                            }}
+                          >
                             <button
                               type="button"
                               onClick={() => handleUpdateUserRole(user.id, "viewer")}

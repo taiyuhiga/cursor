@@ -44,14 +44,19 @@ export async function GET(req: NextRequest) {
 
   const supabase = await createClient();
   const canUseAdmin = Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY);
-  const storageClient = canUseAdmin ? createAdminClient() : supabase;
+  const adminClient = canUseAdmin ? createAdminClient() : null;
+  const storageClient = adminClient || supabase;
 
-  // Get node info - try with public_access_role first, fallback without it
+  // Check user authentication first
+  const { data: { user } } = await supabase.auth.getUser();
+  const isAuthenticated = !!user;
+
+  // Get node info using admin client to bypass RLS (to check if node exists at all)
   let node: NodeInfo | null = null;
-  let nodeError: Error | null = null;
+  const queryClient = adminClient || supabase;
 
   // First try with public_access_role column
-  const { data: nodeWithRole, error: errorWithRole } = await supabase
+  const { data: nodeWithRole, error: errorWithRole } = await queryClient
     .from("nodes")
     .select("id, name, type, project_id, parent_id, is_public, public_access_role, created_at")
     .eq("id", nodeId)
@@ -61,33 +66,33 @@ export async function GET(req: NextRequest) {
     node = nodeWithRole as NodeInfo;
   } else {
     // Fallback: query without public_access_role (column may not exist)
-    const { data: nodeWithoutRole, error: errorWithoutRole } = await supabase
+    const { data: nodeWithoutRole, error: errorWithoutRole } = await queryClient
       .from("nodes")
       .select("id, name, type, project_id, parent_id, is_public, created_at")
       .eq("id", nodeId)
       .maybeSingle();
 
-    if (errorWithoutRole || !nodeWithoutRole) {
-      nodeError = errorWithoutRole;
-    } else {
+    if (!errorWithoutRole && nodeWithoutRole) {
       node = { ...nodeWithoutRole, public_access_role: "viewer" } as NodeInfo;
     }
   }
 
-  if (nodeError || !node) {
+  // Node truly doesn't exist
+  if (!node) {
     return NextResponse.json({ error: "Node not found" }, { status: 404 });
   }
 
-  // Check user authentication
-  const { data: { user } } = await supabase.auth.getUser();
-  const isAuthenticated = !!user;
-
-  // Check if node is public
+  // Node exists but is not public - check access
   if (!node.is_public) {
     if (!user) {
-      return NextResponse.json({ error: "This content is not public" }, { status: 403 });
+      // Not logged in - redirect to login
+      return NextResponse.json({
+        error: "このコンテンツを表示するにはログインが必要です",
+        requiresAuth: true
+      }, { status: 403 });
     }
-    // If authenticated, check if user has access to this workspace
+
+    // Check if user has access via workspace membership
     const { data: membership } = await supabase
       .from("workspace_members")
       .select("id")
@@ -95,19 +100,36 @@ export async function GET(req: NextRequest) {
       .eq("user_id", user.id)
       .maybeSingle();
 
-    if (!membership) {
-      return NextResponse.json({ error: "Access denied" }, { status: 403 });
+    // Check if user has access via node_shares (case-insensitive email match)
+    // Use admin client to bypass RLS for checking share access
+    const userEmail = user.email?.toLowerCase() || "";
+    const { data: share } = await queryClient
+      .from("node_shares")
+      .select("id, role")
+      .eq("node_id", nodeId)
+      .eq("shared_with_email", userEmail)
+      .maybeSingle();
+
+    if (!membership && !share) {
+      return NextResponse.json({
+        error: "アクセス権がありません",
+        isAuthenticated: true
+      }, { status: 403 });
     }
 
-    // User has full access - redirect to app
-    return NextResponse.json({ redirectTo: `/app?open=${nodeId}` });
+    // User has access - redirect to app if workspace member
+    if (membership) {
+      return NextResponse.json({ redirectTo: `/app?open=${nodeId}` });
+    }
+
+    // User has shared access - continue to show content
   }
 
   // Get file content if it's a file
-  // Use admin client to bypass RLS for public files
+  // Use admin client to bypass RLS for public/shared files
   let content: string | null = null;
   let signedUrl: string | null = null;
-  const dbClient = canUseAdmin ? createAdminClient() : supabase;
+  const dbClient = adminClient || supabase;
 
   if (node.type === "file") {
     const { data: fileContent } = await dbClient
