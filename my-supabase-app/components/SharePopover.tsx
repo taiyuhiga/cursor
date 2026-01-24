@@ -252,8 +252,9 @@ export function SharePopover({
     const email = inviteEmailInput.trim().toLowerCase();
     if (!email) return;
 
-    // Basic email validation
-    if (!email.includes("@")) {
+    // Email format validation (xxx@xxx.xx)
+    const validEmailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+    if (!validEmailRegex.test(email)) {
       setInviteError("有効なメールアドレスを入力してください");
       return;
     }
