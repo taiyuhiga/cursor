@@ -17,6 +17,8 @@ type Node = {
   parent_id: string | null;
   type: "file" | "folder";
   name: string;
+  is_public?: boolean | null;
+  public_access_role?: "viewer" | "editor" | null;
   created_at: string;
 };
 
@@ -91,7 +93,7 @@ export default async function AppContent({ searchParamsPromise }: Props) {
     const { data: newWorkspace, error: wsError } = await supabase
       .from("workspaces")
       .insert({
-        name: `${user.email?.split("@")[0] || "My"}'s Workspace`,
+        name: "My workspace",
         owner_id: user.id,
       })
       .select("*")

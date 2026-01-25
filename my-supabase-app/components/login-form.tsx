@@ -18,14 +18,28 @@ import { useState, type ComponentPropsWithoutRef, type FormEvent } from "react";
 
 export function LoginForm({
   className,
+  nextPath,
   ...props
-}: ComponentPropsWithoutRef<"div">) {
+}: ComponentPropsWithoutRef<"div"> & { nextPath?: string }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isGoogleLoading, setIsGoogleLoading] = useState(false);
   const router = useRouter();
+
+  const safeNext = (() => {
+    const fallback = "/app";
+    if (!nextPath) return fallback;
+    let candidate = nextPath;
+    try {
+      candidate = decodeURIComponent(candidate);
+    } catch {
+      candidate = nextPath;
+    }
+    if (!candidate.startsWith("/") || candidate.startsWith("//")) return fallback;
+    return candidate;
+  })();
 
   const handleGoogleLogin = async () => {
     const supabase = createClient();
@@ -36,7 +50,7 @@ export function LoginForm({
       const { error } = await supabase.auth.signInWithOAuth({
         provider: "google",
         options: {
-          redirectTo: `${window.location.origin}/auth/callback`,
+          redirectTo: `${window.location.origin}/auth/callback?next=${encodeURIComponent(safeNext)}`,
         },
       });
       if (error) throw error;
@@ -59,7 +73,7 @@ export function LoginForm({
       });
       if (error) throw error;
       // Update this route to redirect to an authenticated route. The user already has an active session.
-      router.push("/app");
+      router.push(safeNext);
     } catch (error: unknown) {
       setError(error instanceof Error ? error.message : "An error occurred");
     } finally {

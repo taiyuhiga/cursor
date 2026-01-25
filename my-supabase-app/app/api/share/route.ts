@@ -231,32 +231,42 @@ export async function GET(req: NextRequest) {
     .eq("node_id", nodeId)
     .order("created_at", { ascending: true });
 
-  // Get profile info for shared users
-  const sharedUsers = await Promise.all(
-    (shares || []).map(async (share) => {
-      let displayName = share.shared_with_email.split("@")[0];
-
-      if (share.shared_with_user_id) {
-        const { data: profile } = await supabase
-          .from("profiles")
-          .select("display_name")
-          .eq("id", share.shared_with_user_id)
-          .single();
-
-        if (profile?.display_name) {
-          displayName = profile.display_name;
-        }
-      }
-
-      return {
-        id: share.id,
-        email: share.shared_with_email,
-        displayName,
-        role: share.role,
-        userId: share.shared_with_user_id,
-      };
-    })
+  const sharesList = shares || [];
+  const sharedUserIds = Array.from(
+    new Set(
+      sharesList
+        .map((share) => share.shared_with_user_id)
+        .filter((id): id is string => Boolean(id))
+    )
   );
+
+  let profileNameById = new Map<string, string>();
+  if (sharedUserIds.length > 0) {
+    const { data: profiles } = await supabase
+      .from("profiles")
+      .select("id, display_name")
+      .in("id", sharedUserIds);
+    profileNameById = new Map(
+      (profiles || [])
+        .filter((profile) => Boolean(profile?.id))
+        .map((profile) => [profile.id as string, profile.display_name || ""])
+    );
+  }
+
+  const sharedUsers = sharesList.map((share) => {
+    const fallbackName = share.shared_with_email.split("@")[0];
+    const displayName = share.shared_with_user_id
+      ? profileNameById.get(share.shared_with_user_id) || fallbackName
+      : fallbackName;
+
+    return {
+      id: share.id,
+      email: share.shared_with_email,
+      displayName,
+      role: share.role,
+      userId: share.shared_with_user_id,
+    };
+  });
 
   return NextResponse.json({
     isPublic: node?.is_public ?? false,

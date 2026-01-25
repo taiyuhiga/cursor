@@ -18,6 +18,25 @@ type PendingInvite = {
   id: string;
 };
 
+function areSharedUsersEqual(a: SharedUser[], b: SharedUser[]) {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    const left = a[i];
+    const right = b[i];
+    if (
+      left.id !== right.id ||
+      left.email !== right.email ||
+      left.displayName !== right.displayName ||
+      left.role !== right.role ||
+      left.userId !== right.userId
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 type Props = {
   isOpen: boolean;
   onClose: () => void;
@@ -25,6 +44,13 @@ type Props = {
   nodeId: string;
   isPublic: boolean;
   isPublicLoaded?: boolean;
+  initialSharedUsers?: SharedUser[];
+  initialPublicAccessRole?: AccessRole;
+  onShareSettingsChange?: (changes: {
+    sharedUsers?: SharedUser[];
+    publicAccessRole?: AccessRole;
+  }) => void;
+  onShareSettingsRefresh?: () => void;
   onTogglePublic: (isPublic: boolean) => Promise<void>;
   ownerEmail?: string;
   isWorkspace?: boolean;
@@ -37,14 +63,18 @@ export function SharePopover({
   nodeId,
   isPublic,
   isPublicLoaded = true,
+  initialSharedUsers,
+  initialPublicAccessRole,
+  onShareSettingsChange,
+  onShareSettingsRefresh,
   onTogglePublic,
   ownerEmail,
   isWorkspace = false,
 }: Props) {
   const [isCopied, setIsCopied] = useState(false);
-  const [sharedUsers, setSharedUsers] = useState<SharedUser[]>([]);
+  const [sharedUsers, setSharedUsers] = useState<SharedUser[]>(initialSharedUsers ?? []);
   const [accessType, setAccessType] = useState<AccessType>("public");
-  const [publicRole, setPublicRole] = useState<AccessRole>("viewer");
+  const [publicRole, setPublicRole] = useState<AccessRole>(initialPublicAccessRole ?? "viewer");
   const [isAccessMenuOpen, setIsAccessMenuOpen] = useState(false);
   const [isPublicRoleMenuOpen, setIsPublicRoleMenuOpen] = useState(false);
   const [openUserRoleMenuId, setOpenUserRoleMenuId] = useState<string | null>(null);
@@ -70,6 +100,8 @@ export function SharePopover({
   const inviteRoleButtonRef = useRef<HTMLButtonElement | null>(null);
   const inviteRoleMenuRef = useRef<HTMLDivElement | null>(null);
   const inviteInputRef = useRef<HTMLInputElement | null>(null);
+  const syncingSharedUsersRef = useRef(false);
+  const syncingPublicRoleRef = useRef(false);
 
   const sharePath = isWorkspace ? `/share/workspace/${nodeId}` : `/share/${nodeId}`;
   const publicUrl = typeof window !== "undefined"
@@ -87,7 +119,10 @@ export function SharePopover({
     try {
       const res = await fetch(`/api/share?nodeId=${nodeId}`);
       const data = await res.json();
-      if (data.sharedUsers) {
+      if (data.publicAccessRole === "viewer" || data.publicAccessRole === "editor") {
+        setPublicRole(data.publicAccessRole);
+      }
+      if (Array.isArray(data.sharedUsers)) {
         setSharedUsers(data.sharedUsers);
       }
     } catch {
@@ -100,6 +135,45 @@ export function SharePopover({
       fetchSharedUsers();
     }
   }, [isOpen, fetchSharedUsers]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const nextUsers = initialSharedUsers ?? [];
+    setSharedUsers((prev) => {
+      if (areSharedUsersEqual(prev, nextUsers)) return prev;
+      syncingSharedUsersRef.current = true;
+      return nextUsers;
+    });
+  }, [isOpen, nodeId, initialSharedUsers]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const nextRole = initialPublicAccessRole === "editor" ? "editor" : "viewer";
+    setPublicRole((prev) => {
+      if (prev === nextRole) return prev;
+      syncingPublicRoleRef.current = true;
+      return nextRole;
+    });
+  }, [isOpen, nodeId, initialPublicAccessRole]);
+
+  useEffect(() => {
+    if (!isOpen || !onShareSettingsChange) return;
+    if (syncingSharedUsersRef.current) {
+      syncingSharedUsersRef.current = false;
+      return;
+    }
+    onShareSettingsChange({ sharedUsers });
+  }, [isOpen, sharedUsers, onShareSettingsChange]);
+
+  useEffect(() => {
+    if (!isOpen || !onShareSettingsChange) return;
+    if (syncingPublicRoleRef.current) {
+      syncingPublicRoleRef.current = false;
+      return;
+    }
+    if (initialPublicAccessRole === undefined && publicRole === "viewer") return;
+    onShareSettingsChange({ publicAccessRole: publicRole });
+  }, [isOpen, publicRole, onShareSettingsChange, initialPublicAccessRole]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -383,6 +457,8 @@ export function SharePopover({
       // Remove all optimistic users on error
       setSharedUsers(prev => prev.filter(u => !u.id.startsWith("temp-")));
       console.error("招待の送信に失敗しました");
+    } finally {
+      onShareSettingsRefresh?.();
     }
   };
 
@@ -412,6 +488,8 @@ export function SharePopover({
       if (removedUser) {
         setSharedUsers(prev => [...prev, removedUser]);
       }
+    } finally {
+      onShareSettingsRefresh?.();
     }
   };
 
@@ -448,6 +526,8 @@ export function SharePopover({
           u.id === shareId ? { ...u, role: previousRole } : u
         ));
       }
+    } finally {
+      onShareSettingsRefresh?.();
     }
   };
 
@@ -490,6 +570,8 @@ export function SharePopover({
       });
     } catch {
       // Ignore errors for now
+    } finally {
+      onShareSettingsRefresh?.();
     }
   };
 

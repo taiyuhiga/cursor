@@ -33,8 +33,28 @@ type Node = {
   parent_id: string | null;
   type: "file" | "folder";
   name: string;
+  is_public?: boolean | null;
+  public_access_role?: "viewer" | "editor" | null;
   created_at: string;
 };
+
+type ShareSettingsUser = {
+  id: string;
+  email: string;
+  displayName: string;
+  role: "viewer" | "editor";
+  userId: string | null;
+};
+
+type ShareSettings = {
+  nodeId: string;
+  isPublic: boolean;
+  publicAccessRole: "viewer" | "editor";
+  sharedUsers: ShareSettingsUser[];
+  fetchedAt: number;
+};
+
+const SHARE_SETTINGS_TTL_MS = 30000;
 
 type UploadItem = {
   file: File;
@@ -229,6 +249,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const [isShareOpen, setIsShareOpen] = useState(false);
   const [isSharePublic, setIsSharePublic] = useState(false);
   const [isSharePublicLoaded, setIsSharePublicLoaded] = useState(false);
+  const [shareSettings, setShareSettings] = useState<ShareSettings | null>(null);
   const [isHoveringLeftResize, setIsHoveringLeftResize] = useState(false);
   const [shareTargetNodeId, setShareTargetNodeId] = useState<string | null>(null);
   const [shareWorkspaceId, setShareWorkspaceId] = useState<string | null>(null);
@@ -456,6 +477,10 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const layoutRef = useRef<HTMLDivElement>(null);
   const leftResizeHoverRef = useRef(false);
   const isSharePublicRef = useRef(isSharePublic);
+  const shareSettingsCacheRef = useRef<Map<string, ShareSettings>>(new Map());
+  const shareSettingsPromiseRef = useRef<Map<string, Promise<ShareSettings | null>>>(new Map());
+  const shareSettingsFetchVersionRef = useRef<Map<string, number>>(new Map());
+  const shareTargetIdRef = useRef<string | null>(null);
   const realtimeClientIdRef = useRef(`client-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   const activeFileChannelRef = useRef<RealtimeChannel | null>(null);
   const activeFileChannelNodeIdRef = useRef<string | null>(null);
@@ -493,6 +518,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     setIsShareOpen(false);
     setIsSharePublic(false);
     setIsSharePublicLoaded(false);
+    setShareSettings(null);
   }, [activeNodeId]);
 
   useEffect(() => {
@@ -701,6 +727,127 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     if (!node || node.id.startsWith("temp-")) return null;
     return node.id;
   }, [shareTargetNodeId, activeNodeId, nodeById]);
+  useEffect(() => {
+    shareTargetIdRef.current = shareTargetId;
+  }, [shareTargetId]);
+  const updateNodeShareSettings = useCallback((nodeId: string, nextIsPublic: boolean, nextRole?: "viewer" | "editor") => {
+    setNodes((prev) => {
+      let changed = false;
+      const next = prev.map((node) => {
+        if (node.id !== nodeId) return node;
+        const currentRole = node.public_access_role ?? null;
+        const resolvedRole = nextRole ?? currentRole;
+        if (node.is_public === nextIsPublic && currentRole === resolvedRole) {
+          return node;
+        }
+        changed = true;
+        return {
+          ...node,
+          is_public: nextIsPublic,
+          ...(nextRole ? { public_access_role: nextRole } : {}),
+        };
+      });
+      return changed ? next : prev;
+    });
+  }, []);
+  const applyShareSettings = useCallback((
+    nodeId: string,
+    changes: {
+      isPublic?: boolean;
+      publicAccessRole?: "viewer" | "editor";
+      sharedUsers?: ShareSettingsUser[];
+    },
+    applyIfActive = true,
+    fetchedAtOverride?: number
+  ) => {
+    const prev = shareSettingsCacheRef.current.get(nodeId) ?? null;
+    const localIsPublic = Boolean(nodeById.get(nodeId)?.is_public);
+    const nextIsPublic = changes.isPublic ?? prev?.isPublic ?? localIsPublic;
+    const nextRole = changes.publicAccessRole ?? prev?.publicAccessRole ?? "viewer";
+    const nextSharedUsers = changes.sharedUsers ?? prev?.sharedUsers ?? [];
+    const isComplete = changes.isPublic !== undefined && changes.publicAccessRole !== undefined;
+    const fetchedAt = fetchedAtOverride ?? (prev || isComplete ? Date.now() : 0);
+    const next: ShareSettings = {
+      nodeId,
+      isPublic: nextIsPublic,
+      publicAccessRole: nextRole,
+      sharedUsers: nextSharedUsers,
+      fetchedAt,
+    };
+    shareSettingsCacheRef.current.set(nodeId, next);
+    updateNodeShareSettings(nodeId, next.isPublic, next.publicAccessRole);
+    if (applyIfActive && shareTargetIdRef.current === nodeId) {
+      setShareSettings(next);
+      setIsSharePublic(next.isPublic);
+      isSharePublicRef.current = next.isPublic;
+      setIsSharePublicLoaded(true);
+    }
+    return next;
+  }, [nodeById, updateNodeShareSettings]);
+  const fetchShareSettings = useCallback(async (nodeId: string, applyIfActive: boolean, force = false) => {
+    let awaitedPromise: Promise<ShareSettings | null> | null = null;
+    try {
+      const cached = shareSettingsCacheRef.current.get(nodeId);
+      if (!force && cached?.fetchedAt && Date.now() - cached.fetchedAt < SHARE_SETTINGS_TTL_MS) {
+        if (applyIfActive && shareTargetIdRef.current === nodeId) {
+          setShareSettings(cached);
+          setIsSharePublic(cached.isPublic);
+          isSharePublicRef.current = cached.isPublic;
+          setIsSharePublicLoaded(true);
+        }
+        return cached;
+      }
+
+      const nextVersion = (shareSettingsFetchVersionRef.current.get(nodeId) ?? 0) + 1;
+      shareSettingsFetchVersionRef.current.set(nodeId, nextVersion);
+
+      if (!force) {
+        const pending = shareSettingsPromiseRef.current.get(nodeId);
+        if (pending) {
+          awaitedPromise = pending;
+          const settings = await pending;
+          if (settings && shareSettingsFetchVersionRef.current.get(nodeId) === nextVersion) {
+            applyShareSettings(nodeId, settings, applyIfActive, settings.fetchedAt);
+          }
+          return settings;
+        }
+      }
+
+      const promise = (async () => {
+        const res = await fetch(`/api/share?nodeId=${nodeId}`);
+        if (!res.ok) return null;
+        const data = await res.json();
+        const publicAccessRole = data.publicAccessRole === "editor" ? "editor" : "viewer";
+        const settings: ShareSettings = {
+          nodeId,
+          isPublic: Boolean(data.isPublic),
+          publicAccessRole,
+          sharedUsers: Array.isArray(data.sharedUsers) ? data.sharedUsers : [],
+          fetchedAt: Date.now(),
+        };
+        if (shareSettingsFetchVersionRef.current.get(nodeId) === nextVersion) {
+          applyShareSettings(nodeId, settings, applyIfActive, settings.fetchedAt);
+        }
+        return settings;
+      })();
+
+      awaitedPromise = promise;
+      shareSettingsPromiseRef.current.set(nodeId, promise);
+      const settings = await promise;
+      if (shareSettingsPromiseRef.current.get(nodeId) === promise) {
+        shareSettingsPromiseRef.current.delete(nodeId);
+      }
+      return settings;
+    } catch {
+      if (awaitedPromise && shareSettingsPromiseRef.current.get(nodeId) === awaitedPromise) {
+        shareSettingsPromiseRef.current.delete(nodeId);
+      }
+      return null;
+    }
+  }, [applyShareSettings]);
+  const refreshShareSettings = useCallback((nodeId: string) => {
+    void fetchShareSettings(nodeId, true, true);
+  }, [fetchShareSettings]);
   const activeRealtimeNodeId = useMemo(() => {
     if (!activeNodeId) return null;
     if (
@@ -763,21 +910,48 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
 
   useEffect(() => {
     if (!isShareOpen) return;
-    if (!shareTargetId) {
+    if (shareWorkspaceId) {
+      setShareSettings(null);
+      setIsSharePublic(false);
+      isSharePublicRef.current = false;
       setIsSharePublicLoaded(true);
       return;
     }
-    setIsSharePublicLoaded(false);
-    fetch(`/api/share?nodeId=${shareTargetId}`)
-      .then((res) => res.json())
-      .then((data) => {
-        setIsSharePublic(data.isPublic);
-      })
-      .catch(console.error)
-      .finally(() => {
-        setIsSharePublicLoaded(true);
-      });
-  }, [isShareOpen, shareTargetId]);
+    if (!shareTargetId) {
+      setShareSettings(null);
+      setIsSharePublicLoaded(true);
+      return;
+    }
+
+    const cached = shareSettingsCacheRef.current.get(shareTargetId);
+    if (cached) {
+      setShareSettings(cached);
+      setIsSharePublic(cached.isPublic);
+      isSharePublicRef.current = cached.isPublic;
+      setIsSharePublicLoaded(true);
+    } else {
+      setShareSettings(null);
+      const localNode = nodeById.get(shareTargetId);
+      const localIsPublic = Boolean(localNode?.is_public);
+      setIsSharePublic(localIsPublic);
+      isSharePublicRef.current = localIsPublic;
+      setIsSharePublicLoaded(true);
+    }
+
+    void fetchShareSettings(shareTargetId, true);
+  }, [isShareOpen, shareTargetId, shareWorkspaceId, nodeById, fetchShareSettings]);
+
+  useEffect(() => {
+    if (!activeNodeId) return;
+    if (
+      activeNodeId.startsWith("temp-") ||
+      activeNodeId.startsWith("virtual-plan:") ||
+      activeNodeId.startsWith("shared:")
+    ) {
+      return;
+    }
+    void fetchShareSettings(activeNodeId, false);
+  }, [activeNodeId, fetchShareSettings]);
 
   const pathByNodeId = useMemo(() => {
     const cache = new Map<string, string>();
@@ -1838,6 +2012,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       parent_id: parentId,
       type: "file",
       name,
+      is_public: false,
       created_at: new Date().toISOString(),
     };
     editableTempNodeIdsRef.current.add(tempId);
@@ -1962,6 +2137,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       parent_id: parentId,
       type: "folder",
       name,
+      is_public: false,
       created_at: new Date().toISOString(),
     };
     setNodes(prev => [...prev, tempNode]);
@@ -2188,6 +2364,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         parent_id: targetParentId,
         type: sourceNode.type,
         name: newName,
+        is_public: false,
         created_at: new Date().toISOString(),
       };
       tempNodes.push(tempNode);
@@ -2883,6 +3060,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         parent_id: parentId,
         type: "file",
         name: fileName,
+        is_public: false,
         created_at: new Date().toISOString(),
       };
 
@@ -5175,6 +5353,17 @@ ${diffs}`;
   const shareWorkspace = shareWorkspaceId
     ? currentWorkspaces.find((w) => w.id === shareWorkspaceId) ?? null
     : null;
+  const handleShareSettingsChange = useCallback((changes: {
+    sharedUsers?: ShareSettingsUser[];
+    publicAccessRole?: "viewer" | "editor";
+  }) => {
+    if (!shareTargetId) return;
+    applyShareSettings(shareTargetId, changes, true);
+  }, [shareTargetId, applyShareSettings]);
+  const handleShareSettingsRefresh = useCallback(() => {
+    if (!shareTargetId) return;
+    refreshShareSettings(shareTargetId);
+  }, [shareTargetId, refreshShareSettings]);
   const activeTempMappedId = activeNodeId && activeNodeId.startsWith("temp-")
     ? tempIdRealIdMapRef.current.get(activeNodeId) ?? null
     : null;
@@ -5205,6 +5394,9 @@ ${diffs}`;
     setIsSharePublic(newIsPublic);
     isSharePublicRef.current = newIsPublic;
     if (!shareTargetId) return;
+    const previousSettings = shareSettingsCacheRef.current.get(shareTargetId) ?? null;
+    const previousRole = previousSettings?.publicAccessRole;
+    applyShareSettings(shareTargetId, { isPublic: newIsPublic, publicAccessRole: previousRole }, true);
     try {
       const res = await fetch("/api/share", {
         method: "POST",
@@ -5215,13 +5407,20 @@ ${diffs}`;
         const error = await res.json().catch(() => ({}));
         throw new Error(error?.error || "Failed to update sharing settings");
       }
+      refreshShareSettings(shareTargetId);
     } catch (error) {
       console.error("Failed to toggle public access:", error);
       setIsSharePublic(previousValue);
       isSharePublicRef.current = previousValue;
+      if (previousSettings) {
+        applyShareSettings(shareTargetId, previousSettings, true, previousSettings.fetchedAt);
+      } else {
+        shareSettingsCacheRef.current.delete(shareTargetId);
+        setShareSettings((prev) => (prev?.nodeId === shareTargetId ? null : prev));
+      }
       throw error;
     }
-  }, [shareTargetId]);
+  }, [shareTargetId, applyShareSettings, refreshShareSettings]);
 
   // Handle duplicating a shared file to user's workspace
   const handleDuplicateSharedFile = useCallback(async () => {
@@ -5299,6 +5498,7 @@ ${diffs}`;
       parent_id: null,
       type: "file",
       name: copyName,
+      is_public: false,
       created_at: new Date().toISOString(),
     };
 
@@ -5562,17 +5762,33 @@ ${diffs}`;
   const handleShareWorkspace = useCallback((workspaceId: string) => {
     setShareWorkspaceId(workspaceId);
     setShareTargetNodeId(null);
-    setIsSharePublicLoaded(false);
+    shareTargetIdRef.current = null;
+    setShareSettings(null);
+    setIsSharePublic(false);
+    isSharePublicRef.current = false;
+    setIsSharePublicLoaded(true);
     setIsShareOpen(true);
   }, []);
 
   // 特定のノード（ファイル/フォルダ）を共有
   const handleShareNode = useCallback((nodeId: string) => {
+    const localNode = nodeById.get(nodeId);
+    const localIsPublic = typeof localNode?.is_public === "boolean" ? localNode.is_public : false;
+    const cached = shareSettingsCacheRef.current.get(nodeId) ?? null;
+
+    // Switch the target immediately so stale users from the previous node do not linger.
     setShareTargetNodeId(nodeId);
     setShareWorkspaceId(null);
-    setIsSharePublicLoaded(false);
+    shareTargetIdRef.current = nodeId;
+    setShareSettings(cached);
+    const initialIsPublic = cached?.isPublic ?? localIsPublic;
+    setIsSharePublic(initialIsPublic);
+    isSharePublicRef.current = initialIsPublic;
+    setIsSharePublicLoaded(true);
     setIsShareOpen(true);
-  }, []);
+
+    void fetchShareSettings(nodeId, true);
+  }, [nodeById, fetchShareSettings]);
 
   const renderSidebarContent = () => {
     switch (activeActivity) {
@@ -5798,7 +6014,7 @@ ${diffs}`;
             dirtyIds={dirtyTabIds}
             onShare={() => {
               if (!shareTarget) return;
-              setIsShareOpen(true);
+              handleShareNode(shareTarget.id);
             }}
             onDownload={() => {
               if (!activeNodeId) return;
@@ -5848,6 +6064,10 @@ ${diffs}`;
               nodeId={shareWorkspace ? shareWorkspace.id : shareTarget!.id}
               isPublic={isSharePublic}
               isPublicLoaded={isSharePublicLoaded}
+              initialSharedUsers={shareSettings?.sharedUsers}
+              initialPublicAccessRole={shareSettings?.publicAccessRole}
+              onShareSettingsChange={handleShareSettingsChange}
+              onShareSettingsRefresh={handleShareSettingsRefresh}
               onTogglePublic={handleToggleSharePublic}
               ownerEmail={userEmail}
               isWorkspace={!!shareWorkspace}

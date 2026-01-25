@@ -101,6 +101,8 @@ export function SharedFileViewer({ nodeId }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [errorType, setErrorType] = useState<"not_found" | "access_denied" | "error">("error");
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const accessRetryAttemptRef = useRef(0);
+  const accessRetryTimeoutRef = useRef<number | null>(null);
 
   // Editor state
   const [editedContent, setEditedContent] = useState<string | null>(null);
@@ -175,10 +177,20 @@ export function SharedFileViewer({ nodeId }: Props) {
   }, [isResizing, handleMouseMove, handleMouseUp]);
 
   useEffect(() => {
+    accessRetryAttemptRef.current = 0;
+    if (accessRetryTimeoutRef.current) {
+      window.clearTimeout(accessRetryTimeoutRef.current);
+      accessRetryTimeoutRef.current = null;
+    }
+
+    let cancelled = false;
+    const retryDelaysMs = [250, 500, 750, 1000, 1500, 2000];
+
     async function fetchNodeData() {
+      let scheduledRetry = false;
       try {
         const { data: { session } } = await supabase.auth.getSession();
-        const res = await fetch(`/api/public/node?nodeId=${nodeId}`);
+        const res = await fetch(`/api/public/node?nodeId=${nodeId}`, { cache: "no-store" });
         const data = await res.json();
 
         if (!res.ok) {
@@ -191,6 +203,20 @@ export function SharedFileViewer({ nodeId }: Props) {
               setIsRedirecting(true);
               const returnUrl = encodeURIComponent(window.location.pathname);
               router.push(`/auth/login?next=${returnUrl}`);
+              return;
+            }
+            const isAuth = Boolean(session) || Boolean(data.isAuthenticated);
+            const attempt = accessRetryAttemptRef.current;
+            if (isAuth && attempt < retryDelaysMs.length) {
+              const delay = retryDelaysMs[attempt] ?? 1000;
+              accessRetryAttemptRef.current = attempt + 1;
+              scheduledRetry = true;
+              accessRetryTimeoutRef.current = window.setTimeout(() => {
+                accessRetryTimeoutRef.current = null;
+                if (!cancelled) {
+                  void fetchNodeData();
+                }
+              }, delay);
               return;
             }
             setErrorType("access_denied");
@@ -221,10 +247,19 @@ export function SharedFileViewer({ nodeId }: Props) {
         setErrorType("error");
         setError(err.message || "エラーが発生しました");
       } finally {
-        setIsLoading(false);
+        if (!cancelled && !scheduledRetry) {
+          setIsLoading(false);
+        }
       }
     }
     fetchNodeData();
+    return () => {
+      cancelled = true;
+      if (accessRetryTimeoutRef.current) {
+        window.clearTimeout(accessRetryTimeoutRef.current);
+        accessRetryTimeoutRef.current = null;
+      }
+    };
   }, [nodeId, router]);
 
   const handleDownload = useCallback(async () => {
