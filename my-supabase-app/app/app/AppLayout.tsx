@@ -250,6 +250,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const [isSharePublic, setIsSharePublic] = useState(false);
   const [isSharePublicLoaded, setIsSharePublicLoaded] = useState(false);
   const [shareSettings, setShareSettings] = useState<ShareSettings | null>(null);
+  const [isShareViewReady, setIsShareViewReady] = useState(true);
   const [isHoveringLeftResize, setIsHoveringLeftResize] = useState(false);
   const [shareTargetNodeId, setShareTargetNodeId] = useState<string | null>(null);
   const [shareWorkspaceId, setShareWorkspaceId] = useState<string | null>(null);
@@ -519,6 +520,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     setIsSharePublic(false);
     setIsSharePublicLoaded(false);
     setShareSettings(null);
+    setIsShareViewReady(true);
   }, [activeNodeId]);
 
   useEffect(() => {
@@ -781,6 +783,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       setIsSharePublic(next.isPublic);
       isSharePublicRef.current = next.isPublic;
       setIsSharePublicLoaded(true);
+      setIsShareViewReady(true);
     }
     return next;
   }, [nodeById, updateNodeShareSettings]);
@@ -5353,6 +5356,14 @@ ${diffs}`;
   const shareWorkspace = shareWorkspaceId
     ? currentWorkspaces.find((w) => w.id === shareWorkspaceId) ?? null
     : null;
+  const shareSettingsForTarget = shareTargetId
+    ? (shareSettings?.nodeId === shareTargetId
+        ? shareSettings
+        : shareSettingsCacheRef.current.get(shareTargetId) ?? null)
+    : null;
+  const isPublicForTarget = shareTargetId
+    ? (shareSettingsForTarget?.isPublic ?? Boolean(nodeById.get(shareTargetId)?.is_public))
+    : isSharePublic;
   const handleShareSettingsChange = useCallback((changes: {
     sharedUsers?: ShareSettingsUser[];
     publicAccessRole?: "viewer" | "editor";
@@ -5767,6 +5778,7 @@ ${diffs}`;
     setIsSharePublic(false);
     isSharePublicRef.current = false;
     setIsSharePublicLoaded(true);
+    setIsShareViewReady(true);
     setIsShareOpen(true);
   }, []);
 
@@ -5775,19 +5787,33 @@ ${diffs}`;
     const localNode = nodeById.get(nodeId);
     const localIsPublic = typeof localNode?.is_public === "boolean" ? localNode.is_public : false;
     const cached = shareSettingsCacheRef.current.get(nodeId) ?? null;
+    const baselineRole = localNode?.public_access_role === "editor" ? "editor" : "viewer";
+    const baseline: ShareSettings = cached ?? {
+      nodeId,
+      isPublic: localIsPublic,
+      publicAccessRole: baselineRole,
+      sharedUsers: [],
+      fetchedAt: 0,
+    };
 
     // Switch the target immediately so stale users from the previous node do not linger.
+    setIsShareViewReady(true);
     setShareTargetNodeId(nodeId);
     setShareWorkspaceId(null);
     shareTargetIdRef.current = nodeId;
-    setShareSettings(cached);
-    const initialIsPublic = cached?.isPublic ?? localIsPublic;
+    setShareSettings(baseline);
+    shareSettingsCacheRef.current.set(nodeId, baseline);
+    const initialIsPublic = baseline.isPublic;
     setIsSharePublic(initialIsPublic);
     isSharePublicRef.current = initialIsPublic;
     setIsSharePublicLoaded(true);
     setIsShareOpen(true);
 
-    void fetchShareSettings(nodeId, true);
+    void fetchShareSettings(nodeId, true).finally(() => {
+      if (shareTargetIdRef.current === nodeId) {
+        setIsShareViewReady(true);
+      }
+    });
   }, [nodeById, fetchShareSettings]);
 
   const renderSidebarContent = () => {
@@ -6053,25 +6079,28 @@ ${diffs}`;
             isSharedFile={isActiveSharedFile}
           />
           {(shareTarget || shareWorkspace) ? (
-            <SharePopover
-              isOpen={isShareOpen}
-              onClose={() => {
-                setIsShareOpen(false);
-                setShareTargetNodeId(null);
-                setShareWorkspaceId(null);
-              }}
-              nodeName={shareWorkspace ? shareWorkspace.name : shareTarget!.name}
-              nodeId={shareWorkspace ? shareWorkspace.id : shareTarget!.id}
-              isPublic={isSharePublic}
-              isPublicLoaded={isSharePublicLoaded}
-              initialSharedUsers={shareSettings?.sharedUsers}
-              initialPublicAccessRole={shareSettings?.publicAccessRole}
-              onShareSettingsChange={handleShareSettingsChange}
-              onShareSettingsRefresh={handleShareSettingsRefresh}
-              onTogglePublic={handleToggleSharePublic}
-              ownerEmail={userEmail}
-              isWorkspace={!!shareWorkspace}
-            />
+            isShareOpen ? (
+              <SharePopover
+                key={shareWorkspace ? shareWorkspace.id : shareTarget!.id}
+                isOpen={isShareOpen}
+                onClose={() => {
+                  setIsShareOpen(false);
+                  setShareTargetNodeId(null);
+                  setShareWorkspaceId(null);
+                }}
+                nodeName={shareWorkspace ? shareWorkspace.name : shareTarget!.name}
+                nodeId={shareWorkspace ? shareWorkspace.id : shareTarget!.id}
+                isPublic={isPublicForTarget}
+                isPublicLoaded={isSharePublicLoaded}
+                initialSharedUsers={shareSettingsForTarget?.sharedUsers}
+                initialPublicAccessRole={shareSettingsForTarget?.publicAccessRole}
+                onShareSettingsChange={handleShareSettingsChange}
+                onShareSettingsRefresh={handleShareSettingsRefresh}
+                onTogglePublic={handleToggleSharePublic}
+                ownerEmail={userEmail}
+                isWorkspace={!!shareWorkspace}
+              />
+            ) : null
           ) : null}
           {/* パンくずリスト */}
           {activeNodeId && activeNode && !activeVirtual && (() => {
