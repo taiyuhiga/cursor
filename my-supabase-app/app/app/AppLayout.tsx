@@ -465,19 +465,24 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   }, []);
 
   const nodeById = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
+  const shareTargetId = useMemo(() => {
+    const targetId = shareTargetNodeId || activeNodeId;
+    if (!targetId || targetId.startsWith("virtual-plan:")) return null;
+    const node = nodeById.get(targetId);
+    if (!node || node.id.startsWith("temp-")) return null;
+    return node.id;
+  }, [shareTargetNodeId, activeNodeId, nodeById]);
 
   useEffect(() => {
     if (!isShareOpen) return;
-    if (!activeNodeId || activeNodeId.startsWith("virtual-plan:")) return;
-    const node = nodeById.get(activeNodeId);
-    if (!node || node.id.startsWith("temp-")) return;
-    fetch(`/api/share?nodeId=${node.id}`)
+    if (!shareTargetId) return;
+    fetch(`/api/share?nodeId=${shareTargetId}`)
       .then((res) => res.json())
       .then((data) => {
         setIsSharePublic(data.isPublic);
       })
       .catch(console.error);
-  }, [isShareOpen, activeNodeId, nodeById]);
+  }, [isShareOpen, shareTargetId]);
 
   const pathByNodeId = useMemo(() => {
     const cache = new Map<string, string>();
@@ -4837,15 +4842,13 @@ ${diffs}`;
 
   const handleToggleSharePublic = useCallback(async (newIsPublic: boolean) => {
     setIsSharePublic(newIsPublic);
-    if (!activeNodeId || activeNodeId.startsWith("virtual-plan:")) return;
-    const node = nodeById.get(activeNodeId);
-    if (!node || node.id.startsWith("temp-")) return;
+    if (!shareTargetId) return;
     await fetch("/api/share", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "toggle_public", nodeId: node.id, isPublic: newIsPublic }),
+      body: JSON.stringify({ action: "toggle_public", nodeId: shareTargetId, isPublic: newIsPublic }),
     });
-  }, [activeNodeId, nodeById]);
+  }, [shareTargetId]);
 
   // ワークスペース切り替え
   const handleSwitchWorkspace = async (workspaceId: string) => {
