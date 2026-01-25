@@ -12,4 +12,10 @@
 | #830 | 7:00 PM | 🔵 | Share API Invite Logic Implementation | ~389 |
 | #828 | 6:27 PM | 🔴 | Enhanced Error Reporting in Share API | ~337 |
 | #825 | 6:24 PM | 🔵 | Share API Route Structure Analysis | ~420 |
+
+### Jan 25, 2026
+
+| ID | Time | T | Title | Read |
+|----|------|---|-------|------|
+| #986 | 4:05 PM | 🔵 | Share API manages node permissions and public access settings | ~359 |
 </claude-mem-context>

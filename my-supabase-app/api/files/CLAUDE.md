@@ -8,5 +8,4 @@
 | ID | Time | T | Title | Read |
 |----|------|---|-------|------|
 | #1004 | 4:09 PM | 🔵 | Explore agent completed comprehensive analysis of shared file and login flow architecture | ~547 |
-| #988 | 4:06 PM | 🔵 | Auth callback route handles OAuth code exchange and redirects to next parameter | ~270 |
 </claude-mem-context>

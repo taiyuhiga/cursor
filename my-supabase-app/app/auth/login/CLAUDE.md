@@ -7,5 +7,5 @@
 
 | ID | Time | T | Title | Read |
 |----|------|---|-------|------|
-| #997 | 4:08 PM | 🔵 | Public workspace API allows browsing entire shared workspace file trees | ~339 |
+| #990 | 4:06 PM | 🔵 | Login page renders simple centered LoginForm component | ~198 |
 </claude-mem-context>

@@ -9,6 +9,7 @@ type Props = {
   fileName: string;
   onSave?: () => void;
   onAddToChat?: (selectedText: string, lineStart: number, lineEnd: number) => void;
+  readOnly?: boolean;
 };
 
 type PopupPosition = {
@@ -43,7 +44,7 @@ function getLanguage(fileName: string) {
   }
 }
 
-export function MainEditor({ value, onChange, fileName, onSave, onAddToChat }: Props) {
+export function MainEditor({ value, onChange, fileName, onSave, onAddToChat, readOnly = false }: Props) {
   const editorRef = useRef<any>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const onSaveRef = useRef(onSave);
@@ -261,7 +262,7 @@ export function MainEditor({ value, onChange, fileName, onSave, onAddToChat }: P
             vertical: "auto",
           },
           tabSize: 4,
-          renderLineHighlight: "line",
+          renderLineHighlight: readOnly ? "none" : "line",
           autoClosingBrackets: "always",
           autoClosingQuotes: "always",
           autoIndent: "full",
@@ -272,6 +273,9 @@ export function MainEditor({ value, onChange, fileName, onSave, onAddToChat }: P
             ambiguousCharacters: false,
             invisibleCharacters: false,
           },
+          readOnly: readOnly,
+          domReadOnly: readOnly,
+          cursorWidth: readOnly ? 0 : 2,
         }}
       />
 

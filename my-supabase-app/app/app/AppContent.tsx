@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import AppLayout from "./AppLayout";
 
 type Workspace = {
@@ -19,13 +20,28 @@ type Node = {
   created_at: string;
 };
 
+type SharedFileData = {
+  node: {
+    id: string;
+    name: string;
+    type: "file" | "folder";
+    isPublic: boolean;
+    publicAccessRole: "viewer" | "editor";
+    createdAt: string;
+  };
+  path: string;
+  content: string | null;
+  signedUrl: string | null;
+};
+
 type Props = {
-  searchParamsPromise: Promise<{ workspace?: string }>;
+  searchParamsPromise: Promise<{ workspace?: string; shared_node_id?: string }>;
 };
 
 export default async function AppContent({ searchParamsPromise }: Props) {
   const searchParams = await searchParamsPromise;
   const workspaceId = searchParams.workspace;
+  const sharedNodeId = searchParams.shared_node_id;
   const supabase = await createClient();
 
   const {
@@ -174,6 +190,92 @@ export default async function AppContent({ searchParamsPromise }: Props) {
     .order("id", { ascending: true })
     .limit(1000);
 
+  // Pre-fetch shared file data if sharedNodeId is provided
+  let initialSharedFileData: SharedFileData | null = null;
+  if (sharedNodeId) {
+    const canUseAdmin = Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY);
+    const adminClient = canUseAdmin ? createAdminClient() : null;
+    const queryClient = adminClient || supabase;
+
+    // Get node info
+    const { data: sharedNode } = await queryClient
+      .from("nodes")
+      .select("id, name, type, project_id, parent_id, is_public, public_access_role, created_at")
+      .eq("id", sharedNodeId)
+      .maybeSingle();
+
+    if (sharedNode) {
+      // Get file content
+      let content: string | null = null;
+      let signedUrl: string | null = null;
+
+      if (sharedNode.type === "file") {
+        const { data: fileContent } = await queryClient
+          .from("file_contents")
+          .select("text")
+          .eq("node_id", sharedNodeId)
+          .maybeSingle();
+
+        const text = fileContent?.text || "";
+
+        if (text.startsWith("storage:") || text.trim() === "") {
+          // Get signed URL for binary files
+          const storageClient = adminClient || supabase;
+          const prefix = `${sharedNode.project_id}/${sharedNode.id}`;
+          const { data: listData } = await storageClient.storage
+            .from("files")
+            .list(prefix);
+
+          if (listData && listData.length > 0) {
+            const blobEntry = listData.find((entry: any) => entry?.name === "blob");
+            const targetEntry = blobEntry || listData[0];
+            if (targetEntry?.name) {
+              const path = `${prefix}/${targetEntry.name}`;
+              const { data } = await storageClient.storage
+                .from("files")
+                .createSignedUrl(path, 3600);
+              if (data?.signedUrl) {
+                signedUrl = data.signedUrl;
+              }
+            }
+          }
+        } else {
+          content = text;
+        }
+      }
+
+      // Build breadcrumb path
+      const pathSegments: string[] = [sharedNode.name];
+      let currentParentId = sharedNode.parent_id;
+
+      while (currentParentId) {
+        const { data: parentNode } = await queryClient
+          .from("nodes")
+          .select("name, parent_id")
+          .eq("id", currentParentId)
+          .maybeSingle();
+
+        if (!parentNode) break;
+        pathSegments.unshift(parentNode.name);
+        currentParentId = parentNode.parent_id;
+      }
+
+      initialSharedFileData = {
+        node: {
+          id: sharedNode.id,
+          name: sharedNode.name,
+          type: sharedNode.type,
+          isPublic: sharedNode.is_public,
+          publicAccessRole: sharedNode.public_access_role || "viewer",
+          createdAt: sharedNode.created_at,
+        },
+        path: pathSegments.join("/"),
+        content,
+        signedUrl,
+      };
+    }
+  }
+
   return (
     <AppLayout
       projectId={projectId!}
@@ -181,6 +283,8 @@ export default async function AppContent({ searchParamsPromise }: Props) {
       currentWorkspace={ensuredWorkspace}
       userEmail={user.email || ""}
       initialNodes={(initialNodes as Node[]) || []}
+      sharedNodeId={sharedNodeId}
+      initialSharedFileData={initialSharedFileData}
     />
   );
 }

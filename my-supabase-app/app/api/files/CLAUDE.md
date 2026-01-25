@@ -8,4 +8,11 @@
 | ID | Time | T | Title | Read |
 |----|------|---|-------|------|
 | #243 | 10:53 PM | 🔵 | File API Route Handles Node Creation and Returns Node IDs | ~301 |
+
+### Jan 25, 2026
+
+| ID | Time | T | Title | Read |
+|----|------|---|-------|------|
+| #1002 | 4:09 PM | 🔵 | Files API implements copy_node action for duplicating nodes within workspace | ~261 |
+| #989 | 4:06 PM | 🔵 | Files API implements comprehensive node operations including copy functionality | ~426 |
 </claude-mem-context>

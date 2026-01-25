@@ -12,4 +12,11 @@
 | #884 | 9:42 PM | 🔴 | Removed duplicate authentication and access control logic in public node API | ~328 |
 | #883 | " | 🔴 | Fixed Database Client Selection in Public Node Route | ~340 |
 | #882 | " | 🟣 | Shared Node Access Authorization | ~400 |
+
+### Jan 25, 2026
+
+| ID | Time | T | Title | Read |
+|----|------|---|-------|------|
+| #998 | 4:08 PM | 🔵 | Public node API redirects workspace members to /app?open=nodeId but not share recipients | ~327 |
+| #987 | 4:05 PM | 🔵 | Public node API handles authentication-aware access with redirect logic for workspace members | ~447 |
 </claude-mem-context>

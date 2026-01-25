@@ -14,10 +14,12 @@ type TabBarProps = {
   onClose: (id: string) => void;
   onShare?: () => void;
   onDownload?: () => void;
+  onDuplicate?: () => void;
+  isSharedFile?: boolean;
   dirtyIds?: Set<string>;
 };
 
-export function TabBar({ tabs, activeId, onSelect, onClose, onShare, onDownload, dirtyIds }: TabBarProps) {
+export function TabBar({ tabs, activeId, onSelect, onClose, onShare, onDownload, onDuplicate, isSharedFile, dirtyIds }: TabBarProps) {
   const [actionTooltip, setActionTooltip] = useState<"share" | "download" | null>(null);
   const tabsContainerRef = useRef<HTMLDivElement>(null);
   const handleTabDragStart = (e: React.DragEvent<HTMLDivElement>, tab: Tab) => {
@@ -111,16 +113,31 @@ export function TabBar({ tabs, activeId, onSelect, onClose, onShare, onDownload,
 
       {/* 右側のアクションボタン */}
       <div className="flex items-center gap-1 px-2 border-l border-zinc-200 flex-shrink-0">
-        {/* 共有ボタン */}
-        <button
-          onClick={() => {
-            onShare?.();
-          }}
-          className="flex items-center justify-center px-2 py-0.5 rounded hover:bg-zinc-200 text-zinc-500 hover:text-zinc-700 transition-colors"
-          aria-label="共有"
-        >
-          <span className="text-[14px] whitespace-nowrap">共有</span>
-        </button>
+        {/* 複製ボタン - 共有ファイル閲覧時のみ表示 */}
+        {isSharedFile && (
+          <button
+            onClick={() => {
+              onDuplicate?.();
+            }}
+            className="flex items-center justify-center px-2 py-0.5 rounded hover:bg-zinc-200 text-zinc-500 hover:text-zinc-700 transition-colors"
+            aria-label="複製"
+          >
+            <span className="text-[14px] whitespace-nowrap">複製</span>
+          </button>
+        )}
+
+        {/* 共有ボタン - 共有ファイル閲覧時は非表示 */}
+        {!isSharedFile && (
+          <button
+            onClick={() => {
+              onShare?.();
+            }}
+            className="flex items-center justify-center px-2 py-0.5 rounded hover:bg-zinc-200 text-zinc-500 hover:text-zinc-700 transition-colors"
+            aria-label="共有"
+          >
+            <span className="text-[14px] whitespace-nowrap">共有</span>
+          </button>
+        )}
 
         {/* ダウンロードボタン */}
         <button

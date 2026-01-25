@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { getFileIcon } from "./fileIcons";
 import { createClient } from "@/lib/supabase/client";
 import dynamic from "next/dynamic";
+import type { editor as MonacoEditorType } from "monaco-editor";
 
 // Dynamically import Monaco Editor to avoid SSR issues
 const MonacoEditor = dynamic(
@@ -31,6 +32,7 @@ type NodeData = {
 };
 
 type MediaType = "image" | "video" | "audio" | "unknown";
+type LightbulbEnabled = NonNullable<MonacoEditorType.IStandaloneEditorConstructionOptions["lightbulb"]>["enabled"];
 
 function getMediaType(fileName: string): MediaType {
   const ext = fileName.split(".").pop()?.toLowerCase() || "";
@@ -98,6 +100,23 @@ export function SharedFileViewer({ nodeId }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [errorType, setErrorType] = useState<"not_found" | "access_denied" | "error">("error");
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const authCheckedRef = useRef(false);
+
+  // Check auth first and redirect if logged in (fast path)
+  useEffect(() => {
+    if (authCheckedRef.current) return;
+    authCheckedRef.current = true;
+
+    const checkAuthAndRedirect = async () => {
+      const supabase = createClient();
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session) {
+        setIsRedirecting(true);
+        router.replace(`/app?shared_node_id=${nodeId}`);
+      }
+    };
+    checkAuthAndRedirect();
+  }, [nodeId, router]);
 
   // Editor state
   const [editedContent, setEditedContent] = useState<string | null>(null);
@@ -118,6 +137,8 @@ export function SharedFileViewer({ nodeId }: Props) {
   const [rightWidth, setRightWidth] = useState(280);
   const [isResizing, setIsResizing] = useState<"left" | "right" | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const editorRef = useRef<MonacoEditorType.IStandaloneCodeEditor | null>(null);
+  const blockInputCleanupRef = useRef<(() => void) | null>(null);
 
   // Handle resize
   const MIN_SIDEBAR_WIDTH = 0;
@@ -263,6 +284,92 @@ export function SharedFileViewer({ nodeId }: Props) {
   // Check if user can edit
   const canEdit = isAuthenticated && nodeData?.node.publicAccessRole === "editor";
 
+  const setupReadOnlyInputBlocking = useCallback((editor: MonacoEditorType.IStandaloneCodeEditor | null) => {
+    blockInputCleanupRef.current?.();
+    if (!editor || canEdit) {
+      blockInputCleanupRef.current = null;
+      return;
+    }
+
+    const domNode = editor.getDomNode();
+    if (!domNode) return;
+
+    const navigationKeys = new Set([
+      "ArrowUp",
+      "ArrowDown",
+      "ArrowLeft",
+      "ArrowRight",
+      "PageUp",
+      "PageDown",
+      "Home",
+      "End",
+      "Escape",
+      "Tab",
+    ]);
+
+    const blockInput = (event: Event) => {
+      if (canEdit) return;
+      if (event instanceof KeyboardEvent) {
+        const key = event.key;
+        const keyLower = key.toLowerCase();
+        const hasMeta = event.metaKey || event.ctrlKey;
+        // Allow navigation and copy/select-all shortcuts in read-only mode.
+        if (navigationKeys.has(key) || (hasMeta && (keyLower === "c" || keyLower === "a"))) {
+          return;
+        }
+      }
+      event.preventDefault();
+      event.stopPropagation();
+    };
+
+    const events: Array<keyof HTMLElementEventMap> = [
+      "beforeinput",
+      "compositionstart",
+      "compositionupdate",
+      "compositionend",
+      "keydown",
+      "paste",
+      "cut",
+      "drop",
+    ];
+
+    events.forEach((type) => domNode.addEventListener(type, blockInput, true));
+    blockInputCleanupRef.current = () => {
+      events.forEach((type) => domNode.removeEventListener(type, blockInput, true));
+    };
+  }, [canEdit]);
+
+  useEffect(() => {
+    return () => {
+      blockInputCleanupRef.current?.();
+      blockInputCleanupRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!editorRef.current) return;
+    editorRef.current.updateOptions({
+      readOnly: !canEdit,
+      domReadOnly: !canEdit,
+      cursorWidth: canEdit ? 2 : 0,
+      renderLineHighlight: canEdit ? "line" : "none",
+      selectionHighlight: canEdit,
+      occurrencesHighlight: canEdit ? "singleFile" : "off",
+      quickSuggestions: canEdit,
+      suggestOnTriggerCharacters: canEdit,
+      parameterHints: { enabled: canEdit },
+      hover: { enabled: canEdit },
+      lightbulb: { enabled: (canEdit ? "on" : "off") as LightbulbEnabled },
+      contextmenu: canEdit,
+    });
+    if (canEdit) {
+      blockInputCleanupRef.current?.();
+      blockInputCleanupRef.current = null;
+    } else {
+      setupReadOnlyInputBlocking(editorRef.current);
+    }
+  }, [canEdit, setupReadOnlyInputBlocking]);
+
   // Login handlers
   const handleGoogleLogin = async () => {
     const supabase = createClient();
@@ -270,10 +377,12 @@ export function SharedFileViewer({ nodeId }: Props) {
     setLoginError(null);
 
     try {
+      // Redirect to main app with shared_node_id to show the shared file in the full app layout
+      const redirectUrl = `/app?shared_node_id=${nodeId}`;
       const { error } = await supabase.auth.signInWithOAuth({
         provider: "google",
         options: {
-          redirectTo: `${window.location.origin}/auth/callback?next=${encodeURIComponent(window.location.pathname)}`,
+          redirectTo: `${window.location.origin}/auth/callback?next=${encodeURIComponent(redirectUrl)}`,
         },
       });
       if (error) throw error;
@@ -304,7 +413,8 @@ export function SharedFileViewer({ nodeId }: Props) {
       });
       if (error) throw error;
       setShowLoginPopup(false);
-      window.location.reload();
+      // Redirect to main app with shared_node_id to show the shared file in the full app layout
+      window.location.href = `/app?shared_node_id=${nodeId}`;
     } catch (error: unknown) {
       setLoginError(error instanceof Error ? error.message : "ログインに失敗しました");
     } finally {
@@ -678,9 +788,12 @@ export function SharedFileViewer({ nodeId }: Props) {
                 }
               }}
               onMount={(editor) => {
+                editorRef.current = editor;
                 // Disable drag and drop completely
-                editor.getDomNode()?.addEventListener("dragover", (e) => e.preventDefault(), true);
-                editor.getDomNode()?.addEventListener("drop", (e) => e.preventDefault(), true);
+                const domNode = editor.getDomNode();
+                domNode?.addEventListener("dragover", (e) => e.preventDefault(), true);
+                domNode?.addEventListener("drop", (e) => e.preventDefault(), true);
+                setupReadOnlyInputBlocking(editor);
               }}
               options={{
                 readOnly: !canEdit,
@@ -714,7 +827,7 @@ export function SharedFileViewer({ nodeId }: Props) {
                 parameterHints: { enabled: canEdit },
                 hover: { enabled: canEdit },
                 codeLens: false,
-                lightbulb: { enabled: canEdit ? "on" : "off" },
+                lightbulb: { enabled: (canEdit ? "on" : "off") as LightbulbEnabled },
                 contextmenu: canEdit,
               }}
             />

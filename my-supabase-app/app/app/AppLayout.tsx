@@ -65,6 +65,22 @@ type Props = {
   currentWorkspace: Workspace;
   userEmail: string;
   initialNodes?: Node[];
+  sharedNodeId?: string;
+  initialSharedFileData?: SharedFileData | null;
+};
+
+type SharedFileData = {
+  node: {
+    id: string;
+    name: string;
+    type: "file" | "folder";
+    isPublic: boolean;
+    publicAccessRole: "viewer" | "editor";
+    createdAt: string;
+  };
+  path: string;
+  content: string | null;
+  signedUrl: string | null;
 };
 
 function extractJsonCandidate(text: string): string | null {
@@ -181,7 +197,7 @@ function setCachedNodes(projectId: string, nodes: Node[]) {
   }
 }
 
-export default function AppLayout({ projectId, workspaces, currentWorkspace, userEmail, initialNodes = [] }: Props) {
+export default function AppLayout({ projectId, workspaces, currentWorkspace, userEmail, initialNodes = [], sharedNodeId, initialSharedFileData }: Props) {
   const router = useRouter();
   // Use initialNodes from server, or cached nodes, for instant display
   const [nodes, setNodes] = useState<Node[]>(() => {
@@ -189,8 +205,18 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     const cached = getCachedNodes(projectId);
     return cached || [];
   });
-  const [openTabs, setOpenTabs] = useState<string[]>([]);
-  const [activeNodeId, setActiveNodeId] = useState<string | null>(null);
+  const [openTabs, setOpenTabs] = useState<string[]>(() => {
+    if (initialSharedFileData && sharedNodeId) {
+      return [`shared:${sharedNodeId}`];
+    }
+    return [];
+  });
+  const [activeNodeId, setActiveNodeId] = useState<string | null>(() => {
+    if (initialSharedFileData && sharedNodeId) {
+      return `shared:${sharedNodeId}`;
+    }
+    return null;
+  });
   const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(new Set());
   const [previewTabId, setPreviewTabId] = useState<string | null>(null);
   const [activeActivity, setActiveActivity] = useState<Activity>("explorer");
@@ -240,6 +266,10 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   // ワークスペース削除対象（コンテキストメニューから）
   const [deletingWorkspace, setDeletingWorkspace] = useState<{ id: string; name: string } | null>(null);
 
+  // Shared file state (when viewing a shared file from another user)
+  const [sharedFileData, setSharedFileData] = useState<SharedFileData | null>(initialSharedFileData || null);
+  const [sharedFileContent, setSharedFileContent] = useState<string>(initialSharedFileData?.content || "");
+
   // Resizable panel widths (persisted to localStorage)
   const [leftPanelWidth, setLeftPanelWidth] = useState(256);
   const [rightPanelWidth, setRightPanelWidth] = useState(320);
@@ -250,11 +280,44 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   // Load panel widths from localStorage after hydration
   useEffect(() => {
     const savedLeft = localStorage.getItem("leftPanelWidth");
-    const savedRight = localStorage.getItem("rightPanelWidth");
+    const savedRight = localStorage.getItem("rightPanelRight");
     if (savedLeft) setLeftPanelWidth(parseInt(savedLeft, 10));
     if (savedRight) setRightPanelWidth(parseInt(savedRight, 10));
     setPanelWidthsLoaded(true);
   }, []);
+
+  // Fetch shared file data when sharedNodeId is provided (skip if already prefetched from server)
+  useEffect(() => {
+    // Skip if no sharedNodeId or if we already have prefetched data
+    if (!sharedNodeId || initialSharedFileData) return;
+
+    const fetchSharedFile = async () => {
+      try {
+        const res = await fetch(`/api/public/node?nodeId=${sharedNodeId}`);
+        const data = await res.json();
+
+        if (!res.ok) {
+          console.error("Failed to fetch shared file:", data.error);
+          return;
+        }
+
+        setSharedFileData(data);
+        setSharedFileContent(data.content || "");
+
+        // Open the shared file in a tab with a special ID prefix
+        const sharedTabId = `shared:${sharedNodeId}`;
+        setOpenTabs((prev) => {
+          if (prev.includes(sharedTabId)) return prev;
+          return [...prev, sharedTabId];
+        });
+        setActiveNodeId(sharedTabId);
+      } catch (err) {
+        console.error("Error fetching shared file:", err);
+      }
+    };
+
+    fetchSharedFile();
+  }, [sharedNodeId, initialSharedFileData]);
 
   const aiPanelRef = useRef<AiPanelHandle>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -3714,6 +3777,13 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         return next;
       });
     }
+    // Clean up shared file data when closing shared file tab
+    if (id.startsWith("shared:")) {
+      setSharedFileData(null);
+      setSharedFileContent("");
+      // Clear URL parameter
+      window.history.replaceState({}, "", "/app");
+    }
     setContentCache((prev) => {
       if (!Object.prototype.hasOwnProperty.call(prev, id)) return prev;
       const next = { ...prev };
@@ -3747,6 +3817,10 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     }
     // Virtual doc はSupabaseから取得しない
     if (activeNodeId.startsWith("virtual-plan:")) {
+      return;
+    }
+    // Shared file content is managed separately
+    if (activeNodeId.startsWith("shared:")) {
       return;
     }
     if (activeNodeId.startsWith("temp-")) {
@@ -4798,12 +4872,19 @@ ${diffs}`;
       if (node) return { id, title: node.name };
       const v = virtualDocs[id];
       if (v) return { id, title: v.title };
+      // Handle shared file tabs
+      if (id.startsWith("shared:") && sharedFileData) {
+        return { id, title: sharedFileData.node.name };
+      }
       return null;
     })
     .filter((t): t is { id: string; title: string } => t !== null);
 
+  // Check if active tab is a shared file
+  const isActiveSharedFile = activeNodeId?.startsWith("shared:") ?? false;
+
   const activeVirtual = activeNodeId ? virtualDocs[activeNodeId] ?? null : null;
-  const activeNode = activeNodeId && !activeNodeId.startsWith("virtual-plan:")
+  const activeNode = activeNodeId && !activeNodeId.startsWith("virtual-plan:") && !activeNodeId.startsWith("shared:")
     ? (nodes.find((n) => n.id === activeNodeId) ?? null)
     : null;
   // shareTargetNodeIdが指定されている場合はそのノードを、そうでなければactiveNodeを使用
@@ -4849,6 +4930,169 @@ ${diffs}`;
       body: JSON.stringify({ action: "toggle_public", nodeId: shareTargetId, isPublic: newIsPublic }),
     });
   }, [shareTargetId]);
+
+  // Handle duplicating a shared file to user's workspace
+  const handleDuplicateSharedFile = useCallback(async () => {
+    if (!sharedFileData) return;
+
+    // Generate copy name similar to copy_node action
+    const generateCopyName = (originalName: string) => {
+      const lastDotIndex = originalName.lastIndexOf(".");
+      let baseName: string;
+      let extension: string;
+
+      if (lastDotIndex > 0) {
+        baseName = originalName.substring(0, lastDotIndex);
+        extension = originalName.substring(lastDotIndex);
+      } else {
+        baseName = originalName;
+        extension = "";
+      }
+
+      // Remove existing " copy" or " copy N" suffix
+      const copyPattern = / copy( \d+)?$/;
+      const baseWithoutCopy = baseName.replace(copyPattern, "");
+
+      // Get existing names at root level
+      const existingNames = nodes
+        .filter(n => n.parent_id === null)
+        .map(n => n.name);
+
+      // Find the next copy number
+      const escapedBase = baseWithoutCopy.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const escapedExt = extension.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+      const copyNames = existingNames.filter((name: string) => {
+        if (extension) {
+          return name === `${baseWithoutCopy}${extension}` ||
+            name === `${baseWithoutCopy} copy${extension}` ||
+            name.match(new RegExp(`^${escapedBase} copy \\d+${escapedExt}$`));
+        }
+        return name === baseWithoutCopy ||
+          name === `${baseWithoutCopy} copy` ||
+          name.match(new RegExp(`^${escapedBase} copy \\d+$`));
+      });
+
+      if (copyNames.length === 0) {
+        return originalName; // No conflict, use original name
+      }
+
+      const numbers = copyNames.map((name: string) => {
+        const nameWithoutExt = extension ? name.replace(new RegExp(escapedExt + "$"), "") : name;
+        if (nameWithoutExt === baseWithoutCopy) {
+          return 0;
+        }
+        const match = nameWithoutExt.match(/ copy( (\d+))?$/);
+        if (match) {
+          return match[2] ? parseInt(match[2], 10) : 1;
+        }
+        return 0;
+      });
+
+      const nextCounter = Math.max(...numbers) + 1;
+      if (nextCounter === 1) {
+        return `${baseWithoutCopy} copy${extension}`;
+      }
+      return `${baseWithoutCopy} copy ${nextCounter}${extension}`;
+    };
+
+    const copyName = generateCopyName(sharedFileData.node.name);
+    const content = sharedFileContent || sharedFileData.content || "";
+
+    // Create temporary node and open tab immediately (optimistic update)
+    const tempId = `temp-dup-${Date.now()}`;
+    const tempNode: Node = {
+      id: tempId,
+      project_id: projectId,
+      parent_id: null,
+      type: "file",
+      name: copyName,
+      created_at: new Date().toISOString(),
+    };
+
+    // Add temp node to list and open tab immediately
+    setNodes((prev) => [...prev, tempNode]);
+    setOpenTabs((prev) => [...prev, tempId]);
+    setActiveNodeId(tempId);
+    setSelectedNodeIds(new Set([tempId]));
+
+    // Store content in cache (not tempFileContents to avoid dirty indicator)
+    tempIdPathMapRef.current.set(tempId, copyName);
+    setContentCache((prev) => {
+      const next = { ...prev, [tempId]: content };
+      contentCacheRef.current = next;
+      return next;
+    });
+    // Map temp ID to itself initially so activeEditorContent uses fileContent path
+    tempIdRealIdMapRef.current.set(tempId, tempId);
+    setFileContent(content);
+
+    // Create file in background
+    fetch("/api/files", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "create_file",
+        path: copyName,
+        content,
+        projectId,
+        parentId: null,
+      }),
+    })
+      .then(async (res) => {
+        if (!res.ok) {
+          const error = await res.json();
+          throw new Error(error.error || "複製に失敗しました");
+        }
+        return res.json();
+      })
+      .then(async ({ nodeId: newNodeId }) => {
+        // Replace temp node with real node
+        await fetchNodes();
+
+        // Update tabs: replace temp ID with real ID
+        setOpenTabs((prev) => prev.map((id) => (id === tempId ? newNodeId : id)));
+        setActiveNodeId((prev) => (prev === tempId ? newNodeId : prev));
+        setSelectedNodeIds((prev) => {
+          const newSet = new Set(prev);
+          if (newSet.has(tempId)) {
+            newSet.delete(tempId);
+            newSet.add(newNodeId);
+          }
+          return newSet;
+        });
+        setRevealNodeId(newNodeId);
+
+        // Transfer content cache from temp ID to real ID and clean up
+        tempIdPathMapRef.current.delete(tempId);
+        tempIdRealIdMapRef.current.set(tempId, newNodeId);
+        setContentCache((prev) => {
+          const tempContent = prev[tempId];
+          if (tempContent === undefined) return prev;
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
+          const { [tempId]: _removed, ...rest } = prev;
+          const next: Record<string, string> = { ...rest, [newNodeId]: tempContent };
+          contentCacheRef.current = next;
+          return next;
+        });
+      })
+      .catch((error: any) => {
+        // Remove temp node on error
+        setNodes((prev) => prev.filter((n) => n.id !== tempId));
+        setOpenTabs((prev) => prev.filter((id) => id !== tempId));
+        setActiveNodeId((prev) => (prev === tempId ? null : prev));
+        tempIdPathMapRef.current.delete(tempId);
+        tempIdRealIdMapRef.current.delete(tempId);
+        setContentCache((prev) => {
+          if (!Object.prototype.hasOwnProperty.call(prev, tempId)) return prev;
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
+          const { [tempId]: _removed, ...rest } = prev;
+          contentCacheRef.current = rest;
+          return rest;
+        });
+        alert(`複製エラー: ${error.message}`);
+      });
+  }, [sharedFileData, sharedFileContent, projectId, fetchNodes, nodes]);
 
   // ワークスペース切り替え
   const handleSwitchWorkspace = async (workspaceId: string) => {
@@ -5278,8 +5522,25 @@ ${diffs}`;
                 return;
               }
 
+              // Handle shared file download
+              if (isActiveSharedFile && sharedFileData) {
+                const content = sharedFileContent || sharedFileData.content || "";
+                const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = sharedFileData.node.name;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                return;
+              }
+
               void handleDownload([activeNodeId]);
             }}
+            onDuplicate={handleDuplicateSharedFile}
+            isSharedFile={isActiveSharedFile}
           />
           {(shareTarget || shareWorkspace) ? (
             <SharePopover
@@ -5318,6 +5579,29 @@ ${diffs}`;
               </div>
             );
           })()}
+          {/* 共有ファイルのパンくずリスト */}
+          {isActiveSharedFile && sharedFileData && (
+            <div className="flex items-center gap-1 px-3 py-1.5 bg-white text-xs text-zinc-600 overflow-x-auto no-scrollbar">
+              <span className="inline-flex items-center gap-1 text-zinc-500">
+                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8" />
+                  <polyline points="16 6 12 2 8 6" />
+                  <line x1="12" y1="2" x2="12" y2="15" />
+                </svg>
+                共有ファイル
+              </span>
+              <span className="text-zinc-400 mx-0.5">{">"}</span>
+              {(() => {
+                const Icon = getFileIcon(sharedFileData.node.name);
+                return (
+                  <span className="flex items-center gap-1 whitespace-nowrap">
+                    <Icon className="w-4 h-4 flex-shrink-0" />
+                    <span className="text-zinc-900">{sharedFileData.node.name}</span>
+                  </span>
+                );
+              })()}
+            </div>
+          )}
           {activeVirtual ? (
             <div className="px-6 py-3 border-b border-zinc-200 bg-zinc-50 flex items-center justify-between">
               <div>
@@ -5357,6 +5641,16 @@ ${diffs}`;
                   fileName={activeVirtual.fileName}
                   onSave={() => handleSavePlanToWorkspace(activeVirtual.id)}
                   onAddToChat={handleAddToChat}
+                />
+              ) : isActiveSharedFile && sharedFileData ? (
+                // Render shared file content
+                <MainEditor
+                  value={sharedFileContent}
+                  onChange={(v) => setSharedFileContent(v)}
+                  fileName={sharedFileData.node.name}
+                  onSave={() => {}}
+                  onAddToChat={handleAddToChat}
+                  readOnly={sharedFileData.node.publicAccessRole === "viewer"}
                 />
               ) : activeNode ? (
                 activeNode.id.startsWith("temp-") && activeUploadProgress !== null ? (
@@ -5438,6 +5732,29 @@ ${diffs}`;
                   </div>
                 </div>
               )
+            ) : sharedNodeId && !sharedFileData ? (
+              // Loading state for shared file
+              <div className="absolute inset-0 flex items-center justify-center text-zinc-500">
+                <div className="flex items-center gap-3">
+                  <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
+                    <circle
+                      className="opacity-25"
+                      cx="12"
+                      cy="12"
+                      r="10"
+                      stroke="currentColor"
+                      strokeWidth="4"
+                      fill="none"
+                    />
+                    <path
+                      className="opacity-75"
+                      fill="currentColor"
+                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                    />
+                  </svg>
+                  <span>読み込み中...</span>
+                </div>
+              </div>
             ) : (
               <div className="absolute inset-0 flex items-center justify-center text-zinc-400">
                 <div className="text-center">
