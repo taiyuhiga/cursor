@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
+import type { RealtimeChannel } from "@supabase/supabase-js";
 import { getFileIcon } from "./fileIcons";
 import { createClient } from "@/lib/supabase/client";
 import dynamic from "next/dynamic";
@@ -139,6 +140,14 @@ export function SharedFileViewer({ nodeId }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<MonacoEditorType.IStandaloneCodeEditor | null>(null);
   const blockInputCleanupRef = useRef<(() => void) | null>(null);
+  const supabase = createClient();
+  const realtimeClientIdRef = useRef(`client-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  const realtimeChannelRef = useRef<RealtimeChannel | null>(null);
+  const realtimeChannelNodeIdRef = useRef<string | null>(null);
+  const realtimeChannelSubscribedRef = useRef(false);
+  const nodeContentRef = useRef("");
+  const editedContentRef = useRef<string | null>(null);
+  const hasUnsavedChangesRef = useRef(false);
 
   // Handle resize
   const MIN_SIDEBAR_WIDTH = 0;
@@ -251,6 +260,138 @@ export function SharedFileViewer({ nodeId }: Props) {
     }
   }, [nodeData]);
 
+  useEffect(() => {
+    nodeContentRef.current = nodeData?.content ?? "";
+  }, [nodeData?.content]);
+
+  useEffect(() => {
+    editedContentRef.current = editedContent;
+  }, [editedContent]);
+
+  useEffect(() => {
+    hasUnsavedChangesRef.current = hasUnsavedChanges;
+  }, [hasUnsavedChanges]);
+
+  const getChannelName = useCallback(() => `file-content-${nodeId}`, [nodeId]);
+
+  const applyRemoteUpdate = useCallback((nextContent: string, source?: string) => {
+    if (source && source === realtimeClientIdRef.current) return;
+
+    const localEdited = editedContentRef.current;
+    const hasUnsaved = hasUnsavedChangesRef.current;
+
+    nodeContentRef.current = nextContent;
+    setNodeData((prev) => {
+      if (!prev || prev.content === nextContent) return prev;
+      return { ...prev, content: nextContent };
+    });
+
+    // If there are no local edits, fully adopt the remote content.
+    if (!hasUnsaved || localEdited === null) {
+      editedContentRef.current = nextContent;
+      hasUnsavedChangesRef.current = false;
+      setEditedContent(nextContent);
+      setHasUnsavedChanges(false);
+      return;
+    }
+
+    // When editing locally, keep the draft but recompute the dirty flag.
+    const stillUnsaved = localEdited !== nextContent;
+    hasUnsavedChangesRef.current = stillUnsaved;
+    setHasUnsavedChanges(stillUnsaved);
+  }, []);
+
+  const broadcastContentUpdate = useCallback(async (nextContent: string) => {
+    const channelName = getChannelName();
+    const payload = {
+      nodeId,
+      text: nextContent,
+      source: realtimeClientIdRef.current,
+      updatedAt: Date.now(),
+    };
+
+    const sendOnChannel = async (channel: RealtimeChannel) => {
+      try {
+        await channel.send({
+          type: "broadcast",
+          event: "file_content_updated",
+          payload,
+        });
+      } catch (error) {
+        console.error("Broadcast send failed:", error);
+      }
+    };
+
+    if (
+      realtimeChannelRef.current &&
+      realtimeChannelNodeIdRef.current === nodeId &&
+      realtimeChannelSubscribedRef.current
+    ) {
+      await sendOnChannel(realtimeChannelRef.current);
+      return;
+    }
+
+    const tempChannel = supabase.channel(channelName);
+    try {
+      await new Promise<void>((resolve) => {
+        const timeoutId = window.setTimeout(() => resolve(), 1500);
+        tempChannel.subscribe((status: string) => {
+          if (status === "SUBSCRIBED" || status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+            window.clearTimeout(timeoutId);
+            resolve();
+          }
+        });
+      });
+      await sendOnChannel(tempChannel);
+    } finally {
+      supabase.removeChannel(tempChannel);
+    }
+  }, [getChannelName, nodeId, supabase]);
+
+  useEffect(() => {
+    const channelName = getChannelName();
+    const channel = supabase
+      .channel(channelName)
+      .on(
+        "broadcast",
+        { event: "file_content_updated" },
+        ({ payload }: { payload: { nodeId?: string; text?: string; source?: string } }) => {
+          const nodeIdFromPayload = payload?.nodeId;
+          const nextContent = payload?.text;
+          if (nodeIdFromPayload !== nodeId || typeof nextContent !== "string") return;
+          applyRemoteUpdate(nextContent, payload?.source);
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "file_contents",
+          filter: `node_id=eq.${nodeId}`,
+        },
+        (payload: { new: { text?: string } | null }) => {
+          const nextContent = payload.new?.text;
+          if (typeof nextContent !== "string") return;
+          applyRemoteUpdate(nextContent);
+        }
+      )
+      .subscribe((status: string) => {
+        realtimeChannelRef.current = channel;
+        realtimeChannelNodeIdRef.current = nodeId;
+        realtimeChannelSubscribedRef.current = status === "SUBSCRIBED";
+      });
+
+    return () => {
+      if (realtimeChannelRef.current === channel) {
+        realtimeChannelRef.current = null;
+        realtimeChannelNodeIdRef.current = null;
+        realtimeChannelSubscribedRef.current = false;
+      }
+      supabase.removeChannel(channel);
+    };
+  }, [applyRemoteUpdate, getChannelName, nodeId, supabase]);
+
   // Save content handler
   const handleSaveContent = useCallback(async () => {
     if (!nodeData || editedContent === null || isSaving) return;
@@ -271,15 +412,19 @@ export function SharedFileViewer({ nodeId }: Props) {
         throw new Error(data.error || "保存に失敗しました");
       }
 
+      hasUnsavedChangesRef.current = false;
       setHasUnsavedChanges(false);
       // Update the nodeData with new content
+      nodeContentRef.current = editedContent;
+      editedContentRef.current = editedContent;
       setNodeData(prev => prev ? { ...prev, content: editedContent } : prev);
+      void broadcastContentUpdate(editedContent);
     } catch (err: any) {
       alert(err.message || "保存に失敗しました");
     } finally {
       setIsSaving(false);
     }
-  }, [nodeData, editedContent, nodeId, isSaving]);
+  }, [broadcastContentUpdate, nodeData, editedContent, nodeId, isSaving]);
 
   // Check if user can edit
   const canEdit = isAuthenticated && nodeData?.node.publicAccessRole === "editor";

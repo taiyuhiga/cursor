@@ -6,6 +6,7 @@ import { flushSync } from "react-dom";
 import { useRouter } from "next/navigation";
 import { diffLines } from "diff";
 import JSZip from "jszip";
+import type { RealtimeChannel } from "@supabase/supabase-js";
 import { AiPanel, AiPanelHandle } from "@/components/AiPanel";
 import { TabBar } from "@/components/TabBar";
 import { getFileIcon, FileIcons } from "@/components/fileIcons";
@@ -269,6 +270,9 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   // Shared file state (when viewing a shared file from another user)
   const [sharedFileData, setSharedFileData] = useState<SharedFileData | null>(initialSharedFileData || null);
   const [sharedFileContent, setSharedFileContent] = useState<string>(initialSharedFileData?.content || "");
+  const [sharedFileOriginalContent, setSharedFileOriginalContent] = useState<string>(initialSharedFileData?.content || "");
+  const sharedFileContentRef = useRef<string>(initialSharedFileData?.content || "");
+  const sharedFileOriginalContentRef = useRef<string>(initialSharedFileData?.content || "");
 
   // Resizable panel widths (persisted to localStorage)
   const [leftPanelWidth, setLeftPanelWidth] = useState(256);
@@ -303,6 +307,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
 
         setSharedFileData(data);
         setSharedFileContent(data.content || "");
+        setSharedFileOriginalContent(data.content || "");
 
         // Open the shared file in a tab with a special ID prefix
         const sharedTabId = `shared:${sharedNodeId}`;
@@ -318,6 +323,66 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
 
     fetchSharedFile();
   }, [sharedNodeId, initialSharedFileData]);
+
+  // Real-time subscription for shared file changes
+  useEffect(() => {
+    if (!sharedNodeId) return;
+
+    const supabaseClient = createClient();
+    const channelName = `file-content-${sharedNodeId}`;
+    const applySharedUpdate = (nextContent: string, source?: string) => {
+      if (!sharedNodeId) return;
+      // Ignore our own broadcasts and avoid clobbering unsaved edits.
+      if (source && source === realtimeClientIdRef.current) return;
+      if (sharedFileContentRef.current !== sharedFileOriginalContentRef.current) return;
+      setSharedFileContent((current) => (current === nextContent ? current : nextContent));
+      setSharedFileOriginalContent((current) => (current === nextContent ? current : nextContent));
+      sharedFileContentRef.current = nextContent;
+      sharedFileOriginalContentRef.current = nextContent;
+    };
+
+    const channel = supabaseClient
+      .channel(channelName)
+      .on(
+        "broadcast",
+        { event: "file_content_updated" },
+        ({ payload }: { payload: { nodeId?: string; text?: string; source?: string } }) => {
+          const nextContent = typeof payload?.text === "string" ? payload.text : null;
+          const nodeId = payload?.nodeId as string | undefined;
+          if (!nextContent || nodeId !== sharedNodeId) return;
+          applySharedUpdate(nextContent, payload?.source);
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*", // Listen for INSERT, UPDATE, DELETE
+          schema: "public",
+          table: "file_contents",
+          filter: `node_id=eq.${sharedNodeId}`,
+        },
+        (payload: { new: { text?: string; node_id?: string } | null; eventType: string }) => {
+          console.log("Realtime event received:", payload.eventType, payload.new?.node_id);
+          const newContent = payload.new?.text || "";
+          applySharedUpdate(newContent);
+        }
+      )
+      .subscribe((status: string) => {
+        console.log("Realtime subscription status:", status);
+        sharedFileChannelRef.current = channel;
+        sharedFileChannelNodeIdRef.current = sharedNodeId;
+        sharedFileChannelSubscribedRef.current = status === "SUBSCRIBED";
+      });
+
+    return () => {
+      if (sharedFileChannelRef.current === channel) {
+        sharedFileChannelRef.current = null;
+        sharedFileChannelNodeIdRef.current = null;
+        sharedFileChannelSubscribedRef.current = false;
+      }
+      supabaseClient.removeChannel(channel);
+    };
+  }, [sharedNodeId]);
 
   const aiPanelRef = useRef<AiPanelHandle>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -389,11 +454,26 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const openTabsRef = useRef<string[]>([]);
   const layoutRef = useRef<HTMLDivElement>(null);
   const leftResizeHoverRef = useRef(false);
+  const realtimeClientIdRef = useRef(`client-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  const activeFileChannelRef = useRef<RealtimeChannel | null>(null);
+  const activeFileChannelNodeIdRef = useRef<string | null>(null);
+  const activeFileChannelSubscribedRef = useRef(false);
+  const sharedFileChannelRef = useRef<RealtimeChannel | null>(null);
+  const sharedFileChannelNodeIdRef = useRef<string | null>(null);
+  const sharedFileChannelSubscribedRef = useRef(false);
   const supabase = createClient();
 
   useEffect(() => {
     tempFileContentsRef.current = tempFileContents;
   }, [tempFileContents]);
+
+  useEffect(() => {
+    sharedFileContentRef.current = sharedFileContent;
+  }, [sharedFileContent]);
+
+  useEffect(() => {
+    sharedFileOriginalContentRef.current = sharedFileOriginalContent;
+  }, [sharedFileOriginalContent]);
 
   useEffect(() => {
     draftContentsRef.current = draftContents;
@@ -420,11 +500,90 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     openTabsRef.current = openTabs;
   }, [openTabs]);
 
+  const getFileChannelName = useCallback((nodeId: string) => `file-content-${nodeId}`, []);
+
+  const applyRemoteContentUpdate = useCallback((nodeId: string, nextContent: string, source?: string) => {
+    if (source && source === realtimeClientIdRef.current) return;
+    if (draftContentsRef.current[nodeId] !== undefined) return;
+    if (pendingContentByRealIdRef.current.has(nodeId)) return;
+
+    setContentCache((prev) => {
+      if (prev[nodeId] === nextContent) return prev;
+      const next = { ...prev, [nodeId]: nextContent };
+      contentCacheRef.current = next;
+      return next;
+    });
+
+    if (activeNodeIdRef.current === nodeId) {
+      setFileContent((current) => (current === nextContent ? current : nextContent));
+    }
+  }, []);
+
+  const broadcastFileContentUpdate = useCallback(async (nodeId: string, text: string) => {
+    const channelName = getFileChannelName(nodeId);
+    const payload = {
+      nodeId,
+      text,
+      source: realtimeClientIdRef.current,
+      updatedAt: Date.now(),
+    };
+
+    const sendOnChannel = async (channel: RealtimeChannel) => {
+      try {
+        await channel.send({
+          type: "broadcast",
+          event: "file_content_updated",
+          payload,
+        });
+      } catch (error) {
+        console.error("Broadcast send failed:", error);
+      }
+    };
+
+    if (
+      activeFileChannelRef.current &&
+      activeFileChannelNodeIdRef.current === nodeId &&
+      activeFileChannelSubscribedRef.current
+    ) {
+      await sendOnChannel(activeFileChannelRef.current);
+      return;
+    }
+
+    if (
+      sharedFileChannelRef.current &&
+      sharedFileChannelNodeIdRef.current === nodeId &&
+      sharedFileChannelSubscribedRef.current
+    ) {
+      await sendOnChannel(sharedFileChannelRef.current);
+      return;
+    }
+
+    const tempChannel = supabase.channel(channelName);
+    try {
+      await new Promise<void>((resolve) => {
+        const timeoutId = window.setTimeout(() => resolve(), 1500);
+        tempChannel.subscribe((status: string) => {
+          if (status === "SUBSCRIBED" || status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+            window.clearTimeout(timeoutId);
+            resolve();
+          }
+        });
+      });
+      await sendOnChannel(tempChannel);
+    } finally {
+      supabase.removeChannel(tempChannel);
+    }
+  }, [getFileChannelName, supabase]);
+
   const dirtyTabIds = useMemo(() => {
     const ids = new Set(Object.keys(draftContents));
     Object.keys(tempFileContents).forEach((id) => ids.add(id));
+    // Include shared file tab if content has been modified
+    if (sharedNodeId && sharedFileData && sharedFileContent !== sharedFileOriginalContent) {
+      ids.add(`shared:${sharedNodeId}`);
+    }
     return ids;
-  }, [draftContents, tempFileContents]);
+  }, [draftContents, tempFileContents, sharedNodeId, sharedFileData, sharedFileContent, sharedFileOriginalContent]);
 
 
   const getNodeKey = (node: Node) => `${node.type}:${node.parent_id ?? "root"}:${node.name}`;
@@ -535,6 +694,65 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     if (!node || node.id.startsWith("temp-")) return null;
     return node.id;
   }, [shareTargetNodeId, activeNodeId, nodeById]);
+  const activeRealtimeNodeId = useMemo(() => {
+    if (!activeNodeId) return null;
+    if (
+      activeNodeId.startsWith("virtual-plan:") ||
+      activeNodeId.startsWith("shared:") ||
+      activeNodeId.startsWith("temp-")
+    ) {
+      return null;
+    }
+    const node = nodeById.get(activeNodeId);
+    if (!node || node.type !== "file") return null;
+    return node.id;
+  }, [activeNodeId, nodeById]);
+
+  // Real-time subscription for the currently active file
+  useEffect(() => {
+    if (!activeRealtimeNodeId) return;
+    const channelName = getFileChannelName(activeRealtimeNodeId);
+    const channel = supabase
+      .channel(channelName)
+      .on(
+        "broadcast",
+        { event: "file_content_updated" },
+        ({ payload }: { payload: { nodeId?: string; text?: string; source?: string } }) => {
+          const nodeId = payload?.nodeId;
+          const nextContent = payload?.text;
+          if (!nodeId || nodeId !== activeRealtimeNodeId || typeof nextContent !== "string") return;
+          applyRemoteContentUpdate(nodeId, nextContent, payload?.source);
+        }
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "file_contents",
+          filter: `node_id=eq.${activeRealtimeNodeId}`,
+        },
+        (payload: { new: { text?: string } | null }) => {
+          const nextContent = payload.new?.text;
+          if (typeof nextContent !== "string") return;
+          applyRemoteContentUpdate(activeRealtimeNodeId, nextContent);
+        }
+      )
+      .subscribe((status: string) => {
+        activeFileChannelRef.current = channel;
+        activeFileChannelNodeIdRef.current = activeRealtimeNodeId;
+        activeFileChannelSubscribedRef.current = status === "SUBSCRIBED";
+      });
+
+    return () => {
+      if (activeFileChannelRef.current === channel) {
+        activeFileChannelRef.current = null;
+        activeFileChannelNodeIdRef.current = null;
+        activeFileChannelSubscribedRef.current = false;
+      }
+      supabase.removeChannel(channel);
+    };
+  }, [activeRealtimeNodeId, applyRemoteContentUpdate, getFileChannelName, supabase]);
 
   useEffect(() => {
     if (!isShareOpen) return;
@@ -3928,12 +4146,54 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         if (prev[resolvedId] === fileContent) return prev;
         return { ...prev, [resolvedId]: fileContent };
       });
+      void broadcastFileContentUpdate(resolvedId, fileContent);
     }
     setIsSaving(false);
     if (activeActivity === "git") {
       void refreshSourceControl();
     }
-  }, [activeActivity, activeNodeId, fileContent, refreshSourceControl, supabase]);
+  }, [activeActivity, activeNodeId, broadcastFileContentUpdate, fileContent, refreshSourceControl, supabase]);
+
+  // Save shared file content
+  const saveSharedFileContent = useCallback(async () => {
+    if (!sharedFileData || !sharedNodeId) return;
+    if (sharedFileData.node.publicAccessRole !== "editor") return;
+
+    // Use refs to get the latest values (avoid stale closure issues)
+    const currentContent = sharedFileContentRef.current;
+    const originalContent = sharedFileOriginalContentRef.current;
+
+    if (currentContent === originalContent) return;
+
+    // Optimistic update - immediately mark as saved
+    const previousOriginal = originalContent;
+    setSharedFileOriginalContent(currentContent);
+    sharedFileOriginalContentRef.current = currentContent;
+
+    try {
+      const res = await fetch("/api/public/node", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          nodeId: sharedNodeId,
+          content: currentContent,
+        }),
+      });
+
+      if (!res.ok) {
+        const error = await res.json();
+        throw new Error(error.error || "保存に失敗しました");
+      }
+
+      void broadcastFileContentUpdate(sharedNodeId, currentContent);
+    } catch (error: any) {
+      // Revert on error
+      setSharedFileOriginalContent(previousOriginal);
+      sharedFileOriginalContentRef.current = previousOriginal;
+      console.error("Error saving shared file:", error);
+      alert(`保存エラー: ${error.message}`);
+    }
+  }, [broadcastFileContentUpdate, sharedFileData, sharedNodeId]);
 
   useEffect(() => {
     const handleGlobalSave = (e: KeyboardEvent) => {
@@ -3948,12 +4208,17 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       if (isTextInput) return;
 
       e.preventDefault();
-      saveContent();
+      // Check if active tab is a shared file
+      if (activeNodeId?.startsWith("shared:")) {
+        saveSharedFileContent();
+      } else {
+        saveContent();
+      }
     };
 
     document.addEventListener("keydown", handleGlobalSave);
     return () => document.removeEventListener("keydown", handleGlobalSave);
-  }, [saveContent]);
+  }, [saveContent, saveSharedFileContent, activeNodeId]);
 
   // AIアクション
   const handleAiAction = (action: string) => {
@@ -5648,7 +5913,7 @@ ${diffs}`;
                   value={sharedFileContent}
                   onChange={(v) => setSharedFileContent(v)}
                   fileName={sharedFileData.node.name}
-                  onSave={() => {}}
+                  onSave={saveSharedFileContent}
                   onAddToChat={handleAddToChat}
                   readOnly={sharedFileData.node.publicAccessRole === "viewer"}
                 />
