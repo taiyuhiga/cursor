@@ -228,6 +228,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const [isSaving, setIsSaving] = useState(false);
   const [isShareOpen, setIsShareOpen] = useState(false);
   const [isSharePublic, setIsSharePublic] = useState(false);
+  const [isSharePublicLoaded, setIsSharePublicLoaded] = useState(false);
   const [isHoveringLeftResize, setIsHoveringLeftResize] = useState(false);
   const [shareTargetNodeId, setShareTargetNodeId] = useState<string | null>(null);
   const [shareWorkspaceId, setShareWorkspaceId] = useState<string | null>(null);
@@ -454,6 +455,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const openTabsRef = useRef<string[]>([]);
   const layoutRef = useRef<HTMLDivElement>(null);
   const leftResizeHoverRef = useRef(false);
+  const isSharePublicRef = useRef(isSharePublic);
   const realtimeClientIdRef = useRef(`client-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   const activeFileChannelRef = useRef<RealtimeChannel | null>(null);
   const activeFileChannelNodeIdRef = useRef<string | null>(null);
@@ -490,6 +492,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   useEffect(() => {
     setIsShareOpen(false);
     setIsSharePublic(false);
+    setIsSharePublicLoaded(false);
   }, [activeNodeId]);
 
   useEffect(() => {
@@ -499,6 +502,10 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   useEffect(() => {
     openTabsRef.current = openTabs;
   }, [openTabs]);
+
+  useEffect(() => {
+    isSharePublicRef.current = isSharePublic;
+  }, [isSharePublic]);
 
   const getFileChannelName = useCallback((nodeId: string) => `file-content-${nodeId}`, []);
 
@@ -756,13 +763,20 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
 
   useEffect(() => {
     if (!isShareOpen) return;
-    if (!shareTargetId) return;
+    if (!shareTargetId) {
+      setIsSharePublicLoaded(true);
+      return;
+    }
+    setIsSharePublicLoaded(false);
     fetch(`/api/share?nodeId=${shareTargetId}`)
       .then((res) => res.json())
       .then((data) => {
         setIsSharePublic(data.isPublic);
       })
-      .catch(console.error);
+      .catch(console.error)
+      .finally(() => {
+        setIsSharePublicLoaded(true);
+      });
   }, [isShareOpen, shareTargetId]);
 
   const pathByNodeId = useMemo(() => {
@@ -5187,13 +5201,26 @@ ${diffs}`;
   }, [activeNode?.name, activeVirtual?.fileName]);
 
   const handleToggleSharePublic = useCallback(async (newIsPublic: boolean) => {
+    const previousValue = isSharePublicRef.current;
     setIsSharePublic(newIsPublic);
+    isSharePublicRef.current = newIsPublic;
     if (!shareTargetId) return;
-    await fetch("/api/share", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "toggle_public", nodeId: shareTargetId, isPublic: newIsPublic }),
-    });
+    try {
+      const res = await fetch("/api/share", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "toggle_public", nodeId: shareTargetId, isPublic: newIsPublic }),
+      });
+      if (!res.ok) {
+        const error = await res.json().catch(() => ({}));
+        throw new Error(error?.error || "Failed to update sharing settings");
+      }
+    } catch (error) {
+      console.error("Failed to toggle public access:", error);
+      setIsSharePublic(previousValue);
+      isSharePublicRef.current = previousValue;
+      throw error;
+    }
   }, [shareTargetId]);
 
   // Handle duplicating a shared file to user's workspace
@@ -5535,6 +5562,7 @@ ${diffs}`;
   const handleShareWorkspace = useCallback((workspaceId: string) => {
     setShareWorkspaceId(workspaceId);
     setShareTargetNodeId(null);
+    setIsSharePublicLoaded(false);
     setIsShareOpen(true);
   }, []);
 
@@ -5542,6 +5570,7 @@ ${diffs}`;
   const handleShareNode = useCallback((nodeId: string) => {
     setShareTargetNodeId(nodeId);
     setShareWorkspaceId(null);
+    setIsSharePublicLoaded(false);
     setIsShareOpen(true);
   }, []);
 
@@ -5818,6 +5847,7 @@ ${diffs}`;
               nodeName={shareWorkspace ? shareWorkspace.name : shareTarget!.name}
               nodeId={shareWorkspace ? shareWorkspace.id : shareTarget!.id}
               isPublic={isSharePublic}
+              isPublicLoaded={isSharePublicLoaded}
               onTogglePublic={handleToggleSharePublic}
               ownerEmail={userEmail}
               isWorkspace={!!shareWorkspace}

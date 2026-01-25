@@ -206,33 +206,49 @@ export default async function AppContent({ searchParamsPromise }: Props) {
 
     if (sharedNode) {
       const userEmail = user.email?.toLowerCase() || "";
-      let effectiveAccessRole: "viewer" | "editor" = sharedNode.is_public
-        ? (sharedNode.public_access_role || "viewer")
-        : "viewer";
+      const { data: sharedProject } = await queryClient
+        .from("projects")
+        .select("workspace_id")
+        .eq("id", sharedNode.project_id)
+        .maybeSingle();
+      const sharedWorkspaceId = sharedProject?.workspace_id ?? null;
 
-      if (!sharedNode.is_public) {
-        const { data: membership } = await supabase
+      let membership: { id: string } | null = null;
+      if (sharedWorkspaceId) {
+        const { data: membershipData } = await supabase
           .from("workspace_members")
           .select("id")
-          .eq("workspace_id", sharedNode.project_id)
+          .eq("workspace_id", sharedWorkspaceId)
           .eq("user_id", user.id)
           .maybeSingle();
+        membership = membershipData;
+      }
 
-        if (membership) {
-          effectiveAccessRole = "editor";
-        } else if (userEmail) {
-          const { data: share } = await supabase
-            .from("node_shares")
-            .select("role")
-            .eq("node_id", sharedNodeId)
-            .eq("shared_with_email", userEmail)
-            .maybeSingle();
-
-          if (share?.role === "editor") {
-            effectiveAccessRole = "editor";
-          }
+      let share: { role: "viewer" | "editor" } | null = null;
+      if (!sharedNode.is_public && userEmail) {
+        const { data: shareData } = await queryClient
+          .from("node_shares")
+          .select("role")
+          .eq("node_id", sharedNodeId)
+          .eq("shared_with_email", userEmail)
+          .maybeSingle();
+        if (shareData?.role === "viewer" || shareData?.role === "editor") {
+          share = shareData;
         }
       }
+
+      const hasAccess = sharedNode.is_public || membership || share;
+      if (!hasAccess) {
+        redirect(`/share/${sharedNodeId}`);
+      }
+
+      const effectiveAccessRole: "viewer" | "editor" = membership
+        ? "editor"
+        : sharedNode.is_public
+          ? (sharedNode.public_access_role || "viewer")
+          : share?.role === "editor"
+            ? "editor"
+            : "viewer";
 
       // Get file content
       let content: string | null = null;

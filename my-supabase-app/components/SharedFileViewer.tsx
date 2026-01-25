@@ -101,23 +101,6 @@ export function SharedFileViewer({ nodeId }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [errorType, setErrorType] = useState<"not_found" | "access_denied" | "error">("error");
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const authCheckedRef = useRef(false);
-
-  // Check auth first and redirect if logged in (fast path)
-  useEffect(() => {
-    if (authCheckedRef.current) return;
-    authCheckedRef.current = true;
-
-    const checkAuthAndRedirect = async () => {
-      const supabase = createClient();
-      const { data: { session } } = await supabase.auth.getSession();
-      if (session) {
-        setIsRedirecting(true);
-        router.replace(`/app?shared_node_id=${nodeId}`);
-      }
-    };
-    checkAuthAndRedirect();
-  }, [nodeId, router]);
 
   // Editor state
   const [editedContent, setEditedContent] = useState<string | null>(null);
@@ -194,6 +177,7 @@ export function SharedFileViewer({ nodeId }: Props) {
   useEffect(() => {
     async function fetchNodeData() {
       try {
+        const { data: { session } } = await supabase.auth.getSession();
         const res = await fetch(`/api/public/node?nodeId=${nodeId}`);
         const data = await res.json();
 
@@ -222,6 +206,12 @@ export function SharedFileViewer({ nodeId }: Props) {
         // Check if we should redirect (user has full access)
         if (data.redirectTo) {
           router.push(data.redirectTo);
+          return;
+        }
+
+        if (session) {
+          setIsRedirecting(true);
+          router.replace(`/app?shared_node_id=${nodeId}`);
           return;
         }
 

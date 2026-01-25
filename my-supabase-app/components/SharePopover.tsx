@@ -24,6 +24,7 @@ type Props = {
   nodeName: string;
   nodeId: string;
   isPublic: boolean;
+  isPublicLoaded?: boolean;
   onTogglePublic: (isPublic: boolean) => Promise<void>;
   ownerEmail?: string;
   isWorkspace?: boolean;
@@ -35,6 +36,7 @@ export function SharePopover({
   nodeName,
   nodeId,
   isPublic,
+  isPublicLoaded = true,
   onTogglePublic,
   ownerEmail,
   isWorkspace = false,
@@ -450,16 +452,28 @@ export function SharePopover({
   };
 
   const handleAccessTypeChange = async (newType: AccessType) => {
+    if (!isPublicLoaded) return;
+    const previousType = accessType;
+    const previousIsPublic = isPublic;
     setAccessType(newType);
     setIsAccessMenuOpen(false);
 
     const newIsPublic = newType === "public";
-    if (newIsPublic !== isPublic) {
+    try {
+      // Always send the intent to the server to avoid stale state mismatches.
       await onTogglePublic(newIsPublic);
+    } catch (error) {
+      console.error("Failed to update access type:", error);
+      setAccessType(previousType);
+      if (previousIsPublic !== newIsPublic) {
+        // Reopen menu so the user sees the revert.
+        setIsAccessMenuOpen(true);
+      }
     }
   };
 
   const handlePublicRoleChange = async (newRole: AccessRole) => {
+    if (!isPublicLoaded) return;
     setPublicRole(newRole);
     setIsPublicRoleMenuOpen(false);
 
@@ -505,14 +519,22 @@ export function SharePopover({
     copyTimeoutRef.current = window.setTimeout(() => setIsCopied(false), 2000);
   };
 
+  useEffect(() => {
+    if (!isOpen || !isPublicLoaded) return;
+    setAccessType(isPublic ? "public" : "restricted");
+  }, [isOpen, isPublic, isPublicLoaded]);
+
   if (!isOpen) return null;
 
+  const controlsDisabled = !isPublicLoaded;
   const accessLabel = accessType === "public" ? "リンクを知っている全員" : "制限付き";
-  const accessDescription = accessType === "public"
-    ? (publicRole === "editor"
-        ? "リンクを知っているインターネット上の誰もが編集できます"
-        : "リンクを知っているインターネット上の誰もが閲覧できます")
-    : "アクセス権のあるユーザーのみが、リンクから開くことができます";
+  const accessDescription = !isPublicLoaded
+    ? "アクセス設定を読み込み中..."
+    : accessType === "public"
+      ? (publicRole === "editor"
+          ? "リンクを知っているインターネット上の誰もが編集できます"
+          : "リンクを知っているインターネット上の誰もが閲覧できます")
+      : "アクセス権のあるユーザーのみが、リンクから開くことができます";
   const publicRoleLabel = publicRole === "editor" ? "編集者" : "閲覧者";
   const inviteRoleLabel = inviteRole === "editor" ? "編集者" : "閲覧者";
 
@@ -717,8 +739,12 @@ export function SharePopover({
                         <button
                           ref={accessButtonRef}
                           type="button"
-                          onClick={() => setIsAccessMenuOpen(prev => !prev)}
-                          className="inline-flex items-center gap-1 text-sm font-medium text-zinc-900 hover:bg-zinc-200 rounded px-2 py-1 -ml-2 transition-colors"
+                          disabled={controlsDisabled}
+                          onClick={() => {
+                            if (controlsDisabled) return;
+                            setIsAccessMenuOpen(prev => !prev);
+                          }}
+                          className="inline-flex items-center gap-1 text-sm font-medium text-zinc-900 hover:bg-zinc-200 rounded px-2 py-1 -ml-2 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                           {accessLabel}
                           <svg className="w-4 h-4" viewBox="0 0 20 20" fill="currentColor">
@@ -767,8 +793,12 @@ export function SharePopover({
                       <button
                         ref={publicRoleButtonRef}
                         type="button"
-                        onClick={() => setIsPublicRoleMenuOpen(prev => !prev)}
-                        className="inline-flex items-center gap-1 text-sm font-medium text-zinc-700 hover:bg-zinc-200 rounded px-2 py-1 transition-colors"
+                        disabled={controlsDisabled}
+                        onClick={() => {
+                          if (controlsDisabled) return;
+                          setIsPublicRoleMenuOpen(prev => !prev);
+                        }}
+                        className="inline-flex items-center gap-1 text-sm font-medium text-zinc-700 hover:bg-zinc-200 rounded px-2 py-1 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         {publicRoleLabel}
                         <svg className="w-4 h-4" viewBox="0 0 20 20" fill="currentColor">

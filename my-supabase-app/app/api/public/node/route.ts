@@ -85,6 +85,13 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "Node not found" }, { status: 404 });
   }
 
+  const { data: project } = await queryClient
+    .from("projects")
+    .select("workspace_id")
+    .eq("id", node.project_id)
+    .maybeSingle();
+  const workspaceId = project?.workspace_id ?? null;
+
   let membership: MembershipAccess | null = null;
   let share: ShareAccess | null = null;
 
@@ -99,13 +106,15 @@ export async function GET(req: NextRequest) {
     }
 
     // Check if user has access via workspace membership
-    const { data: membershipData } = await supabase
-      .from("workspace_members")
-      .select("id")
-      .eq("workspace_id", node.project_id)
-      .eq("user_id", user.id)
-      .maybeSingle();
-    membership = membershipData;
+    if (workspaceId) {
+      const { data: membershipData } = await supabase
+        .from("workspace_members")
+        .select("id")
+        .eq("workspace_id", workspaceId)
+        .eq("user_id", user.id)
+        .maybeSingle();
+      membership = membershipData;
+    }
 
     // Check if user has access via node_shares (case-insensitive email match)
     // Use admin client to bypass RLS for checking share access
@@ -268,6 +277,13 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Node not found" }, { status: 404 });
   }
 
+  const { data: project } = await queryClient
+    .from("projects")
+    .select("workspace_id")
+    .eq("id", node.project_id)
+    .maybeSingle();
+  const workspaceId = project?.workspace_id ?? null;
+
   // Check if user has edit access
   let canEdit = false;
 
@@ -277,11 +293,11 @@ export async function POST(req: NextRequest) {
   }
 
   // Check workspace membership
-  if (!canEdit) {
+  if (!canEdit && workspaceId) {
     const { data: membership } = await supabase
       .from("workspace_members")
       .select("id, role")
-      .eq("workspace_id", node.project_id)
+      .eq("workspace_id", workspaceId)
       .eq("user_id", user.id)
       .maybeSingle();
 
