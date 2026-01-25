@@ -206,8 +206,17 @@ export function SharedFileViewer({ nodeId }: Props) {
               return;
             }
             const isAuth = Boolean(session) || Boolean(data.isAuthenticated);
+            const lastSignInAtMs = session?.user?.last_sign_in_at
+              ? Date.parse(session.user.last_sign_in_at)
+              : 0;
+            const signedInRecently = lastSignInAtMs > 0 && Date.now() - lastSignInAtMs < 30000;
             const attempt = accessRetryAttemptRef.current;
-            if (isAuth && attempt < retryDelaysMs.length) {
+            const shouldRetry = isAuth && signedInRecently && attempt < retryDelaysMs.length;
+            setErrorType("access_denied");
+            setError(data.error || "アクセスが制限されています");
+            setIsAuthenticated(data.isAuthenticated || false);
+            setIsLoading(false);
+            if (shouldRetry) {
               const delay = retryDelaysMs[attempt] ?? 1000;
               accessRetryAttemptRef.current = attempt + 1;
               scheduledRetry = true;
@@ -217,11 +226,8 @@ export function SharedFileViewer({ nodeId }: Props) {
                   void fetchNodeData();
                 }
               }, delay);
-              return;
             }
-            setErrorType("access_denied");
-            setError(data.error || "アクセスが制限されています");
-            setIsAuthenticated(data.isAuthenticated || false);
+            return;
           } else {
             setErrorType("error");
             setError(data.error || "エラーが発生しました");
@@ -241,6 +247,9 @@ export function SharedFileViewer({ nodeId }: Props) {
           return;
         }
 
+        accessRetryAttemptRef.current = 0;
+        setError(null);
+        setErrorType("error");
         setNodeData(data);
         setIsAuthenticated(data.isAuthenticated || false);
       } catch (err: any) {
