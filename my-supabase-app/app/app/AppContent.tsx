@@ -205,6 +205,35 @@ export default async function AppContent({ searchParamsPromise }: Props) {
       .maybeSingle();
 
     if (sharedNode) {
+      const userEmail = user.email?.toLowerCase() || "";
+      let effectiveAccessRole: "viewer" | "editor" = sharedNode.is_public
+        ? (sharedNode.public_access_role || "viewer")
+        : "viewer";
+
+      if (!sharedNode.is_public) {
+        const { data: membership } = await supabase
+          .from("workspace_members")
+          .select("id")
+          .eq("workspace_id", sharedNode.project_id)
+          .eq("user_id", user.id)
+          .maybeSingle();
+
+        if (membership) {
+          effectiveAccessRole = "editor";
+        } else if (userEmail) {
+          const { data: share } = await supabase
+            .from("node_shares")
+            .select("role")
+            .eq("node_id", sharedNodeId)
+            .eq("shared_with_email", userEmail)
+            .maybeSingle();
+
+          if (share?.role === "editor") {
+            effectiveAccessRole = "editor";
+          }
+        }
+      }
+
       // Get file content
       let content: string | null = null;
       let signedUrl: string | null = null;
@@ -266,7 +295,7 @@ export default async function AppContent({ searchParamsPromise }: Props) {
           name: sharedNode.name,
           type: sharedNode.type,
           isPublic: sharedNode.is_public,
-          publicAccessRole: sharedNode.public_access_role || "viewer",
+          publicAccessRole: effectiveAccessRole,
           createdAt: sharedNode.created_at,
         },
         path: pathSegments.join("/"),

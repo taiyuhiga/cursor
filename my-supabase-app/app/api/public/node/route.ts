@@ -14,6 +14,9 @@ type NodeInfo = {
   created_at: string;
 };
 
+type MembershipAccess = { id: string };
+type ShareAccess = { id: string; role: "viewer" | "editor" };
+
 function extractStoragePath(text: string) {
   const trimmed = text.trim();
   if (!trimmed) return null;
@@ -82,6 +85,9 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "Node not found" }, { status: 404 });
   }
 
+  let membership: MembershipAccess | null = null;
+  let share: ShareAccess | null = null;
+
   // Node exists but is not public - check access
   if (!node.is_public) {
     if (!user) {
@@ -93,22 +99,24 @@ export async function GET(req: NextRequest) {
     }
 
     // Check if user has access via workspace membership
-    const { data: membership } = await supabase
+    const { data: membershipData } = await supabase
       .from("workspace_members")
       .select("id")
       .eq("workspace_id", node.project_id)
       .eq("user_id", user.id)
       .maybeSingle();
+    membership = membershipData;
 
     // Check if user has access via node_shares (case-insensitive email match)
     // Use admin client to bypass RLS for checking share access
     const userEmail = user.email?.toLowerCase() || "";
-    const { data: share } = await queryClient
+    const { data: shareData } = await queryClient
       .from("node_shares")
       .select("id, role")
       .eq("node_id", nodeId)
       .eq("shared_with_email", userEmail)
       .maybeSingle();
+    share = shareData as ShareAccess | null;
 
     if (!membership && !share) {
       return NextResponse.json({
@@ -124,6 +132,16 @@ export async function GET(req: NextRequest) {
 
     // User has shared access - continue to show content
   }
+
+  // Determine effective access role: membership is always editor, otherwise
+  // fall back to public role or the share role.
+  const effectiveAccessRole: "viewer" | "editor" = membership
+    ? "editor"
+    : node.is_public
+      ? (node.public_access_role || "viewer")
+      : share?.role === "editor"
+        ? "editor"
+        : "viewer";
 
   // Get file content if it's a file
   // Use admin client to bypass RLS for public/shared files
@@ -205,7 +223,7 @@ export async function GET(req: NextRequest) {
       name: node.name,
       type: node.type,
       isPublic: node.is_public,
-      publicAccessRole: node.public_access_role || "viewer",
+      publicAccessRole: effectiveAccessRole,
       createdAt: node.created_at,
     },
     path: pathSegments.join("/"),
