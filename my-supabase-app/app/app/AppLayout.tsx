@@ -55,6 +55,7 @@ type ShareSettings = {
 };
 
 const SHARE_SETTINGS_TTL_MS = 30000;
+const LOCAL_EDIT_GRACE_MS = 1200;
 
 type UploadItem = {
   file: File;
@@ -472,6 +473,9 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const tempFileContentsRef = useRef<Record<string, string>>({});
   const draftContentsRef = useRef<Record<string, string>>({});
   const contentCacheRef = useRef<Record<string, string>>({});
+  const lastLocalEditAtRef = useRef<Map<string, number>>(new Map());
+  const pendingRemoteContentRef = useRef<Map<string, string>>(new Map());
+  const remoteApplyTimeoutsRef = useRef<Map<string, number>>(new Map());
   const activeNodeIdRef = useRef<string | null>(null);
   const previewTabIdRef = useRef<string | null>(null);
   const openTabsRef = useRef<string[]>([]);
@@ -537,11 +541,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
 
   const getFileChannelName = useCallback((nodeId: string) => `file-content-${nodeId}`, []);
 
-  const applyRemoteContentUpdate = useCallback((nodeId: string, nextContent: string, source?: string) => {
-    if (source && source === realtimeClientIdRef.current) return;
-    if (draftContentsRef.current[nodeId] !== undefined) return;
-    if (pendingContentByRealIdRef.current.has(nodeId)) return;
-
+  const applyRemoteContentNow = useCallback((nodeId: string, nextContent: string) => {
     setContentCache((prev) => {
       if (prev[nodeId] === nextContent) return prev;
       const next = { ...prev, [nodeId]: nextContent };
@@ -552,6 +552,54 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     if (activeNodeIdRef.current === nodeId) {
       setFileContent((current) => (current === nextContent ? current : nextContent));
     }
+  }, []);
+
+  const schedulePendingRemoteApply = useCallback((nodeId: string) => {
+    const existingTimeout = remoteApplyTimeoutsRef.current.get(nodeId);
+    if (existingTimeout) window.clearTimeout(existingTimeout);
+    const timeoutId = window.setTimeout(() => {
+      remoteApplyTimeoutsRef.current.delete(nodeId);
+      const lastLocalEditAt = lastLocalEditAtRef.current.get(nodeId) ?? 0;
+      if (Date.now() - lastLocalEditAt < LOCAL_EDIT_GRACE_MS) {
+        schedulePendingRemoteApply(nodeId);
+        return;
+      }
+      const pending = pendingRemoteContentRef.current.get(nodeId);
+      if (pending === undefined) return;
+      if (draftContentsRef.current[nodeId] !== undefined) return;
+      if (pendingContentByRealIdRef.current.has(nodeId)) return;
+      pendingRemoteContentRef.current.delete(nodeId);
+      applyRemoteContentNow(nodeId, pending);
+    }, LOCAL_EDIT_GRACE_MS);
+    remoteApplyTimeoutsRef.current.set(nodeId, timeoutId);
+  }, [applyRemoteContentNow]);
+
+  const noteLocalEdit = useCallback((nodeId: string) => {
+    lastLocalEditAtRef.current.set(nodeId, Date.now());
+    if (pendingRemoteContentRef.current.has(nodeId)) {
+      schedulePendingRemoteApply(nodeId);
+    }
+  }, [schedulePendingRemoteApply]);
+
+  const applyRemoteContentUpdate = useCallback((nodeId: string, nextContent: string, source?: string) => {
+    if (source && source === realtimeClientIdRef.current) return;
+    if (draftContentsRef.current[nodeId] !== undefined) return;
+    if (pendingContentByRealIdRef.current.has(nodeId)) return;
+
+    const lastLocalEditAt = lastLocalEditAtRef.current.get(nodeId) ?? 0;
+    if (Date.now() - lastLocalEditAt < LOCAL_EDIT_GRACE_MS) {
+      pendingRemoteContentRef.current.set(nodeId, nextContent);
+      schedulePendingRemoteApply(nodeId);
+      return;
+    }
+
+    pendingRemoteContentRef.current.delete(nodeId);
+    applyRemoteContentNow(nodeId, nextContent);
+  }, [applyRemoteContentNow, schedulePendingRemoteApply]);
+
+  useEffect(() => () => {
+    remoteApplyTimeoutsRef.current.forEach((timeoutId) => window.clearTimeout(timeoutId));
+    remoteApplyTimeoutsRef.current.clear();
   }, []);
 
   const broadcastFileContentUpdate = useCallback(async (nodeId: string, text: string) => {
@@ -4250,7 +4298,9 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       setFileContent(pendingContent);
       setDraftContents((prev) => {
         if (prev[activeNodeId] === pendingContent) return prev;
-        return { ...prev, [activeNodeId]: pendingContent };
+        const next = { ...prev, [activeNodeId]: pendingContent };
+        draftContentsRef.current = next;
+        return next;
       });
       return;
     }
@@ -4280,6 +4330,16 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         setFileContent("");
       } else {
         const nextContent = data?.text || "";
+        const lastLocalEditAt = lastLocalEditAtRef.current.get(currentId) ?? 0;
+        if (Date.now() - lastLocalEditAt < LOCAL_EDIT_GRACE_MS) {
+          pendingRemoteContentRef.current.set(currentId, nextContent);
+          schedulePendingRemoteApply(currentId);
+          setContentCache((prev) => {
+            if (prev[currentId] === nextContent) return prev;
+            return { ...prev, [currentId]: nextContent };
+          });
+          return;
+        }
         setFileContent(nextContent);
         setContentCache((prev) => {
           if (prev[currentId] === nextContent) return prev;
@@ -4291,7 +4351,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     return () => {
       cancelled = true;
     };
-  }, [activeNodeId, nodeById, supabase]);
+  }, [activeNodeId, nodeById, schedulePendingRemoteApply, supabase]);
 
   // 保存
   const saveContent = useCallback(async () => {
@@ -4309,6 +4369,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         const next = { ...prev };
         delete next[activeNodeId];
         delete next[resolvedId];
+        draftContentsRef.current = next;
         return next;
       });
     }
@@ -4319,11 +4380,15 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     if (error) {
       console.error("Error saving content:", error?.message ?? error);
       if (prevDraftActive !== undefined || prevDraftResolved !== undefined) {
-        setDraftContents((prev) => ({
-          ...prev,
-          ...(prevDraftActive !== undefined ? { [activeNodeId]: prevDraftActive } : {}),
-          ...(prevDraftResolved !== undefined ? { [resolvedId]: prevDraftResolved } : {}),
-        }));
+        setDraftContents((prev) => {
+          const next = {
+            ...prev,
+            ...(prevDraftActive !== undefined ? { [activeNodeId]: prevDraftActive } : {}),
+            ...(prevDraftResolved !== undefined ? { [resolvedId]: prevDraftResolved } : {}),
+          };
+          draftContentsRef.current = next;
+          return next;
+        });
       }
     } else {
       pendingContentByRealIdRef.current.delete(resolvedId);
@@ -4335,6 +4400,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         const next = { ...prev };
         delete next[resolvedId];
         if (hasTemp) delete next[activeNodeId];
+        draftContentsRef.current = next;
         return next;
       });
       setContentCache((prev) => {
@@ -4448,6 +4514,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       const mappedId = tempIdRealIdMapRef.current.get(activeNodeId);
       if (mappedId) {
         pendingContentByRealIdRef.current.set(mappedId, next);
+        noteLocalEdit(mappedId);
         setFileContent(next);
         return;
       }
@@ -4460,16 +4527,19 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       });
       return;
     }
+    noteLocalEdit(activeNodeId);
     setFileContent(next);
     setDraftContents((prev) => {
       if (prev[activeNodeId] === next) return prev;
-      return { ...prev, [activeNodeId]: next };
+      const updated = { ...prev, [activeNodeId]: next };
+      draftContentsRef.current = updated;
+      return updated;
     });
     setContentCache((prev) => {
       if (prev[activeNodeId] === next) return prev;
       return { ...prev, [activeNodeId]: next };
     });
-  }, [activeNodeId]);
+  }, [activeNodeId, noteLocalEdit]);
 
   const handleAppend = (text: string) => {
     const virtual = getActiveVirtualDoc();
@@ -6183,6 +6253,7 @@ ${diffs}`;
                     });
                   }}
                   fileName={activeVirtual.fileName}
+                  path={activeVirtual.id}
                   onSave={() => handleSavePlanToWorkspace(activeVirtual.id)}
                   onAddToChat={handleAddToChat}
                 />
@@ -6192,6 +6263,7 @@ ${diffs}`;
                   value={sharedFileContent}
                   onChange={(v) => setSharedFileContent(v)}
                   fileName={sharedFileData.node.name}
+                  path={`shared:${sharedFileData.node.id}`}
                   onSave={saveSharedFileContent}
                   onAddToChat={handleAddToChat}
                   readOnly={sharedFileData.node.publicAccessRole === "viewer"}
@@ -6264,6 +6336,7 @@ ${diffs}`;
                     value={activeEditorContent}
                     onChange={setActiveEditorContent}
                     fileName={activeNode.name}
+                    path={activeNode.id}
                     onSave={saveContent}
                     onAddToChat={handleAddToChat}
                   />

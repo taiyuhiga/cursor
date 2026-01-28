@@ -7,6 +7,7 @@ type Props = {
   value: string;
   onChange: (value: string) => void;
   fileName: string;
+  path?: string;
   onSave?: () => void;
   onAddToChat?: (selectedText: string, lineStart: number, lineEnd: number) => void;
   readOnly?: boolean;
@@ -44,13 +45,24 @@ function getLanguage(fileName: string) {
   }
 }
 
-export function MainEditor({ value, onChange, fileName, onSave, onAddToChat, readOnly = false }: Props) {
+const LOCAL_PROP_APPLY_DELAY_MS = 1200;
+
+export function MainEditor({ value, onChange, fileName, path, onSave, onAddToChat, readOnly = false }: Props) {
   const editorRef = useRef<any>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const onSaveRef = useRef(onSave);
   const onAddToChatRef = useRef(onAddToChat);
   const isMarkdown = fileName.toLowerCase().endsWith(".md");
   const isApplyingAutoCloseRef = useRef(false);
+  const isApplyingExternalRef = useRef(false);
+  const isFocusedRef = useRef(false);
+  const lastLocalEditAtRef = useRef(0);
+  const pendingExternalValueRef = useRef<string | null>(null);
+  const pendingApplyTimeoutRef = useRef<number | null>(null);
+  const lastPropValueRef = useRef(value);
+  const lastSelectionRef = useRef<any>(null);
+  const lastScrollTopRef = useRef(0);
+  const lastScrollLeftRef = useRef(0);
 
   const [popupPosition, setPopupPosition] = useState<PopupPosition>(null);
   const [selectedText, setSelectedText] = useState("");
@@ -64,6 +76,109 @@ export function MainEditor({ value, onChange, fileName, onSave, onAddToChat, rea
     onAddToChatRef.current = onAddToChat;
   }, [onAddToChat]);
 
+  useEffect(() => {
+    lastPropValueRef.current = value;
+  }, [value]);
+
+  const clampSelectionToModel = useCallback((selection: any, model: any) => {
+    if (!selection || !model) return null;
+    const lineCount = model.getLineCount();
+    if (!lineCount) return null;
+    const clampLine = (line: number) => Math.min(Math.max(line, 1), lineCount);
+    const startLineNumber = clampLine(selection.startLineNumber);
+    const endLineNumber = clampLine(selection.endLineNumber);
+    const startColumn = Math.min(selection.startColumn, model.getLineMaxColumn(startLineNumber));
+    const endColumn = Math.min(selection.endColumn, model.getLineMaxColumn(endLineNumber));
+    return {
+      startLineNumber,
+      startColumn,
+      endLineNumber,
+      endColumn,
+    };
+  }, []);
+
+  const applyExternalValueNow = useCallback((nextValue: string) => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    const model = editor.getModel();
+    if (!model) return;
+    if (model.getValue() === nextValue) return;
+
+    const selection = lastSelectionRef.current ?? editor.getSelection();
+    const scrollTop = lastScrollTopRef.current || editor.getScrollTop();
+    const scrollLeft = lastScrollLeftRef.current || editor.getScrollLeft();
+
+    isApplyingExternalRef.current = true;
+    try {
+      const range = model.getFullModelRange();
+      editor.executeEdits("external-update", [{ range, text: nextValue }]);
+    } finally {
+      isApplyingExternalRef.current = false;
+    }
+
+    if (isFocusedRef.current && selection) {
+      const clamped = clampSelectionToModel(selection, model);
+      if (clamped) {
+        editor.setSelection(clamped);
+      }
+      editor.setScrollTop(scrollTop);
+      editor.setScrollLeft(scrollLeft);
+    }
+  }, [clampSelectionToModel]);
+
+  const schedulePendingExternalApply = useCallback(() => {
+    if (pendingApplyTimeoutRef.current) {
+      window.clearTimeout(pendingApplyTimeoutRef.current);
+    }
+    pendingApplyTimeoutRef.current = window.setTimeout(() => {
+      pendingApplyTimeoutRef.current = null;
+      const pending = pendingExternalValueRef.current;
+      if (pending === null) return;
+      const recentLocalEdit = Date.now() - lastLocalEditAtRef.current < LOCAL_PROP_APPLY_DELAY_MS;
+      if (isFocusedRef.current && recentLocalEdit) {
+        schedulePendingExternalApply();
+        return;
+      }
+      pendingExternalValueRef.current = null;
+      applyExternalValueNow(pending);
+    }, LOCAL_PROP_APPLY_DELAY_MS);
+  }, [applyExternalValueNow]);
+
+  useEffect(() => {
+    return () => {
+      if (pendingApplyTimeoutRef.current) {
+        window.clearTimeout(pendingApplyTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    const model = editor.getModel();
+    if (!model) return;
+    if (model.getValue() === value) return;
+
+    const recentLocalEdit = Date.now() - lastLocalEditAtRef.current < LOCAL_PROP_APPLY_DELAY_MS;
+    if (isFocusedRef.current && recentLocalEdit) {
+      pendingExternalValueRef.current = value;
+      schedulePendingExternalApply();
+      return;
+    }
+
+    pendingExternalValueRef.current = null;
+    applyExternalValueNow(value);
+  }, [value, applyExternalValueNow, schedulePendingExternalApply]);
+
+  useEffect(() => {
+    // Changing files should drop any pending external updates.
+    pendingExternalValueRef.current = null;
+    if (pendingApplyTimeoutRef.current) {
+      window.clearTimeout(pendingApplyTimeoutRef.current);
+      pendingApplyTimeoutRef.current = null;
+    }
+  }, [path, fileName]);
+
   const handleAddToChat = useCallback(() => {
     if (selectedText && selectionRange && onAddToChatRef.current) {
       onAddToChatRef.current(selectedText, selectionRange.startLine, selectionRange.endLine);
@@ -73,6 +188,7 @@ export function MainEditor({ value, onChange, fileName, onSave, onAddToChat, rea
 
   const handleEditorDidMount: OnMount = (editor, monaco) => {
     editorRef.current = editor;
+    applyExternalValueNow(lastPropValueRef.current);
 
     // Cmd+S / Ctrl+S のバインディング
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
@@ -96,6 +212,7 @@ export function MainEditor({ value, onChange, fileName, onSave, onAddToChat, rea
     // 選択変更時のハンドラ
     editor.onDidChangeCursorSelection((e) => {
       const selection = e.selection;
+      lastSelectionRef.current = selection;
 
       if (selection.isEmpty()) {
         setPopupPosition(null);
@@ -157,7 +274,22 @@ export function MainEditor({ value, onChange, fileName, onSave, onAddToChat, rea
 
     // スクロール時にポップアップを非表示
     editor.onDidScrollChange(() => {
+      lastScrollTopRef.current = editor.getScrollTop();
+      lastScrollLeftRef.current = editor.getScrollLeft();
       setPopupPosition(null);
+    });
+
+    editor.onDidFocusEditorText(() => {
+      isFocusedRef.current = true;
+    });
+
+    editor.onDidBlurEditorText(() => {
+      isFocusedRef.current = false;
+      const pending = pendingExternalValueRef.current;
+      if (pending !== null) {
+        pendingExternalValueRef.current = null;
+        applyExternalValueNow(pending);
+      }
     });
 
     const autoCloseLanguages = new Set(["html", "markdown"]);
@@ -180,6 +312,7 @@ export function MainEditor({ value, onChange, fileName, onSave, onAddToChat, rea
 
     editor.onDidChangeModelContent((event) => {
       if (isApplyingAutoCloseRef.current) return;
+      if (isApplyingExternalRef.current) return;
       if (event.isFlush || event.isUndoing || event.isRedoing) return;
 
       const change = event.changes.find(
@@ -239,10 +372,16 @@ export function MainEditor({ value, onChange, fileName, onSave, onAddToChat, rea
       <Editor
         height="100%"
         theme="vs"
-        path={fileName}
+        path={path ?? fileName}
         defaultLanguage={getLanguage(fileName)}
-        value={value}
-        onChange={(v) => onChange(v ?? "")}
+        defaultValue={value}
+        onChange={(v) => {
+          if (isApplyingExternalRef.current) return;
+          const nextValue = v ?? "";
+          lastLocalEditAtRef.current = Date.now();
+          pendingExternalValueRef.current = null;
+          onChange(nextValue);
+        }}
         onMount={handleEditorDidMount}
         options={{
           minimap: { enabled: false },
