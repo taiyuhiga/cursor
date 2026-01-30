@@ -20,6 +20,7 @@ import { SettingsView } from "@/components/SettingsView";
 import { ReviewPanel } from "@/components/ReviewPanel";
 import { SourceControlPanel, type SourceControlChange } from "@/components/SourceControlPanel";
 import { MediaPreview, isMediaFile, prefetchMediaUrl } from "@/components/MediaPreview";
+import { FolderPageView } from "@/components/FolderPageView";
 import { ReplaceConfirmDialog } from "@/components/ReplaceConfirmDialog";
 import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
 import { UndoConfirmDialog } from "@/components/UndoConfirmDialog";
@@ -245,6 +246,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const [fileContent, setFileContent] = useState<string>("");
   const [tempFileContents, setTempFileContents] = useState<Record<string, string>>({});
   const [draftContents, setDraftContents] = useState<Record<string, string>>({});
+  const [folderDirtyIds, setFolderDirtyIds] = useState<Set<string>>(new Set());
   const [contentCache, setContentCache] = useState<Record<string, string>>({});
   const [isSaving, setIsSaving] = useState(false);
   const [isShareOpen, setIsShareOpen] = useState(false);
@@ -661,12 +663,14 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
   const dirtyTabIds = useMemo(() => {
     const ids = new Set(Object.keys(draftContents));
     Object.keys(tempFileContents).forEach((id) => ids.add(id));
+    // Include folder dirty tabs
+    folderDirtyIds.forEach((id) => ids.add(id));
     // Include shared file tab if content has been modified
     if (sharedNodeId && sharedFileData && sharedFileContent !== sharedFileOriginalContent) {
       ids.add(`shared:${sharedNodeId}`);
     }
     return ids;
-  }, [draftContents, tempFileContents, sharedNodeId, sharedFileData, sharedFileContent, sharedFileOriginalContent]);
+  }, [draftContents, tempFileContents, folderDirtyIds, sharedNodeId, sharedFileData, sharedFileContent, sharedFileOriginalContent]);
 
 
   const getNodeKey = (node: Node) => `${node.type}:${node.parent_id ?? "root"}:${node.name}`;
@@ -2807,6 +2811,12 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
 
   const handleSelectFolder = useCallback((nodeId: string) => {
     setSelectedNodeIds(new Set([nodeId]));
+    // フォルダーもタブとして開いて表示する
+    setOpenTabs((prev) => {
+      if (prev.includes(nodeId)) return prev;
+      return [...prev, nodeId];
+    });
+    setActiveNodeId(nodeId);
   }, []);
 
   const handleClearSelection = useCallback(() => {
@@ -4468,6 +4478,10 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
         activeElement?.isContentEditable;
       if (isTextInput) return;
 
+      // Skip if active node is a folder (FolderPageView handles its own save)
+      const node = activeNodeId ? nodeById.get(activeNodeId) : null;
+      if (node?.type === "folder") return;
+
       e.preventDefault();
       // Check if active tab is a shared file
       if (activeNodeId?.startsWith("shared:")) {
@@ -4479,7 +4493,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
 
     document.addEventListener("keydown", handleGlobalSave);
     return () => document.removeEventListener("keydown", handleGlobalSave);
-  }, [saveContent, saveSharedFileContent, activeNodeId]);
+  }, [saveContent, saveSharedFileContent, activeNodeId, nodeById]);
 
   // AIアクション
   const handleAiAction = (action: string) => {
@@ -5399,16 +5413,16 @@ ${diffs}`;
   const tabs = openTabs
     .map((id) => {
       const node = nodes.find((n) => n.id === id);
-      if (node) return { id, title: node.name };
+      if (node) return { id, title: node.name, type: node.type };
       const v = virtualDocs[id];
-      if (v) return { id, title: v.title };
+      if (v) return { id, title: v.title, type: "file" as const };
       // Handle shared file tabs
       if (id.startsWith("shared:") && sharedFileData) {
-        return { id, title: sharedFileData.node.name };
+        return { id, title: sharedFileData.node.name, type: sharedFileData.node.type };
       }
       return null;
     })
-    .filter((t): t is { id: string; title: string } => t !== null);
+    .filter((t): t is { id: string; title: string; type: "file" | "folder" } => t !== null);
 
   // Check if active tab is a shared file
   const isActiveSharedFile = activeNodeId?.startsWith("shared:") ?? false;
@@ -6181,7 +6195,10 @@ ${diffs}`;
               <div className="flex items-center gap-1 px-3 py-1.5 bg-white text-xs text-zinc-600 overflow-x-auto no-scrollbar">
                 {segments.map((segment, index) => {
                   const isLast = index === segments.length - 1;
-                  const Icon = isLast ? getFileIcon(segment) : FileIcons.Folder;
+                  // 最後のセグメントはactiveNodeのタイプに応じてアイコンを決定
+                  const Icon = isLast
+                    ? (activeNode.type === "folder" ? FileIcons.Folder : getFileIcon(segment))
+                    : FileIcons.Folder;
                   return (
                     <span key={index} className="flex items-center gap-1 whitespace-nowrap">
                       {index > 0 && <span className="text-zinc-400 mx-0.5">{">"}</span>}
@@ -6326,6 +6343,26 @@ ${diffs}`;
                       <span>Creating...</span>
                     </div>
                   </div>
+                ) : activeNode.type === "folder" ? (
+                  <FolderPageView
+                    folderId={activeNode.id}
+                    folderName={activeNode.name}
+                    onRename={async (newName) => {
+                      await handleRenameNode(activeNode.id, newName);
+                    }}
+                    onDirtyChange={(isDirty) => {
+                      setFolderDirtyIds((prev) => {
+                        const next = new Set(prev);
+                        if (isDirty) {
+                          next.add(activeNode.id);
+                        } else {
+                          next.delete(activeNode.id);
+                        }
+                        if (next.size === prev.size && [...next].every((id) => prev.has(id))) return prev;
+                        return next;
+                      });
+                    }}
+                  />
                 ) : isMediaFile(activeNode.name) ? (
                   <MediaPreview
                     fileName={activeNode.name}
