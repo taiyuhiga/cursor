@@ -2200,6 +2200,9 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     setRevealNodeId(tempId);
     tempIdPathMapRef.current.set(tempId, path);
     pushUndoAction({ type: "create", nodeId: tempId, node: tempNode });
+    // フォルダーをタブとして開いてアクティブにする
+    setOpenTabs(prev => prev.includes(tempId) ? prev : [...prev, tempId]);
+    setActiveNodeId(tempId);
 
     // バックグラウンドでAPI処理を実行（UIブロックしない）
     (async () => {
@@ -2239,6 +2242,9 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
             return prev.map(n => n.id === tempId ? { ...n, id: json.nodeId } : n);
           });
           setSelectedNodeIds(new Set([json.nodeId]));
+          // Update open tabs and active node from temp to real ID
+          setOpenTabs(prev => prev.map(id => id === tempId ? json.nodeId : id));
+          setActiveNodeId(prev => prev === tempId ? json.nodeId : prev);
           // Update undo action for create
           updateUndoCreateNodeId(tempId, json.nodeId);
           tempIdPathMapRef.current.delete(tempId);
@@ -2256,6 +2262,8 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
             recovered = true;
             registerTempIdMapping(tempId, recoveredNode.id);
             setSelectedNodeIds(new Set([recoveredNode.id]));
+            setOpenTabs(prev => prev.map(id => id === tempId ? recoveredNode.id : id));
+            setActiveNodeId(prev => prev === tempId ? recoveredNode.id : prev);
             updateUndoCreateNodeId(tempId, recoveredNode.id);
             tempIdPathMapRef.current.delete(tempId);
           }
@@ -2266,6 +2274,8 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
           removeUndoCreateAction(tempId);
           tempIdPathMapRef.current.delete(tempId);
           setNodes(prev => prev.filter(n => n.id !== tempId));
+          setOpenTabs(prev => prev.filter(id => id !== tempId));
+          setActiveNodeId(prev => prev === tempId ? null : prev);
           setSelectedNodeIds(new Set(prevSelectedIds));
           alert(`Error: ${error.message}`);
         }
@@ -2282,14 +2292,17 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     setNodes(prev => prev.map(n => n.id === id ? { ...n, name: newName } : n));
 
     try {
+      // temp IDの場合は実IDに解決してからAPI呼び出し
+      const resolvedId = id.startsWith("temp-") ? await resolveMaybeTempNodeId(id, 30000) : id;
+      if (!resolvedId) throw new Error("ノードがまだ作成中です。しばらくお待ちください。");
       const res = await fetch("/api/files", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "rename_node", id, newName }),
+        body: JSON.stringify({ action: "rename_node", id: resolvedId, newName }),
       });
       if (!res.ok) throw new Error("Failed to rename");
       // Push undo action for rename
-      pushUndoAction({ type: "rename", nodeId: id, oldName, newName });
+      pushUndoAction({ type: "rename", nodeId: resolvedId, oldName, newName });
     } catch (error: any) {
       // 失敗したらロールバック
       setNodes(prev => prev.map(n => n.id === id ? oldNode : n));
@@ -2309,6 +2322,13 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     const idsToMove = nodesToMove.map(n => n.id);
     const oldParentIds = nodesToMove.map(n => n.parent_id);
     setNodes(prev => prev.map(n => idsToMove.includes(n.id) ? { ...n, parent_id: newParentId } : n));
+
+    // 移動されたフォルダーが1つの場合、タブとして開く
+    if (nodesToMove.length === 1 && nodesToMove[0].type === "folder") {
+      const folderId = nodesToMove[0].id;
+      setOpenTabs(prev => prev.includes(folderId) ? prev : [...prev, folderId]);
+      setActiveNodeId(folderId);
+    }
 
     try {
       // Move all nodes in parallel
@@ -2403,13 +2423,21 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
       .map(n => n.name);
 
     // Recursive function to copy node tree locally
+    const visited = new Set<string>();
     const copyNodeTreeLocally = (sourceId: string, targetParentId: string | null, isRoot: boolean) => {
+      if (visited.has(sourceId)) return;
+      visited.add(sourceId);
       const sourceNode = nodes.find(n => n.id === sourceId);
       if (!sourceNode) return;
 
-      const isSameFolder = isRoot && sourceNode.parent_id === targetParentId;
-      const newName = isSameFolder
-        ? generateCopyName(sourceNode.name, [...existingNames, ...tempNodes.filter(t => t.parent_id === targetParentId).map(t => t.name)], sourceNode.type === "file")
+      // 貼り付け先に同名のノードが存在する場合は copy 名を生成
+      const siblingNames = [
+        ...existingNames,
+        ...tempNodes.filter(t => t.parent_id === targetParentId).map(t => t.name),
+      ];
+      const hasDuplicate = siblingNames.includes(sourceNode.name);
+      const newName = (isRoot && hasDuplicate)
+        ? generateCopyName(sourceNode.name, siblingNames, sourceNode.type === "file")
         : sourceNode.name;
 
       const tempId = `temp-copy-${Date.now()}-${Math.random().toString(36).substr(2, 9)}-${sourceId}`;
@@ -2458,6 +2486,14 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     // 即座に中央表示
     if (rootTempIds.length > 0) {
       setRevealNodeId(rootTempIds[0]);
+    }
+    // コピーされたルートノードがフォルダーの場合、タブとして開く
+    if (rootTempIds.length === 1) {
+      const rootTemp = tempNodes.find(n => n.id === rootTempIds[0]);
+      if (rootTemp?.type === "folder") {
+        setOpenTabs(prev => prev.includes(rootTempIds[0]) ? prev : [...prev, rootTempIds[0]]);
+        setActiveNodeId(rootTempIds[0]);
+      }
     }
     // Push undo action for copy immediately (use temp IDs for instant undo)
     if (rootTempIds.length > 0) {
@@ -2819,6 +2855,104 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     setActiveNodeId(nodeId);
   }, []);
 
+  // Create file from FolderPageView slash command
+  const handleCreateFileInFolder = useCallback((parentId: string | null) => {
+    const siblings = nodes.filter((n) => n.parent_id === parentId);
+    const siblingNames = new Set(siblings.map((n) => n.name));
+    let name = "Untitled";
+    let counter = 1;
+    while (siblingNames.has(name)) {
+      name = `Untitled ${counter}`;
+      counter++;
+    }
+    handleCreateFile(name, parentId);
+  }, [nodes, handleCreateFile]);
+
+  // Create folder from FolderPageView slash command
+  const handleCreateFolderInFolder = useCallback((parentId: string | null) => {
+    const siblings = nodes.filter((n) => n.parent_id === parentId);
+    const siblingNames = new Set(siblings.map((n) => n.name));
+    let name = "Untitled";
+    let counter = 1;
+    while (siblingNames.has(name)) {
+      name = `Untitled ${counter}`;
+      counter++;
+    }
+    handleCreateFolder(name, parentId);
+  }, [nodes, handleCreateFolder]);
+
+  // ── Folder/Workspace block content ──
+  const folderBlocksCache = useRef<Record<string, unknown[]>>({});
+  const [folderBlocks, setFolderBlocks] = useState<Record<string, unknown[]>>({});
+
+  // Load folder blocks when a folder tab becomes active
+  useEffect(() => {
+    if (!activeNodeId) return;
+    const node = nodeById.get(activeNodeId);
+    if (!node || node.type !== "folder") return;
+    // Already loaded
+    if (folderBlocksCache.current[activeNodeId] !== undefined) {
+      setFolderBlocks((prev) => {
+        if (prev[activeNodeId] === folderBlocksCache.current[activeNodeId]) return prev;
+        return { ...prev, [activeNodeId]: folderBlocksCache.current[activeNodeId] };
+      });
+      return;
+    }
+    // Fetch from DB
+    supabase
+      .from("file_contents")
+      .select("text")
+      .eq("node_id", activeNodeId)
+      .maybeSingle()
+      .then(({ data }: { data: { text: string | null } | null }) => {
+        let blocks: unknown[] = [];
+        if (data?.text) {
+          try {
+            const parsed = JSON.parse(data.text);
+            if (Array.isArray(parsed)) blocks = parsed;
+          } catch { /* ignore */ }
+        }
+        folderBlocksCache.current[activeNodeId] = blocks;
+        setFolderBlocks((prev) => ({ ...prev, [activeNodeId]: blocks }));
+      });
+  }, [activeNodeId, nodeById, supabase]);
+
+  // Load workspace blocks
+  useEffect(() => {
+    if (!activeWorkspace) return;
+    const wsKey = `workspace:${activeWorkspace.id}`;
+    if (folderBlocksCache.current[wsKey] !== undefined) return;
+    supabase
+      .from("file_contents")
+      .select("text")
+      .eq("node_id", activeWorkspace.id)
+      .maybeSingle()
+      .then(({ data }: { data: { text: string | null } | null }) => {
+        let blocks: unknown[] = [];
+        if (data?.text) {
+          try {
+            const parsed = JSON.parse(data.text);
+            if (Array.isArray(parsed)) blocks = parsed;
+          } catch { /* ignore */ }
+        }
+        folderBlocksCache.current[wsKey] = blocks;
+        setFolderBlocks((prev) => ({ ...prev, [wsKey]: blocks }));
+      });
+  }, [activeWorkspace, supabase]);
+
+  // Save folder blocks
+  const handleSaveFolderBlocks = useCallback((nodeId: string, blocks: unknown[]) => {
+    folderBlocksCache.current[nodeId] = blocks;
+    setFolderBlocks((prev) => ({ ...prev, [nodeId]: blocks }));
+    const text = JSON.stringify(blocks);
+    supabase
+      .from("file_contents")
+      .upsert({ node_id: nodeId, text }, { onConflict: "node_id" })
+      .then(({ error }: { error: Error | null }) => {
+        if (error) console.error("Failed to save folder blocks:", error);
+      });
+  }, [supabase]);
+
   const handleClearSelection = useCallback(() => {
     setSelectedNodeIds(new Set());
   }, []);
@@ -2828,6 +2962,94 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     setUploadTargetParentId(parentId);
     fileInputRef.current?.click();
   }, []);
+
+  // Upload media for inline block embedding
+  const handleUploadMedia = useCallback(
+    async (accept: string, parentId: string | null): Promise<{ nodeId: string; fileName: string } | null> => {
+      return new Promise((resolve) => {
+        const input = document.createElement("input");
+        input.type = "file";
+        input.accept = accept;
+        input.style.display = "none";
+        document.body.appendChild(input);
+
+        let resolved = false;
+        const cleanup = () => {
+          if (input.parentNode) document.body.removeChild(input);
+        };
+
+        input.onchange = async () => {
+          const file = input.files?.[0];
+          cleanup();
+
+          if (!file) {
+            resolved = true;
+            resolve(null);
+            return;
+          }
+
+          try {
+            const formData = new FormData();
+            formData.append("file", file);
+            formData.append("projectId", projectId);
+            formData.append("parentId", parentId ?? "");
+            formData.append("fileName", file.name);
+
+            const resp = await fetch("/api/storage/upload", {
+              method: "POST",
+              body: formData,
+            });
+
+            if (!resp.ok) {
+              resolved = true;
+              resolve(null);
+              return;
+            }
+
+            const data = await resp.json();
+            // Refresh nodes so the uploaded file appears in the tree
+            void fetchNodes(false);
+            resolved = true;
+            resolve({ nodeId: data.nodeId, fileName: file.name });
+          } catch {
+            resolved = true;
+            resolve(null);
+          }
+        };
+
+        // Handle cancel
+        input.addEventListener("cancel", () => {
+          cleanup();
+          if (!resolved) {
+            resolved = true;
+            resolve(null);
+          }
+        });
+
+        input.click();
+      });
+    },
+    [projectId, fetchNodes]
+  );
+
+  // Get signed URL for media block display
+  const handleGetMediaUrl = useCallback(
+    async (nodeId: string): Promise<string | null> => {
+      try {
+        const resp = await fetch("/api/storage/download", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ nodeId }),
+        });
+        if (!resp.ok) return null;
+        const data = await resp.json();
+        return data.url ?? null;
+      } catch {
+        return null;
+      }
+    },
+    []
+  );
 
   // Upload folder handler
   const handleUploadFolder = useCallback((parentId: string | null) => {
@@ -3558,6 +3780,13 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
 
     const rootTempId = rootFolderName ? (tempIdByPath.get(rootFolderName) ?? null) : null;
 
+    // ルートフォルダーをタブとして開く
+    if (rootTempId) {
+      setOpenTabs(prev => prev.includes(rootTempId) ? prev : [...prev, rootTempId]);
+      setActiveNodeId(rootTempId);
+      setSelectedNodeIds(new Set([rootTempId]));
+    }
+
     // Find existing nodes that will be replaced
     const existingNodesToReplace: Node[] = [];
     for (const rootName of rootNames) {
@@ -3878,7 +4107,7 @@ export default function AppLayout({ projectId, workspaces, currentWorkspace, use
     // Upload sequentially to avoid UI jumping and ensure items appear as they complete
     await runWithConcurrency(sortedItems, 1, uploadOne);
     console.log("[FolderUpload] Upload complete.");
-    if (!initialActiveNodeId) {
+    if (!initialActiveNodeId && !rootTempId) {
       // If the last item in original order was a file, open that file
       const lastOriginalFileNodeId = lastOriginalFilePath ? createdNodeIdByPath.get(lastOriginalFilePath) : null;
       if (lastOriginalFileNodeId) {
@@ -5410,6 +5639,8 @@ ${diffs}`;
     };
   }, [isResizingLeft, isResizingRight]);
 
+  const workspaceTabId = `workspace:${activeWorkspace.id}`;
+
   const tabs = openTabs
     .map((id) => {
       const node = nodes.find((n) => n.id === id);
@@ -5431,6 +5662,17 @@ ${diffs}`;
   const activeNode = activeNodeId && !activeNodeId.startsWith("virtual-plan:") && !activeNodeId.startsWith("shared:")
     ? (nodes.find((n) => n.id === activeNodeId) ?? null)
     : null;
+  // Detect if workspace page is showing (no active file/folder/virtual/shared)
+  const isShowingWorkspace = !activeNodeId || (!activeVirtual && !activeNode && !isActiveSharedFile);
+
+  // Add workspace tab when workspace page is showing
+  const tabsWithWorkspace = isShowingWorkspace
+    ? [{ id: workspaceTabId, title: activeWorkspace.name, type: "workspace" as const }, ...tabs]
+    : tabs;
+
+  // Active tab ID for TabBar
+  const activeTabId = isShowingWorkspace ? workspaceTabId : activeNodeId;
+
   // shareTargetNodeIdが指定されている場合はそのノードを、そうでなければactiveNodeを使用
   const shareTargetNode = shareTargetNodeId
     ? nodes.find((n) => n.id === shareTargetNodeId) ?? null
@@ -6103,9 +6345,15 @@ ${diffs}`;
 
         <main className="flex-1 flex flex-col min-w-0 bg-white">
           <TabBar
-            tabs={tabs}
-            activeId={activeNodeId}
+            tabs={tabsWithWorkspace}
+            activeId={activeTabId}
             onSelect={(id) => {
+              // Workspace tab selected - clear active node to show workspace page
+              if (id === workspaceTabId) {
+                setActiveNodeId(null);
+                setSelectedNodeIds(new Set());
+                return;
+              }
               const node = nodeById.get(id);
               const hasNode = !!node;
               if (node && !id.startsWith("temp-") && isMediaFile(node.name)) {
@@ -6120,7 +6368,14 @@ ${diffs}`;
                 }
               }
             }}
-            onClose={handleCloseTab}
+            onClose={(id) => {
+              // Workspace tab close - just clear active node
+              if (id === workspaceTabId) {
+                setActiveNodeId(null);
+                return;
+              }
+              handleCloseTab(id);
+            }}
             dirtyIds={dirtyTabIds}
             onShare={() => {
               if (!shareTarget) return;
@@ -6233,6 +6488,15 @@ ${diffs}`;
               })()}
             </div>
           )}
+          {/* ワークスペースのパンくずリスト */}
+          {isShowingWorkspace && (
+            <div className="flex items-center gap-1 px-3 py-1.5 bg-white text-xs text-zinc-600 overflow-x-auto no-scrollbar">
+              <span className="flex items-center gap-1 whitespace-nowrap">
+                <FileIcons.Folder className="w-4 h-4 flex-shrink-0" />
+                <span className="text-zinc-900">{activeWorkspace.name}</span>
+              </span>
+            </div>
+          )}
           {activeVirtual ? (
             <div className="px-6 py-3 border-b border-zinc-200 bg-zinc-50 flex items-center justify-between">
               <div>
@@ -6286,7 +6550,37 @@ ${diffs}`;
                   readOnly={sharedFileData.node.publicAccessRole === "viewer"}
                 />
               ) : activeNode ? (
-                activeNode.id.startsWith("temp-") && activeUploadProgress !== null ? (
+                activeNode.type === "folder" ? (
+                  <FolderPageView
+                    folderId={activeNode.id}
+                    folderName={activeNode.name}
+                    onRename={async (newName) => {
+                      await handleRenameNode(activeNode.id, newName);
+                    }}
+                    onDirtyChange={(isDirty) => {
+                      setFolderDirtyIds((prev) => {
+                        const next = new Set(prev);
+                        if (isDirty) {
+                          next.add(activeNode.id);
+                        } else {
+                          next.delete(activeNode.id);
+                        }
+                        if (next.size === prev.size && [...next].every((id) => prev.has(id))) return prev;
+                        return next;
+                      });
+                    }}
+                    childNodes={nodes.filter((n) => n.parent_id === activeNode.id).map((n) => ({ id: n.id, name: n.name, type: n.type }))}
+                    onOpenNode={handleOpenNode}
+                    onCreateFile={handleCreateFileInFolder}
+                    onCreateFolder={handleCreateFolderInFolder}
+                    onUploadFiles={handleUploadFiles}
+                    onUploadMedia={handleUploadMedia}
+                    onGetMediaUrl={handleGetMediaUrl}
+                    parentId={activeNode.id}
+                    initialBlocks={folderBlocks[activeNode.id] as any}
+                    onSaveBlocks={(blocks) => handleSaveFolderBlocks(activeNode.id, blocks)}
+                  />
+                ) : activeNode.id.startsWith("temp-") && activeUploadProgress !== null ? (
                   <div className="absolute inset-0 flex items-center justify-center text-zinc-500">
                     <div className="flex flex-col items-center gap-3">
                       <div className="flex items-center gap-3">
@@ -6343,26 +6637,6 @@ ${diffs}`;
                       <span>Creating...</span>
                     </div>
                   </div>
-                ) : activeNode.type === "folder" ? (
-                  <FolderPageView
-                    folderId={activeNode.id}
-                    folderName={activeNode.name}
-                    onRename={async (newName) => {
-                      await handleRenameNode(activeNode.id, newName);
-                    }}
-                    onDirtyChange={(isDirty) => {
-                      setFolderDirtyIds((prev) => {
-                        const next = new Set(prev);
-                        if (isDirty) {
-                          next.add(activeNode.id);
-                        } else {
-                          next.delete(activeNode.id);
-                        }
-                        if (next.size === prev.size && [...next].every((id) => prev.has(id))) return prev;
-                        return next;
-                      });
-                    }}
-                  />
                 ) : isMediaFile(activeNode.name) ? (
                   <MediaPreview
                     fileName={activeNode.name}
@@ -6379,12 +6653,35 @@ ${diffs}`;
                   />
                 )
               ) : (
-                <div className="absolute inset-0 flex items-center justify-center text-zinc-400">
-                  <div className="text-center">
-                    <p className="mb-2">Select a file to edit</p>
-                    <p className="text-xs opacity-60">Cmd+S to save</p>
-                  </div>
-                </div>
+                <FolderPageView
+                  folderId={activeWorkspace.id}
+                  folderName={activeWorkspace.name}
+                  onRename={async (newName) => {
+                    await handleRenameWorkspace(newName);
+                  }}
+                  onDirtyChange={(isDirty) => {
+                    setFolderDirtyIds((prev) => {
+                      const next = new Set(prev);
+                      if (isDirty) {
+                        next.add(`workspace:${activeWorkspace.id}`);
+                      } else {
+                        next.delete(`workspace:${activeWorkspace.id}`);
+                      }
+                      if (next.size === prev.size && [...next].every((id) => prev.has(id))) return prev;
+                      return next;
+                    });
+                  }}
+                  childNodes={nodes.filter((n) => n.parent_id === null).map((n) => ({ id: n.id, name: n.name, type: n.type }))}
+                  onOpenNode={handleOpenNode}
+                  onCreateFile={handleCreateFileInFolder}
+                  onCreateFolder={handleCreateFolderInFolder}
+                  onUploadFiles={handleUploadFiles}
+                  onUploadMedia={handleUploadMedia}
+                  onGetMediaUrl={handleGetMediaUrl}
+                  parentId={null}
+                  initialBlocks={folderBlocks[`workspace:${activeWorkspace.id}`] as any}
+                  onSaveBlocks={(blocks) => handleSaveFolderBlocks(activeWorkspace.id, blocks)}
+                />
               )
             ) : sharedNodeId && !sharedFileData ? (
               // Loading state for shared file
@@ -6410,12 +6707,35 @@ ${diffs}`;
                 </div>
               </div>
             ) : (
-              <div className="absolute inset-0 flex items-center justify-center text-zinc-400">
-                <div className="text-center">
-                  <p className="mb-2">Select a file to edit</p>
-                  <p className="text-xs opacity-60">Cmd+S to save</p>
-                </div>
-              </div>
+              <FolderPageView
+                folderId={activeWorkspace.id}
+                folderName={activeWorkspace.name}
+                onRename={async (newName) => {
+                  await handleRenameWorkspace(newName);
+                }}
+                onDirtyChange={(isDirty) => {
+                  setFolderDirtyIds((prev) => {
+                    const next = new Set(prev);
+                    if (isDirty) {
+                      next.add(`workspace:${activeWorkspace.id}`);
+                    } else {
+                      next.delete(`workspace:${activeWorkspace.id}`);
+                    }
+                    if (next.size === prev.size && [...next].every((id) => prev.has(id))) return prev;
+                    return next;
+                  });
+                }}
+                childNodes={nodes.filter((n) => n.parent_id === null).map((n) => ({ id: n.id, name: n.name, type: n.type }))}
+                onOpenNode={handleOpenNode}
+                onCreateFile={handleCreateFileInFolder}
+                onCreateFolder={handleCreateFolderInFolder}
+                onUploadFiles={handleUploadFiles}
+                onUploadMedia={handleUploadMedia}
+                onGetMediaUrl={handleGetMediaUrl}
+                parentId={null}
+                initialBlocks={folderBlocks[`workspace:${activeWorkspace.id}`] as any}
+                onSaveBlocks={(blocks) => handleSaveFolderBlocks(activeWorkspace.id, blocks)}
+              />
             )}
 
             {reviewOverlayOpen && pendingChanges.length > 0 && (

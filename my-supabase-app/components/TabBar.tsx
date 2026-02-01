@@ -5,7 +5,7 @@ import { getFileIcon, FileIcons } from "./fileIcons";
 type Tab = {
   id: string;
   title: string;
-  type?: "file" | "folder";
+  type?: "file" | "folder" | "workspace";
 };
 
 type TabBarProps = {
@@ -46,7 +46,7 @@ export function TabBar({ tabs, activeId, onSelect, onClose, onShare, onDownload,
         {tabs.map((tab) => {
           const isActive = tab.id === activeId;
           const isDirty = dirtyIds?.has(tab.id);
-          const FileIcon = tab.type === "folder" ? FileIcons.Folder : getFileIcon(tab.title);
+          const FileIcon = tab.type === "workspace" ? FileIcons.Folder : tab.type === "folder" ? FileIcons.Folder : getFileIcon(tab.title);
           return (
             <div
               key={tab.id}

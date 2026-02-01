@@ -600,9 +600,20 @@ export function FileTree({
         case "v": // Paste
           if (clipboard && clipboard.nodeIds.length > 0) {
             e.preventDefault();
-            // Paste at the same level as the copied item (same parent)
-            const firstClipboardNode = nodeMap.get(clipboard.nodeIds[0]);
-            const targetParentId = firstClipboardNode?.parent_id ?? null;
+            // Paste into selected folder, or same parent as selected file
+            let targetParentId: string | null = null;
+            if (selectedNodeIds.size > 0) {
+              const firstSelectedId = Array.from(selectedNodeIds)[0];
+              const selectedNode = nodeMap.get(firstSelectedId);
+              if (selectedNode) {
+                targetParentId = selectedNode.type === "folder" ? selectedNode.id : selectedNode.parent_id;
+              }
+            }
+            // Fallback: same parent as clipboard source
+            if (targetParentId === null && !selectedNodeIds.size) {
+              const firstClipboardNode = nodeMap.get(clipboard.nodeIds[0]);
+              targetParentId = firstClipboardNode?.parent_id ?? null;
+            }
 
             if (clipboard.operation === "cut") {
               onMoveNodes?.(clipboard.nodeIds, targetParentId);
