@@ -100,6 +100,7 @@ function BlockItem({
   onDelete,
   onInsertAfter,
   onFocus,
+  isFocused,
   focusRef,
   onMergeWithPrevious,
 }: {
@@ -108,6 +109,7 @@ function BlockItem({
   onDelete: () => void;
   onInsertAfter: (type?: BlockType) => void;
   onFocus: () => void;
+  isFocused: boolean;
   focusRef: React.RefObject<HTMLElement | null>;
   onMergeWithPrevious: (trailingContent: string) => void;
 }) {
@@ -533,7 +535,9 @@ function BlockItem({
       <div
         ref={setRef}
         contentEditable
-        data-placeholder={placeholder[block.type] ?? ""}
+        data-placeholder={
+          block.type === "paragraph" ? (isFocused ? placeholder[block.type] : "") : (placeholder[block.type] ?? "")
+        }
         className={`flex-1 outline-none ${headingClass[block.type] ?? headingClass.paragraph} empty:before:content-[attr(data-placeholder)] empty:before:text-zinc-300`}
         {...commonProps}
       />
@@ -576,9 +580,17 @@ export function FolderPageView({
   const folderNameRef = useRef(folderName);
 
   // ── Block state ──
-  const [blocks, setBlocks] = useState<Block[]>(initialBlocks ?? []);
+  // Filter out initial blocks that are all empty paragraphs (treat as no content)
+  const cleanInitialBlocks = (raw: Block[] | undefined): Block[] => {
+    const arr = raw ?? [];
+    if (arr.length === 0) return [];
+    const allEmptyParagraphs = arr.every((b) => b.type === "paragraph" && !b.content);
+    return allEmptyParagraphs ? [] : arr;
+  };
+
+  const [blocks, setBlocks] = useState<Block[]>(() => cleanInitialBlocks(initialBlocks));
   const blocksRef = useRef(blocks);
-  const initialBlocksJson = useRef(JSON.stringify(initialBlocks ?? []));
+  const initialBlocksJson = useRef(JSON.stringify(cleanInitialBlocks(initialBlocks)));
   const focusBlockId = useRef<string | null>(null);
   const blockRefs = useRef<Map<string, HTMLElement | null>>(new Map());
 
@@ -588,7 +600,7 @@ export function FolderPageView({
 
   // Sync initialBlocks when folderId changes
   useEffect(() => {
-    const newBlocks = initialBlocks ?? [];
+    const newBlocks = cleanInitialBlocks(initialBlocks);
     setBlocks(newBlocks);
     initialBlocksJson.current = JSON.stringify(newBlocks);
   }, [folderId]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -1216,12 +1228,11 @@ export function FolderPageView({
     return idx + itemIndex;
   };
 
-  // ── Empty-state click handler to add first block ──
-  const handleEmptyClick = useCallback(() => {
+  // ── Empty-state: ensure at least one block exists (no auto-focus) ──
+  useEffect(() => {
     if (blocks.length === 0) {
       const newBlock = createBlock("paragraph");
       setBlocks([newBlock]);
-      focusBlockId.current = newBlock.id;
     }
   }, [blocks.length]);
 
@@ -1274,10 +1285,39 @@ export function FolderPageView({
           </h1>
         )}
 
+        {/* Child nodes list */}
+        {mounted && sortedChildren.length > 0 && (
+          <div className="mt-6">
+            {sortedChildren.map((child) => {
+              const Icon =
+                child.type === "folder"
+                  ? FileIcons.Folder
+                  : getFileIcon(child.name);
+              return (
+                <div
+                  key={child.id}
+                  onClick={() => onOpenNode?.(child.id)}
+                  className="flex items-center gap-3 py-1.5 px-2 -mx-2 rounded cursor-pointer hover:bg-zinc-50 transition-colors group"
+                >
+                  <Icon className="w-5 h-5 flex-shrink-0" />
+                  <span className="text-[15px] text-zinc-900 truncate">
+                    {child.name}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
         {/* Block editor area */}
-        <div className="mt-4 min-h-[200px]" onClick={handleEmptyClick}>
+        <div className="min-h-[200px]" onClick={(e) => {
+          if (e.target === e.currentTarget && blocks.length > 0) {
+            const lastBlock = blocks[blocks.length - 1];
+            const el = blockRefs.current.get(lastBlock.id);
+            if (el) el.focus();
+          }
+        }}>
           {blocks.map((block, index) => {
-            const refObj = { current: null as HTMLElement | null };
             return (
               <div key={block.id} className="relative">
                 {/* Numbered list index */}
@@ -1295,6 +1335,7 @@ export function FolderPageView({
                     onDelete={() => deleteBlock(block.id)}
                     onInsertAfter={(type) => insertBlockAfter(block.id, type)}
                     onFocus={() => setFocusedBlockId(block.id)}
+                    isFocused={focusedBlockId === block.id}
                     focusRef={{
                       get current() { return blockRefs.current.get(block.id) ?? null; },
                       set current(el) { blockRefs.current.set(block.id, el); },
@@ -1306,12 +1347,6 @@ export function FolderPageView({
             );
           })}
 
-          {/* Empty state placeholder */}
-          {blocks.length === 0 && (
-            <div className="text-zinc-300 text-[15px] cursor-text select-none py-1">
-              テキストを入力するか、「/」でコマンドを選択...
-            </div>
-          )}
         </div>
 
         {/* Slash command menu */}
@@ -1373,30 +1408,6 @@ export function FolderPageView({
               <span>「/{slashFilter || "フィルター"}」と入力してください</span>
               <span>esc</span>
             </div>
-          </div>
-        )}
-
-        {/* Child nodes list */}
-        {mounted && sortedChildren.length > 0 && (
-          <div className="mt-6 pt-4 border-t border-zinc-100">
-            {sortedChildren.map((child) => {
-              const Icon =
-                child.type === "folder"
-                  ? FileIcons.Folder
-                  : getFileIcon(child.name);
-              return (
-                <div
-                  key={child.id}
-                  onClick={() => onOpenNode?.(child.id)}
-                  className="flex items-center gap-3 py-1.5 px-2 -mx-2 rounded cursor-pointer hover:bg-zinc-50 transition-colors group"
-                >
-                  <Icon className="w-5 h-5 flex-shrink-0 text-zinc-500" />
-                  <span className="text-[15px] text-zinc-900 truncate">
-                    {child.name}
-                  </span>
-                </div>
-              );
-            })}
           </div>
         )}
       </div>
